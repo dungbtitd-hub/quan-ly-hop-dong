@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.spec
+.venv/
+venv/
+# Khóa bí mật của nhà phát triển không bao giờ được đưa lên kho mã
+*.key
+NhatKyCapKey.csv
