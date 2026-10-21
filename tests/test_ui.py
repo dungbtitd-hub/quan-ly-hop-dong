@@ -314,3 +314,77 @@ def test_director_wipes_accountant_machine(qtbot, tmp_path, vendor, ctx, monkeyp
     ctx.acc.cancel_wipe_orders()
     assert ctx.acc.pending_wipe_orders() == []
     kt2.close()
+
+
+def _bang_ke(path):
+    """Bảng kê mua vào kiểu mẫu quản trị: tiêu đề ở dòng 3, dòng nhóm 1 / 5, dòng 'Số dòng ='."""
+    from datetime import datetime
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Báo cáo"
+    ws.append(["BẢNG KÊ HÓA ĐƠN, CHỨNG TỪ HÀNG HÓA, DỊCH VỤ MUA VÀO (MẪU QUẢN TRỊ)"])
+    ws.append(["Quý 2 năm 2026"])
+    ws.append([None, "Số hóa đơn", "Ngày hóa đơn", "Tên người bán", "Mã số thuế người bán", "Mặt hàng",
+               "Giá trị HHDV mua vào chưa có thuế", "Thuế suất", "Thuế GTGT", "TK thuế"])
+    ws.append(["Nhóm HHDV mua vào : 1. Hàng hoá, dịch vụ dùng riêng cho SXKD chịu thuế GTGT (2 )", None, None, None,
+               None, None, 277600, None, 22208])
+    ws.append([None, "1285718", datetime(2026, 4, 30), "CÔNG TY CỔ PHẦN GIAO THÔNG SỐ VIỆT NAM", 109266456,
+               "Cước đường bộ 30K90317", 94699, "10 %", 7576])
+    ws.append([None, "5945912", "30/06/2026", "TỔNG CÔNG TY CỔ PHẦN BƯU CHÍNH VIETTEL", "0104093672",
+               "Cước chuyển phát", 182901, 0.08, 14632])
+    ws.append(["Nhóm HHDV mua vào : 5. Hàng hóa, dịch vụ không phải tổng hợp trên tờ khai 01/GTGT (3 )", None, None,
+               None, None, None, 1220652])
+    ws.append([None, "727227", datetime(2026, 4, 2), "CÔNG TY ĐIỆN LỰC GIA LÂM", "0100101114-009",
+               "Điện tiêu thụ tháng 3/2026", 320652, "0 %", 0])
+    ws.append([None, "1397065", datetime(2026, 4, 19), "CÔNG TY TNHH MTV PETROLIMEX HÀ NỘI", None,
+               "Xăng Ron 95 mức 5", 900000, "KCT", 0])                        # thiếu MST
+    ws.append([None, "727227", datetime(2026, 4, 2), "CÔNG TY ĐIỆN LỰC GIA LÂM", "0100101114-009",
+               "Điện tiêu thụ tháng 3/2026", 320652, "0 %", 0])                  # lặp lại trong file
+    ws.append([None, "Số dòng = 5", None, None, None, None, 1498251, None, 22208])
+    wb.save(path)
+    return path
+
+
+def test_in_invoices_from_excel_bang_ke(qtbot, ctx, tmp_path, monkeypatch):
+    from qlhd.core import in_invoice_excel
+    from qlhd.ui import invoices_page
+    from qlhd.ui.invoices_page import CHOOSE, BatchInvoiceDialog, InvoicesPage
+
+    rows = in_invoice_excel.read_workbook(_bang_ke(tmp_path / "bang_ke.xlsx"))
+    assert [r.values["SoHoaDonGoc"] for r in rows] == ["1285718", "5945912", "727227", "1397065", "727227"]
+    first, second, power = rows[0].values, rows[1].values, rows[2].values
+    assert first["MaThueNCC"] == "0109266456" and first["NhomThue"] == "Chịu thuế" and first["ThueSuat"] == "10%"
+    assert first["GiaTriSauThue"] == 102275 and second["NgayNhanHD"] == "2026-06-30" and second["ThueSuat"] == "8%"
+    assert power["NhomThue"] == "Không chịu thuế" and power["ThueSuat"] == "0%"
+    assert rows[3].errors == ["Thiếu Mã số thuế người bán"]
+    # file mẫu của phần mềm đọc lại được
+    tpl = in_invoice_excel.write_template(tmp_path / "mau.xlsx")
+    assert in_invoice_excel.read_workbook(tpl)[0].values["TenNhaCungCap"].startswith("CÔNG TY CỔ PHẦN GIAO THÔNG")
+
+    page = InvoicesPage(ctx, "vao")
+    qtbot.addWidget(page)
+    items = page.excel_items(rows)
+    assert all(it["values"]["MaHopDong"] == CHOOSE for it in items)          # không đoán bừa hợp đồng
+    assert [it["status"] for it in items] == ["moi", "moi", "moi", "moi", "da_co"]
+    dlg = BatchInvoiceDialog(page, items=items, source="bang_ke.xlsx")
+    qtbot.addWidget(dlg)
+    shown = []
+    monkeypatch.setattr(invoices_page, "error", lambda _p, text, *a: shown.append(text))
+    monkeypatch.setattr(invoices_page, "info", lambda _p, text, *a: shown.append(text))
+    dlg._save()
+    assert "thiếu thông tin" in shown[-1]                       # dòng thiếu MST chặn lưu
+    dlg.table.item(3, 0).setCheckState(invoices_page.Qt.Unchecked)
+    dlg._save()
+    assert "Chưa chọn hợp đồng" in shown[-1]                    # phải chọn hợp đồng / mua trực tiếp
+    dlg.bulk_contract.set_value(None)
+    dlg._apply_contract()
+    dlg._save()
+    assert shown[-1] == "Đã nhập 3 hóa đơn."
+    saved = {r["SoHoaDonGoc"]: r for r in ctx.cs.in_invoices()}
+    assert saved["727227"]["NhomThue"] == "Không chịu thuế" and saved["5945912"]["VAT"] == 14632
+    # nhập lại cùng file: tất cả đã có
+    again = page.excel_items(in_invoice_excel.read_workbook(tmp_path / "bang_ke.xlsx"))
+    assert [it["status"] for it in again] == ["da_co", "da_co", "da_co", "moi", "da_co"]

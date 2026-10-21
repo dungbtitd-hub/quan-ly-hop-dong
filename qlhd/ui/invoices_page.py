@@ -8,13 +8,14 @@ from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ..core import invoice_match, pdf_invoice, xml_invoice
+from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
 from ..core.contracts import INVOICE_KINDS, TAX_GROUPS, ValidationError, guess_tax_group, rate_from_amounts
+from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import payment_dialog
 from . import style
-from .widgets import (Combo, DataTable, EditCombo, FormDialog, button, confirm, error, hint, info, page_title,
-                      run_safely, toolbar)
+from .widgets import (Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, error, hint, info,
+                      page_title, run_safely, toolbar)
 
 
 CHOOSE = "__chon_hop_dong__"
@@ -86,6 +87,10 @@ class InvoicesPage(QWidget):
         btns = [b_add, b_file, b_edit, b_del, b_open]
         b_add.setEnabled(add_ok)
         b_file.setEnabled(add_ok)
+        if kind == "vao":
+            b_xlsx = button("Nhập từ Excel…", self.add_from_excel)
+            b_xlsx.setEnabled(add_ok)
+            btns[2:2] = [b_xlsx, button("Tải file Excel mẫu", self.save_excel_template)]
         b_edit.setEnabled(ctx.can(self.feature, "Sua"))
         b_del.setEnabled(ctx.can(self.feature, "Xoa"))
         if kind == "ra":
@@ -260,6 +265,55 @@ class InvoicesPage(QWidget):
         if self._save(values, contract_hint=m.note, must_choose=not m.ma, suggested=m.goi_y):
             self.refresh()
 
+    def save_excel_template(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Lưu file mẫu", "Mau_nhap_hoa_don_dau_vao.xlsx", "Excel (*.xlsx)")
+        if path and run_safely(self, in_invoice_excel.write_template, path):
+            info(self, f"Đã lưu file mẫu:\n{path}\n\nCó thể nhập thẳng bảng kê hóa đơn mua vào đã có, "
+                       "không bắt buộc dùng file mẫu.")
+
+    def add_from_excel(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn file Excel hóa đơn đầu vào / bảng kê mua vào", "",
+                                              "Excel (*.xlsx *.xlsm *.xls)")
+        if not path:
+            return
+        password = None
+        while True:
+            try:
+                rows = in_invoice_excel.read_workbook(path, password)
+                break
+            except FileNeedsPassword as e:
+                password = ask_secret(self, "File Excel có mật khẩu", str(e))
+                if password is None:
+                    return
+            except ValidationError as e:
+                return error(self, str(e))
+            except Exception as e:  # noqa: BLE001 - file hỏng / không phải Excel
+                return error(self, f"Không đọc được file Excel: {e}")
+        dlg = BatchInvoiceDialog(self, items=self.excel_items(rows), source=Path(path).name)
+        if dlg.exec() == QDialog.Accepted:
+            self.refresh()
+
+    def excel_items(self, rows) -> list[dict]:
+        """Dòng đọc từ Excel → dòng của màn hình nhập nhiều hóa đơn (kèm gắn hợp đồng)."""
+        items = []
+        for r in rows:
+            v, notes, goi_y = dict(r.values), [], []
+            if r.so_hop_dong:
+                h = in_invoice_excel.find_contract(self.ctx.db, r.so_hop_dong)
+                v["MaHopDong"] = h["Ma"] if h else CHOOSE
+                if not h:
+                    notes.append(f"Chưa có hợp đồng đầu vào số {r.so_hop_dong} trong phần mềm, hãy chọn.")
+            else:
+                m = invoice_match.match_contract(self.ctx.db, "vao", {"MSTNguoiBan": v.get("MaThueNCC"),
+                                                                    "VanBan": v.get("MatHang")})
+                v["MaHopDong"] = m.ma or CHOOSE
+                goi_y = m.goi_y
+                notes.append(m.note)
+            items.append({"path": None, "file": f"{r.sheet} – dòng {r.line}", "values": v, "status": "moi",
+                          "errors": list(r.errors), "notes": r.errors + r.notes + notes, "goi_y": goi_y})
+        mark_duplicates(self.ctx, "vao", items)
+        return items
+
     def company_mst(self) -> str:
         row = self.ctx.acc.license()
         return row["MaCongTy"] if row else ""
@@ -299,32 +353,68 @@ class InvoicesPage(QWidget):
         QDesktopServices.openUrl(QUrl.fromLocalFile(r["DuongDanTep"]))
 
 
+def mark_duplicates(ctx, kind: str, items: list[dict]) -> None:
+    """Hóa đơn đã có trong phần mềm hoặc lặp lại trong lượt nhập: đánh dấu bỏ qua."""
+    seen = set()
+    for it in items:
+        if it["status"] != "moi":
+            continue
+        v = it["values"]
+        key = (v.get("MaThueNCC", ""), (v.get("KyHieuHD") or "").upper(),
+               (v.get("SoHoaDon") or v.get("SoHoaDonGoc") or "").lstrip("0"))
+        if ctx.cs.invoice_exists(kind, v):
+            it["status"] = "da_co"
+            it["notes"].insert(0, "Đã có trong phần mềm, bỏ qua.")
+        elif key in seen:
+            it["status"] = "da_co"
+            it["notes"].insert(0, "Trùng với hóa đơn khác trong lượt nhập này, bỏ qua.")
+        seen.add(key)
+
+
+REQUIRED_IN = (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Tên người bán"), ("MaThueNCC", "MST người bán"),
+               ("NgayNhanHD", "Ngày hóa đơn"))
+
+
 class BatchInvoiceDialog(QDialog):
     """Nhập nhiều hóa đơn XML / PDF một lượt: mỗi file một dòng, chọn hợp đồng ngay trên dòng.
     Dòng chưa nhận ra hợp đồng phải được chọn rồi mới lưu; hóa đơn đã có thì bỏ qua."""
 
-    def __init__(self, page: InvoicesPage, paths: list[str]):
+    def __init__(self, page: InvoicesPage, paths: list[str] | None = None, items: list[dict] | None = None,
+                 source: str = ""):
         super().__init__(page)
         self.page = page
         self.kind = page.kind
         self.ctx = page.ctx
-        self.setWindowTitle("Nhập nhiều hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào"))
-        self.resize(1250, 600)
+        self.source = source
+        self.setWindowTitle("Nhập nhiều hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào")
+                            + (f" từ {source}" if source else ""))
+        self.resize(1250, 640)
         self.items: list[dict] = []
-        self._read(paths)
+        if items is not None:
+            self.items = items
+        else:
+            self._read(paths or [])
         lay = QVBoxLayout(self)
         self.summary = hint("")
         lay.addWidget(self.summary)
         if self.kind == "vao":
             row = QHBoxLayout()
-            row.addWidget(QLabel("Người mua hàng cho các hóa đơn đã tích:"))
+            row.addWidget(QLabel("Cho các dòng đã tích:  Hợp đồng"))
+            self.bulk_contract = Combo([("(Không có – mua hàng trực tiếp)", None)] + [
+                (f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
+                for h in self.ctx.cs.contracts("Đầu vào")])
+            self.bulk_contract.setMinimumWidth(260)
+            row.addWidget(self.bulk_contract)
+            row.addWidget(button("Áp dụng", self._apply_contract))
+            row.addSpacing(16)
+            row.addWidget(QLabel("Người mua hàng"))
             self.buyer = EditCombo(page.buyers())
-            self.buyer.setMinimumWidth(220)
+            self.buyer.setMinimumWidth(200)
             row.addWidget(self.buyer)
             row.addWidget(button("Áp dụng", self._apply_buyer))
             row.addStretch(1)
             lay.addLayout(row)
-        self.cols = ["Nhập", "File", "Số hóa đơn", "Ngày", "Người mua" if self.kind == "ra" else "Tên người bán",
+        self.cols = ["Nhập", "File" if items is None else "Dòng trong file", "Số hóa đơn", "Ngày", "Người mua" if self.kind == "ra" else "Tên người bán",
                      "MST", "Mặt hàng", "Sau thuế", "Hợp đồng"] + (["Nhóm thuế", "Người mua hàng"]
                                                                   if self.kind == "vao" else []) + ["Ghi chú"]
         self.table = QTableWidget(len(self.items), len(self.cols))
@@ -351,7 +441,6 @@ class BatchInvoiceDialog(QDialog):
     # ---- đọc file
     def _read(self, paths):
         mst = self.page.company_mst()
-        seen = set()
         for path in paths:
             it = {"path": path, "file": Path(path).name, "values": {}, "notes": [], "status": "moi", "goi_y": []}
             try:
@@ -361,21 +450,13 @@ class BatchInvoiceDialog(QDialog):
                 self.items.append(it)
                 continue
             values, notes = invoice_values(self.kind, d, path, mst)
-            key = (values.get("MaThueNCC", ""), (values.get("KyHieuHD") or "").upper(),
-                   (values.get("SoHoaDon") or values.get("SoHoaDonGoc") or "").lstrip("0"))
-            if self.ctx.cs.invoice_exists(self.kind, values):
-                it["status"] = "da_co"
-                notes.insert(0, "Đã có trong phần mềm, bỏ qua.")
-            elif key in seen:
-                it["status"] = "da_co"
-                notes.insert(0, "Trùng với file khác trong lượt nhập này, bỏ qua.")
-            seen.add(key)
             m = invoice_match.match_contract(self.ctx.db, self.kind, d)
             values["MaHopDong"] = m.ma if m.ma else CHOOSE
             if not m.ma:
                 notes.append(m.note or "Chưa nhận ra hợp đồng, hãy chọn.")
             it.update(values=values, notes=notes, goi_y=m.goi_y)
             self.items.append(it)
+        mark_duplicates(self.ctx, self.kind, self.items)
 
     def _contract_options(self, suggested):
         if self.kind == "ra":
@@ -438,7 +519,8 @@ class BatchInvoiceDialog(QDialog):
         missing = [i for i in new if self.items[i]["values"].get("MaHopDong") == CHOOSE]
         for i in range(len(self.items)):
             st = self.items[i]["status"]
-            color = QColor(style.color("danger_soft" if st == "loi" else "total_bg" if st == "da_co"
+            bad = st == "loi" or (st == "moi" and self.items[i].get("errors"))
+            color = QColor(style.color("danger_soft" if bad else "total_bg" if st == "da_co"
                                        else "warn_soft" if i in missing else "card"))
             for j in range(len(self.cols)):
                 item = self.table.item(i, j)
@@ -446,7 +528,8 @@ class BatchInvoiceDialog(QDialog):
                     item.setBackground(color)
         n_old = sum(1 for it in self.items if it["status"] == "da_co")
         n_err = sum(1 for it in self.items if it["status"] == "loi")
-        msg = f"Đã đọc {len(self.items)} file: {len(new)} hóa đơn sẽ nhập"
+        n_bad = sum(1 for i in new if self.items[i].get("errors"))
+        msg = (f"Đã đọc {len(self.items)} " + ("dòng" if self.source else "file") + f": {len(new)} hóa đơn sẽ nhập")
         if n_old:
             msg += f", {n_old} hóa đơn đã có (bỏ qua)"
         if n_err:
@@ -454,9 +537,18 @@ class BatchInvoiceDialog(QDialog):
         msg += "."
         if missing:
             msg += f" Còn {len(missing)} hóa đơn (tô vàng) chưa chọn hợp đồng."
+        if n_bad:
+            msg += f" {n_bad} dòng (tô đỏ) thiếu thông tin bắt buộc: bấm Sửa chi tiết để bổ sung hoặc bỏ tích."
         self.summary.setText(msg)
         self.ok.setText(f"Nhập {len(new)} hóa đơn")
         self.ok.setEnabled(bool(new))
+
+    def _apply_contract(self):
+        ma = self.bulk_contract.value()
+        for i in range(len(self.items)):
+            if self._checked(i):
+                self.table.cellWidget(i, 8).set_value(ma)
+        self._update()
 
     def _apply_buyer(self):
         name = self.buyer.value()
@@ -484,12 +576,19 @@ class BatchInvoiceDialog(QDialog):
                          validate=_check_chosen)
         if dlg.exec() == QDialog.Accepted:
             it["values"].update(dlg.values())
+            if self.kind == "vao" and it.get("errors"):
+                it["errors"] = [f"Thiếu {label}" for key, label in REQUIRED_IN if not it["values"].get(key)]
+                it["notes"] = list(it["errors"])
             self._fill()
             self.table.selectRow(i)
             self._update()
 
     def _save(self):
         rows = [i for i in range(len(self.items)) if self._checked(i)]
+        bad = [self.items[i]["file"] for i in rows if self.items[i].get("errors")]
+        if bad:
+            return error(self, "Các dòng sau thiếu thông tin bắt buộc:\n" + "\n".join(bad[:15]) +
+                         "\n\nBấm Sửa chi tiết để bổ sung (dòng tô đỏ), hoặc bỏ tích dòng đó.")
         missing = [self.items[i]["file"] for i in rows if self._collect(i).get("MaHopDong") == CHOOSE]
         if missing:
             return error(self, "Chưa chọn hợp đồng cho các hóa đơn:\n" + "\n".join(missing[:15]) +
@@ -504,7 +603,8 @@ class BatchInvoiceDialog(QDialog):
             except ValidationError as e:
                 errors.append(f"{self.items[i]['file']}: {e}")
         self.ctx.db.log(self.ctx.user["TenDangNhap"] if self.ctx.user else None,
-                        "Nhập nhiều hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào"), f"{saved} hóa đơn")
+                        "Nhập nhiều hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào"),
+                        f"{saved} hóa đơn" + (f" từ {self.source}" if self.source else ""))
         if errors:
             error(self, f"Đã nhập {saved} hóa đơn. Không lưu được:\n" + "\n".join(errors[:20]))
         else:

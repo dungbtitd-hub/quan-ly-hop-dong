@@ -146,7 +146,6 @@ QTableWidget, QTableView, QTreeWidget, QListWidget {
     background: $card; alternate-background-color: $alt_row; border: 1px solid $border; border-radius: 8px;
     gridline-color: $border; selection-background-color: $sel; selection-color: $sel_text; outline: 0;
 }
-QTableView::item { padding: 2px 6px; border: none; }
 QHeaderView { background: transparent; }
 QHeaderView::section {
     background: $header_bg; border: none; border-bottom: 1px solid $border; border-right: 1px solid $border;

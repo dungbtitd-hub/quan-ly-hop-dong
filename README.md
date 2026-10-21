@@ -62,6 +62,10 @@ Tạo trang Release: tab **Actions** → *Kiểm thử và đóng gói* → **Ru
 - Hóa đơn đầu ra và đầu vào đọc từ **XML** hoặc **PDF** hóa đơn điện tử (PDF có lớp chữ; bản scan nhập tay),
   **chọn nhiều file cùng lúc**; nhập Excel cảnh báo trùng số hóa đơn. Hóa đơn đầu vào có Tên người bán, Mặt hàng,
   Thuế suất, nhóm chịu thuế / không chịu thuế GTGT, Người mua hàng, Số tham chiếu sao kê.
+- **Hóa đơn đầu vào từ Excel** (*Hóa đơn đầu vào → Nhập từ Excel*): dùng file mẫu hoặc nhập thẳng bảng kê hóa đơn
+  mua vào đã có. Phần mềm tự tìm dòng tiêu đề, nhận cột theo tên, hiểu dòng "Nhóm HHDV mua vào : 1. / 5." để xếp nhóm
+  thuế, bỏ qua dòng tổng; đọc được file có mật khẩu. Màn hình xem trước báo hóa đơn đã có / lặp lại, dòng thiếu thông
+  tin, và bắt chọn hợp đồng (chọn hàng loạt được) khi không xác định được.
   Phần mềm tự gắn hóa đơn với hợp đồng đầu ra / đầu vào theo số hợp đồng ghi trên hóa đơn (kèm kiểm tra MST đối tác);
   không nhận ra được thì bắt người nhập tự chọn hợp đồng (có gợi ý), không điền sẵn để tránh gắn nhầm.
 - Thanh toán nhiều lần cho mỗi hợp đồng / hóa đơn; tình trạng thu tiền tự tính.
