@@ -6,7 +6,7 @@ import hmac
 import json
 import os
 import platform
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import licensing as lic
 from .db import Database, now_iso
@@ -17,6 +17,8 @@ FEATURES = ("HopDong", "HoaDonDauRa", "HoaDonDauVao", "BaoCao", "DanhMuc", "SaoL
 ACTIONS = ("Xem", "Them", "Sua", "Xoa", "Xuat")
 MAX_FAILED = 5
 LOCK_MINUTES = 15
+WARN_DAYS = 30          # báo trước khi bản quyền hết hạn
+CLOCK_TOLERANCE_DAYS = 1
 PBKDF2_ITER = 200_000
 
 
@@ -83,6 +85,98 @@ class AccountService:
             return None
         return lic.verify_director_key(lic_row["KeyGiamDoc"], None, self.vendor_pub)
 
+    # ---- thời hạn bản quyền
+    def license_status(self, today: date | None = None) -> dict:
+        """trang_thai: 'vinh_vien' | 'con_han' | 'sap_het' | 'het_han' | 'lui_ngay' | 'loi'."""
+        today = today or date.today()
+        try:
+            payload = self.director_payload()
+        except lic.LicenseError:
+            return {"trang_thai": "loi", "han": None, "con_lai": None,
+                    "thong_bao": "Key bản quyền trên máy này không hợp lệ với phiên bản phần mềm này."}
+        if payload is None:
+            return {"trang_thai": "chua_kich_hoat", "han": None, "con_lai": None, "thong_bao": ""}
+        han = lic.key_expiry(payload)
+        if not han:
+            return {"trang_thai": "vinh_vien", "han": None, "con_lai": None, "thong_bao": ""}
+        seen = self.db.setting("ngay_lon_nhat")
+        if seen and today < date.fromisoformat(seen) - timedelta(days=CLOCK_TOLERANCE_DAYS):
+            return {"trang_thai": "lui_ngay", "han": han, "con_lai": None,
+                    "thong_bao": f"Ngày giờ máy tính ({today:%d/%m/%Y}) đang lùi về trước ngày phần mềm đã chạy "
+                                 f"({date.fromisoformat(seen):%d/%m/%Y}). Hãy chỉnh lại ngày giờ cho đúng."}
+        if not seen or today.isoformat() > seen:
+            self.db.set_setting("ngay_lon_nhat", today.isoformat())
+        con_lai = (date.fromisoformat(han) - today).days
+        han_vn = date.fromisoformat(han).strftime("%d/%m/%Y")
+        if con_lai < 0:
+            return {"trang_thai": "het_han", "han": han, "con_lai": con_lai,
+                    "thong_bao": f"Bản quyền đã hết hạn ngày {han_vn}. Dữ liệu vẫn được giữ nguyên; "
+                                 "gia hạn để tiếp tục sử dụng."}
+        if con_lai <= WARN_DAYS:
+            return {"trang_thai": "sap_het", "han": han, "con_lai": con_lai,
+                    "thong_bao": f"Bản quyền còn {con_lai} ngày (hết hạn {han_vn}). Liên hệ nhà phát triển để gia hạn."}
+        return {"trang_thai": "con_han", "han": han, "con_lai": con_lai, "thong_bao": ""}
+
+    def license_usable(self, today: date | None = None) -> bool:
+        return self.license_status(today)["trang_thai"] in ("vinh_vien", "con_han", "sap_het")
+
+    def renewal_request(self) -> str:
+        """Mã yêu cầu gia hạn: cùng Mã máy và khóa công ty đã kích hoạt, nên Key mới khớp dữ liệu cũ."""
+        row = self.license()
+        if not row or not row["KhoaBiMatCongTy"]:
+            raise AuthError("Chỉ máy Giám đốc chính mới gửi yêu cầu gia hạn cho nhà phát triển.")
+        pub = lic.public_to_b64(lic.private_from_b64(row["KhoaBiMatCongTy"]).public_key())
+        return lic.make_request(self.machine_id, pub)
+
+    def renew(self, key: str, today: date | None = None) -> dict:
+        """Nhận Key gia hạn. Máy Giám đốc chính: Key mới của nhà phát triển cho đúng máy này.
+        Máy nhân viên / máy Giám đốc phụ: Key Giám đốc hiện hành (Giám đốc sao chép gửi sang)."""
+        row = self.license()
+        if not row:
+            raise AuthError("Máy chưa kích hoạt.")
+        key = "".join(key.split())
+        if key.startswith("QLHD-NV:"):
+            try:
+                key = json.loads(lic.b64d(key.split(":", 1)[1]))["key"]
+            except (ValueError, KeyError):
+                raise AuthError("Mã không đúng định dạng.") from None
+        primary = bool(row["KhoaBiMatCongTy"])
+        new = lic.verify_director_key(key, self.machine_id if primary else None, self.vendor_pub)
+        try:
+            old_pub = lic.verify_director_key(row["KeyGiamDoc"], None, self.vendor_pub)["pub"]
+        except lic.LicenseError:
+            old_pub = None
+        if primary:
+            own = lic.public_to_b64(lic.private_from_b64(row["KhoaBiMatCongTy"]).public_key())
+            if new["pub"] != own:
+                raise AuthError("Key không khớp với Mã yêu cầu gia hạn của máy này.")
+        elif new["pub"] != old_pub:
+            raise AuthError("Key này thuộc công ty / máy Giám đốc khác.")
+        if lic.is_expired(new, today):
+            raise AuthError("Key này cũng đã hết hạn.")
+        self.db.execute("UPDATE BanQuyen SET KeyGiamDoc = ?, TenCongTy = ?, MaCongTy = ?, SoTaiKhoanToiDa = ?"
+                        " WHERE Id = 1", (key, new["cty"], new["mst"], new["toi_da"]))
+        self.db.log(None, "Gia hạn bản quyền", lic.expiry_text(new))
+        return new
+
+    def maybe_update_key(self, key: str) -> bool:
+        """Nhận Key Giám đốc đi kèm gói đồng bộ: chỉ thay khi cùng công ty và hạn dài hơn."""
+        row = self.license()
+        if not row or row["KhoaBiMatCongTy"] or "".join(key.split()) == row["KeyGiamDoc"]:
+            return False
+        try:
+            new = lic.verify_director_key(key, None, self.vendor_pub)
+            cur = lic.verify_director_key(row["KeyGiamDoc"], None, self.vendor_pub)
+        except lic.LicenseError:
+            return False
+        if new["pub"] != cur["pub"]:
+            return False
+        longer = lambda p: lic.key_expiry(p) or "9999-12-31"  # noqa: E731
+        if longer(new) <= longer(cur):
+            return False
+        self.renew(key)
+        return True
+
     def is_primary_director_machine(self) -> bool:
         row = self.license()
         return bool(row and row["LoaiKichHoat"] == "Giám đốc" and row["KhoaBiMatCongTy"])
@@ -100,6 +194,8 @@ class AccountService:
         if self.is_activated():
             raise AuthError("Máy này đã được kích hoạt.")
         payload = lic.verify_director_key(key, self.machine_id, self.vendor_pub)
+        if lic.is_expired(payload):
+            raise AuthError("Key đã hết hạn.")
         priv = self.db.setting("khoa_cong_ty_tam")
         if not priv or lic.public_to_b64(lic.private_from_b64(priv).public_key()) != payload["pub"]:
             raise AuthError("Key không khớp với Mã yêu cầu của máy này. Hãy gửi lại Mã yêu cầu hiện tại.")
@@ -116,6 +212,8 @@ class AccountService:
         if self.is_activated():
             raise AuthError("Máy này đã được kích hoạt.")
         payload, director = lic.verify_member_code(code, self.machine_id, self.vendor_pub)
+        if lic.is_expired(director):
+            raise AuthError("Bản quyền của công ty đã hết hạn, Giám đốc cần gia hạn trước.")
         _check_password_rule(password)
         loai = "Giám đốc (máy phụ)" if payload["vai_tro"] == "Giám đốc" else "Nhân viên"
         self.db.execute(
@@ -199,6 +297,9 @@ class AccountService:
         return self.db.query("SELECT * FROM NguoiDung ORDER BY MaNguoiDung")
 
     def login(self, username: str, password: str):
+        st = self.license_status()
+        if st["trang_thai"] in ("het_han", "lui_ngay", "loi"):
+            raise AuthError(st["thong_bao"])
         u = self.db.one("SELECT * FROM NguoiDung WHERE TenDangNhap = ?", (username,))
         if not u:
             raise AuthError("Sai tên đăng nhập hoặc mật khẩu.")

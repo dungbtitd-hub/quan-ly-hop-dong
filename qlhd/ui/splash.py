@@ -1,6 +1,8 @@
 """Màn hình thông tin nhà phát triển: hiện mỗi lần khởi chạy và trong Trợ giúp → Giới thiệu."""
 from __future__ import annotations
 
+from datetime import date
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -71,8 +73,14 @@ class DeveloperInfo(QWidget):
         line.setStyleSheet("color:#c9d6e8;")
         lay.addWidget(line)
         lic = QLabel(license_text)
-        lic.setStyleSheet("color:#1e7b34; font-weight:600;" if "Đã kích hoạt" in license_text
-                          else "color:#9c5700; font-weight:600;")
+        lic.setWordWrap(True)
+        if "HẾT HIỆU LỰC" in license_text:
+            color = "#a32020"
+        elif "Đã kích hoạt" in license_text and "(còn" not in license_text:
+            color = "#1e7b34"
+        else:
+            color = "#9c5700"
+        lic.setStyleSheet(f"color:{color}; font-weight:600;")
         lay.addWidget(lic)
         cp = QLabel(copyright_line())
         cp.setStyleSheet("color:#5a6b80;")
@@ -84,7 +92,13 @@ def license_text(acc) -> str:
     if not row:
         return "Bản quyền: Chưa kích hoạt"
     loai = "Doanh nghiệp" if row["LoaiKichHoat"] == "Giám đốc" else row["LoaiKichHoat"]
-    return f"Bản quyền: Đã kích hoạt · {loai} · vĩnh viễn · {row['TenCongTy']}"
+    st = acc.license_status()
+    if st["trang_thai"] in ("het_han", "lui_ngay", "loi"):
+        return f"Bản quyền: HẾT HIỆU LỰC · {row['TenCongTy']}"
+    han = "vĩnh viễn" if not st["han"] else "đến " + date.fromisoformat(st["han"]).strftime("%d/%m/%Y")
+    if st["trang_thai"] == "sap_het":
+        han += f" (còn {st['con_lai']} ngày)"
+    return f"Bản quyền: Đã kích hoạt · {loai} · {han} · {row['TenCongTy']}"
 
 
 class SplashDialog(QDialog):

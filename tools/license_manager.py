@@ -16,9 +16,10 @@ Dòng lệnh:
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -75,18 +76,31 @@ def find_default_key() -> Path | None:
     return None
 
 
-def issue(key_path: Path, request: str, company: str, mst: str, accounts: int) -> str:
+TERMS = [("Vĩnh viễn", 0), ("1 năm", 12), ("2 năm", 24), ("3 năm", 36), ("5 năm", 60), ("6 tháng", 6),
+         ("Đến ngày…", -1)]
+
+
+def add_months(d: date, months: int) -> date:
+    """Ngày cuối cùng còn hiệu lực khi cấp N tháng tính từ d (VD 21/10/2026 + 12 tháng → 20/10/2027)."""
+    y, m = divmod(d.month - 1 + months, 12)
+    y += d.year
+    m += 1
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return date(y, m, day) - timedelta(days=1)
+
+
+def issue(key_path: Path, request: str, company: str, mst: str, accounts: int, het_han: str | None = None) -> str:
     priv = load_key(key_path)
-    key = lic.issue_director_key(priv, request, company, mst, accounts)
+    key = lic.issue_director_key(priv, request, company, mst, accounts, het_han)
     payload = lic.verify_director_key(key, vendor_pub=priv.public_key())
     log = Path(key_path).with_name("NhatKyCapKey.csv")
     new = not log.exists()
     with log.open("a", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["Thời điểm", "Mã Key", "Công ty", "MST", "Mã máy", "Số tài khoản", "Key"])
+            w.writerow(["Thời điểm", "Mã Key", "Công ty", "MST", "Mã máy", "Số tài khoản", "Thời hạn", "Key"])
         w.writerow([datetime.now().isoformat(timespec="seconds"), payload["id"], company, mst, payload["may"],
-                    accounts, key])
+                    accounts, lic.expiry_text(payload), key])
     return key
 
 
@@ -102,9 +116,10 @@ VENDOR_KEY_LABEL = "{label}"
 
 # ---------------------------------------------------------------- giao diện
 def run_gui() -> int:
-    from PySide6.QtCore import QSettings
-    from PySide6.QtWidgets import (QApplication, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                                   QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget)
+    from PySide6.QtCore import QDate, QSettings
+    from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QFileDialog, QFormLayout, QHBoxLayout,
+                                   QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+                                   QVBoxLayout, QWidget)
 
     from qlhd.developer import DEVELOPER
     from qlhd.ui.style import WIN7_QSS
@@ -147,6 +162,19 @@ def run_gui() -> int:
     form.addRow("Tên công ty khách hàng", company)
     form.addRow("Mã số thuế", mst)
     form.addRow("Số tài khoản nhân viên tối đa", accounts)
+    term = QComboBox()
+    for label, months in TERMS:
+        term.addItem(label, months)
+    until = QDateEdit(QDate.currentDate().addYears(1))
+    until.setCalendarPopup(True)
+    until.setDisplayFormat("dd/MM/yyyy")
+    until.setMinimumDate(QDate.currentDate())
+    term_info = QLabel("")
+    term_row = QHBoxLayout()
+    term_row.addWidget(term)
+    term_row.addWidget(until)
+    term_row.addWidget(term_info, 1)
+    form.addRow("Thời hạn bản quyền", term_row)
     lay.addLayout(form)
     info_lbl = QLabel("")
     info_lbl.setObjectName("Hint")
@@ -159,6 +187,24 @@ def run_gui() -> int:
     lay.addWidget(out)
     copy = QPushButton("Sao chép Key")
     lay.addWidget(copy)
+
+    def chosen_expiry() -> str | None:
+        months = term.currentData()
+        if months == 0:
+            return None
+        if months == -1:
+            return until.date().toPython().isoformat()
+        return add_months(date.today(), months).isoformat()
+
+    def on_term_changed():
+        until.setVisible(term.currentData() == -1)
+        han = chosen_expiry()
+        term_info.setText("Không giới hạn thời gian" if not han
+                          else "Dùng được đến hết ngày " + date.fromisoformat(han).strftime("%d/%m/%Y"))
+
+    term.currentIndexChanged.connect(on_term_changed)
+    until.dateChanged.connect(on_term_changed)
+    on_term_changed()
 
     def on_request_changed():
         try:
@@ -190,7 +236,7 @@ def run_gui() -> int:
             return QMessageBox.warning(w, "Thiếu thông tin", "Chọn tệp khóa, nhập tên công ty và MST.")
         try:
             k = issue(Path(key_path.text()), request.toPlainText(), company.text().strip(), mst.text().strip(),
-                      accounts.value())
+                      accounts.value(), chosen_expiry())
         except Exception as e:  # noqa: BLE001
             return QMessageBox.warning(w, "Lỗi", str(e))
         out.setPlainText(k)
@@ -222,6 +268,8 @@ def main(argv=None) -> int:
     b.add_argument("--company", required=True)
     b.add_argument("--mst", required=True)
     b.add_argument("--accounts", type=int, default=10)
+    b.add_argument("--han", default=None, help="Ngày hết hạn YYYY-MM-DD (bỏ trống = vĩnh viễn)")
+    b.add_argument("--thang", type=int, default=0, help="Thời hạn tính bằng tháng kể từ hôm nay")
     args = ap.parse_args(argv)
     if args.cmd == "init":
         if getattr(sys, "frozen", False):
@@ -237,7 +285,8 @@ def main(argv=None) -> int:
             print("Đã ghi vào", PUBKEY_FILE)
         return 0
     if args.cmd == "issue":
-        print(issue(Path(args.key), args.request, args.company, args.mst, args.accounts))
+        han = args.han or (add_months(date.today(), args.thang).isoformat() if args.thang else None)
+        print(issue(Path(args.key), args.request, args.company, args.mst, args.accounts, han))
         return 0
     return run_gui()
 

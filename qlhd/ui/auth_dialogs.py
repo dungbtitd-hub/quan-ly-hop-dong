@@ -191,3 +191,62 @@ class ChangePasswordDialog(QDialog):
             return error(self, str(e))
         info(self, "Đã đổi mật khẩu.")
         self.accept()
+
+
+class RenewDialog(QDialog):
+    """Gia hạn bản quyền. Máy Giám đốc chính: gửi Mã yêu cầu gia hạn cho nhà phát triển, dán Key mới.
+    Máy nhân viên / Giám đốc phụ: dán Key Giám đốc hiện hành (Giám đốc sao chép ở mục Tài khoản)."""
+
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.setWindowTitle("Gia hạn bản quyền")
+        self.setMinimumWidth(620)
+        lay = QVBoxLayout(self)
+        st = ctx.acc.license_status()
+        if st["thong_bao"]:
+            msg = QLabel(st["thong_bao"])
+            msg.setWordWrap(True)
+            msg.setStyleSheet("color:#a32020; font-weight:600;" if st["trang_thai"] in ("het_han", "lui_ngay", "loi")
+                              else "color:#9c5700; font-weight:600;")
+            lay.addWidget(msg)
+        primary = ctx.acc.is_primary_director_machine()
+        if primary:
+            lay.addWidget(hint(f"Bước 1: gửi Mã yêu cầu gia hạn dưới đây cho {DEVELOPER['ten']} "
+                               f"(Zalo {DEVELOPER['dien_thoai']}, email {DEVELOPER['email']})."))
+            req = QPlainTextEdit(ctx.acc.renewal_request())
+            req.setReadOnly(True)
+            req.setFixedHeight(64)
+            lay.addWidget(req)
+            b = QPushButton("Sao chép Mã yêu cầu gia hạn")
+            b.clicked.connect(lambda: (copy_text(req.toPlainText()), info(self, "Đã sao chép Mã yêu cầu gia hạn.")))
+            lay.addWidget(b, 0, Qt.AlignLeft)
+            lay.addWidget(hint("Bước 2: dán Key gia hạn nhận được rồi bấm Gia hạn. Dữ liệu, tài khoản giữ nguyên. "
+                               "Sau đó gửi một gói đồng bộ cho các máy nhân viên để các máy đó tự gia hạn theo."))
+        else:
+            lay.addWidget(hint("Máy này dùng bản quyền của Giám đốc. Sau khi Giám đốc gia hạn: nhận một gói đồng bộ "
+                               "từ máy Giám đốc (tự gia hạn), hoặc dán Key Giám đốc mới (Giám đốc vào Tài khoản → "
+                               "Sao chép Key cho máy nhân viên) vào ô dưới đây."))
+        self.key = QPlainTextEdit()
+        self.key.setPlaceholderText("QLHD-KEY:…")
+        self.key.setFixedHeight(70)
+        lay.addWidget(self.key)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        ok = QPushButton("Gia hạn")
+        ok.setObjectName("Primary")
+        ok.clicked.connect(self._renew)
+        close = QPushButton("Đóng")
+        close.clicked.connect(self.reject)
+        row.addWidget(ok)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+    def _renew(self):
+        try:
+            new = self.ctx.acc.renew(self.key.toPlainText())
+        except (AuthError, LicenseError) as e:
+            return error(self, str(e))
+        from ..core.licensing import expiry_text
+        info(self, f"Đã gia hạn bản quyền: {expiry_text(new)}.")
+        self.accept()

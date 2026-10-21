@@ -91,6 +91,12 @@ class MainWindow(QMainWindow):
         self._menus()
         self.statusBar().showMessage(f"Máy: {ctx.sync.machine_name()}  ·  Mã máy: {ctx.machine_id}  ·  "
                                      f"Dữ liệu: {ctx.data_dir}")
+        st = ctx.acc.license_status()
+        if st["trang_thai"] == "sap_het":
+            warn = QLabel("  " + st["thong_bao"] + "  ")
+            warn.setStyleSheet("color:#9c5700; font-weight:600;")
+            self.statusBar().addPermanentWidget(warn)
+            QTimer.singleShot(300, lambda: info(self, st["thong_bao"], "Sắp hết hạn bản quyền"))
         self.last_activity = time.monotonic()
         QApplication.instance().installEventFilter(_ActivityFilter(self))
         self.idle_timer = QTimer(self)
@@ -136,10 +142,18 @@ class MainWindow(QMainWindow):
             a.triggered.connect(fn)
             m.addAction(a)
         h = self.menuBar().addMenu("Trợ giúp")
+        a = QAction("Bản quyền / Gia hạn…", self)
+        a.triggered.connect(self._renew)
+        h.addAction(a)
         a = QAction("Giới thiệu / Nhà phát triển", self)
         a.triggered.connect(lambda: AboutDialog(self.ctx.acc, self.ctx.machine_id, self).exec())
         h.addAction(a)
         h.addAction(QAction(f"Phiên bản {__version__}", self))
+
+    def _renew(self):
+        from .auth_dialogs import RenewDialog
+
+        RenewDialog(self.ctx, self).exec()
 
     def _backup(self):
         p = self.ctx.backup_now("thu-cong")

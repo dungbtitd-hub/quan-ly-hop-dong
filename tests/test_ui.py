@@ -115,3 +115,29 @@ def test_invoice_unmatched_requires_choice(qtbot, ctx):
         _check_chosen(dlg.values())
     combo.set_value(hd["Ma"])
     _check_chosen(dlg.values())
+
+
+def test_renew_dialog_and_splash_term(qtbot, tmp_path, vendor):
+    from datetime import date, timedelta
+
+    from PySide6.QtWidgets import QLabel, QPlainTextEdit
+
+    from qlhd.context import AppContext
+    from qlhd.ui.auth_dialogs import RenewDialog
+    from qlhd.ui.splash import license_text
+
+    priv, pub = vendor
+    c = AppContext(tmp_path / "d2", vendor_pub=pub)
+    han = (date.today() + timedelta(days=12)).isoformat()
+    c.acc.activate_director(lic.issue_director_key(priv, c.acc.activation_request(), "Cty X", "0101", 3, han),
+                            "giamdoc", "GD", "matkhau123")
+    assert "còn 12 ngày" in license_text(c.acc)
+    dlg = RenewDialog(c)
+    qtbot.addWidget(dlg)
+    assert "còn 12 ngày" in " ".join(lbl.text() for lbl in dlg.findChildren(QLabel))
+    req = dlg.findChildren(QPlainTextEdit)[0].toPlainText()
+    new_han = (date.today() + timedelta(days=400)).isoformat()
+    dlg.key.setPlainText(lic.issue_director_key(priv, req, "Cty X", "0101", 3, new_han))
+    c.acc.renew(dlg.key.toPlainText())
+    assert c.acc.license_status()["han"] == new_han
+    c.close()

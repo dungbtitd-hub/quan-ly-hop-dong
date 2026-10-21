@@ -97,12 +97,17 @@ def read_request(request: str) -> dict:
 
 
 def issue_director_key(vendor_priv: Ed25519PrivateKey, request: str, ten_cong_ty: str,
-                       mst: str, so_tai_khoan: int) -> str:
+                       mst: str, so_tai_khoan: int, het_han: str | None = None) -> str:
+    """het_han: ngày cuối cùng được dùng (YYYY-MM-DD), None = vĩnh viễn."""
     req = read_request(request)
+    if het_han:
+        het_han = date.fromisoformat(het_han).isoformat()
+        if het_han < date.today().isoformat():
+            raise LicenseError("Ngày hết hạn đã qua.")
     payload = {
         "loai": "giam_doc", "id": str(uuid.uuid4()), "cty": ten_cong_ty, "mst": mst,
         "may": req["may"], "pub": req["pub"], "toi_da": int(so_tai_khoan),
-        "ngay": date.today().isoformat(), "han": None,
+        "ngay": date.today().isoformat(), "han": het_han,
     }
     return "QLHD-KEY:" + _sign(vendor_priv, payload)
 
@@ -115,6 +120,21 @@ def verify_director_key(key: str, machine_id: str | None = None,
     if machine_id is not None and payload["may"] != machine_id:
         raise LicenseError("Key này được cấp cho máy khác.")
     return payload
+
+
+def key_expiry(payload: dict) -> str | None:
+    """Ngày cuối cùng Key còn hiệu lực (YYYY-MM-DD), None = vĩnh viễn."""
+    return payload.get("han") or None
+
+
+def is_expired(payload: dict, today: date | None = None) -> bool:
+    han = key_expiry(payload)
+    return bool(han) and (today or date.today()).isoformat() > han
+
+
+def expiry_text(payload: dict) -> str:
+    han = key_expiry(payload)
+    return "vĩnh viễn" if not han else "đến " + date.fromisoformat(han).strftime("%d/%m/%Y")
 
 
 # ---- Bước 2: Giám đốc cấp mã cho nhân viên (hoặc máy Giám đốc thứ hai)

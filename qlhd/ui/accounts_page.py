@@ -122,9 +122,12 @@ class AccountsPage(QWidget):
         primary = ctx.acc.is_primary_director_machine()
         b_issue = button("Cấp mã kích hoạt…", self.issue, "Primary")
         b_revoke = button("Thu hồi mã đã chọn", self.revoke, "Danger")
+        b_renew = button("Gia hạn bản quyền…", self.renew)
+        b_copy_key = button("Sao chép Key cho máy nhân viên", self.copy_key)
         b_issue.setEnabled(primary)
         b_revoke.setEnabled(primary)
-        lay.addLayout(toolbar(b_issue, b_revoke, "stretch"))
+        b_copy_key.setEnabled(primary)
+        lay.addLayout(toolbar(b_issue, b_revoke, "stretch", b_renew, b_copy_key))
         if not primary:
             lay.addWidget(hint("Máy này là máy Giám đốc thứ hai: chỉ xem danh sách; việc cấp và thu hồi mã làm trên "
                                "máy Giám đốc chính."))
@@ -150,7 +153,22 @@ class AccountsPage(QWidget):
         self.users.set_rows(self.ctx.acc.users())
         lic = self.ctx.acc.license()
         used = sum(1 for r in rows if r["TrangThai"] == "Đang dùng")
-        self.quota.setText(f"Đã dùng {used}/{lic['SoTaiKhoanToiDa']} tài khoản theo Key của {lic['TenCongTy']}.")
+        st = self.ctx.acc.license_status()
+        han = ("vĩnh viễn" if not st["han"] else
+               f"đến {st['han'][8:10]}/{st['han'][5:7]}/{st['han'][:4]} (còn {st['con_lai']} ngày)")
+        self.quota.setText(f"Đã dùng {used}/{lic['SoTaiKhoanToiDa']} tài khoản theo Key của {lic['TenCongTy']}. "
+                           f"Thời hạn bản quyền: {han}.")
+
+    def renew(self):
+        from .auth_dialogs import RenewDialog
+
+        if RenewDialog(self.ctx, self).exec() == QDialog.Accepted:
+            self.refresh()
+
+    def copy_key(self):
+        copy_text(self.ctx.acc.license()["KeyGiamDoc"])
+        info(self, "Đã sao chép Key Giám đốc hiện hành. Máy nhân viên đã hết hạn dán Key này ở màn hình Gia hạn "
+                   "bản quyền. Máy còn dùng được thì chỉ cần nhận một gói đồng bộ từ máy này là tự gia hạn.")
 
     def issue(self):
         dlg = IssueCodeDialog(self.ctx, self)

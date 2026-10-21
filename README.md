@@ -80,6 +80,12 @@ python tools/license_manager.py                        # Phần mềm cấp mã 
 
 ### Khóa bản quyền
 
+Key Giám đốc được ký số Ed25519 và mang **thời hạn** do nhà phát triển chọn khi cấp (vĩnh viễn, 6 tháng, 1/2/3/5 năm
+hoặc đến một ngày). Còn 30 ngày phần mềm báo trước; hết hạn thì không đăng nhập được nhưng dữ liệu giữ nguyên.
+Gia hạn: Giám đốc vào **Trợ giúp → Bản quyền / Gia hạn** (hoặc Tài khoản → Gia hạn bản quyền), gửi *Mã yêu cầu gia hạn*,
+dán Key mới. Máy nhân viên tự gia hạn khi nhận gói đồng bộ từ máy Giám đốc, hoặc dán Key Giám đốc
+(Tài khoản → Sao chép Key cho máy nhân viên). Lùi ngày giờ máy tính để kéo dài hạn sẽ bị phát hiện.
+
 Key Giám đốc được ký số Ed25519. Phần mềm chỉ chứa **khóa công khai** (`qlhd/core/vendor_pubkey.py`);
 **khóa bí mật** nằm ở máy nhà phát triển, không bao giờ đưa lên kho mã (`*.key` đã nằm trong `.gitignore`).
 

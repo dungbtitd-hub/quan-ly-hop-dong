@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from . import APP_NAME
 from .context import AppContext
-from .ui.auth_dialogs import ActivationDialog, LoginDialog
+from .ui.auth_dialogs import ActivationDialog, LoginDialog, RenewDialog
 from .ui.main_window import MainWindow
 from .ui.splash import SplashDialog
 from .ui.style import WIN7_QSS
@@ -52,6 +52,7 @@ def self_test() -> int:
         ctx = AppContext(d)
         SplashDialog(ctx.acc, seconds=0).grab()
         ActivationDialog(ctx).grab()
+        ctx.acc.license_status()
         ctx.db.close()
     return 0
 
@@ -66,6 +67,9 @@ def main(argv=None) -> int:
         SplashDialog(ctx.acc).exec()
         if not ctx.acc.is_activated():
             if ActivationDialog(ctx).exec() != QDialog.Accepted:
+                return 0
+        while not ctx.acc.license_usable():
+            if RenewDialog(ctx).exec() != QDialog.Accepted:
                 return 0
         while True:
             ctx.user = None

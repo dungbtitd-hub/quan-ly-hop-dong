@@ -116,6 +116,16 @@ def test_license_manager_cli(tmp_path, capsys):
     m.acc.activate_director(key, "gd", "GD", PASSWORD)
     assert m.acc.license()["SoTaiKhoanToiDa"] == 3
     assert (tmp_path / "NhatKyCapKey.csv").exists()
+    # cấp có thời hạn 12 tháng
+    m2 = Machine(tmp_path, "kh2", pub)
+    assert lm.main(["issue", "--key", str(key_file), "--request", m2.acc.activation_request(), "--company", "Cty",
+                    "--mst", "0109", "--thang", "12"]) == 0
+    m2.acc.activate_director(capsys.readouterr().out.strip(), "gd", "GD", PASSWORD)
+    from datetime import date
+    assert m2.acc.license_status()["han"] == lm.add_months(date.today(), 12).isoformat()
+    assert lm.add_months(date(2026, 1, 31), 1) == date(2026, 2, 27)
+    assert lm.add_months(date(2026, 10, 21), 12) == date(2027, 10, 20)
+    assert "Thời hạn" in (tmp_path / "NhatKyCapKey.csv").read_text(encoding="utf-8-sig")
 
 
 def test_bundled_vendor_key_matches_dev_key():

@@ -237,6 +237,9 @@ class SyncService:
             tok = self.accounts.signed_revocations()
             if tok:
                 body["revocations"] = tok
+            lic_row = self.accounts.license()
+            if lic_row and lic_row["KhoaBiMatCongTy"]:
+                body["key_giam_doc"] = lic_row["KeyGiamDoc"]   # để máy nhận tự cập nhật khi Giám đốc gia hạn
         loai = "thuong"
         if finance is not None:
             if user["VaiTro"] != "Giám đốc":
@@ -443,6 +446,11 @@ class SyncService:
         except Exception:
             self.db.conn.rollback()
             raise
+        if pkg.body.get("key_giam_doc") and self.accounts is not None and self.accounts.is_activated():
+            try:
+                result["gia_han"] = self.accounts.maybe_update_key(pkg.body["key_giam_doc"])
+            except Exception as e:  # noqa: BLE001
+                result["loi_chi_tiet"].append(f"Key gia hạn: {e}")
         if pkg.body.get("revocations") and self.accounts is not None and self.accounts.is_activated():
             try:
                 result["thu_hoi"] = self.accounts.apply_revocations(pkg.body["revocations"])
