@@ -75,14 +75,13 @@ python tools/license_manager.py                        # Phần mềm cấp mã 
 Key Giám đốc được ký số Ed25519. Phần mềm chỉ chứa **khóa công khai** (`qlhd/core/vendor_pubkey.py`);
 **khóa bí mật** nằm ở máy nhà phát triển, không bao giờ đưa lên kho mã (`*.key` đã nằm trong `.gitignore`).
 
-Khóa đang dùng là khóa **THỬ NGHIỆM (DEV)**. Trước khi phát hành chính thức:
+Phần mềm đang dùng khóa **CHÍNH THỨC** (tạo 21/10/2026). Key Giám đốc cấp bằng khóa thử nghiệm (DEV) trước đó
+không còn dùng được. Cấp Key: mở Phần mềm cấp mã (`CapMaBanQuyen`), chọn tệp `KHOA_BI_MAT_NHA_PHAT_TRIEN.key`,
+dán Mã yêu cầu của khách hàng.
 
-```bash
-python tools/license_manager.py init --out KHOA_BI_MAT_NHA_PHAT_TRIEN.key --write-app
-```
-
-rồi commit `qlhd/core/vendor_pubkey.py`, cất tệp `.key` an toàn (mất tệp này thì không cấp được Key mới; lộ tệp này thì
-người khác cấp được Key). Mọi Key đã cấp được ghi vào `NhatKyCapKey.csv` cạnh tệp khóa.
+Giữ tệp `.key` an toàn và có bản sao dự phòng ngoài máy: mất tệp này thì không cấp được Key mới (phải đổi khóa và
+phát hành lại phần mềm); lộ tệp này thì người khác cấp được Key. Mọi Key đã cấp được ghi vào `NhatKyCapKey.csv`
+cạnh tệp khóa. Chỉ khi cần thay khóa mới chạy lại `python tools/license_manager.py init --write-app`.
 
 ### Cấu trúc mã
 

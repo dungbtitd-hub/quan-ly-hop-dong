@@ -1,7 +1,8 @@
-"""Khóa công khai của Nhà phát triển, dùng để kiểm tra Key Giám đốc.
+"""Khóa công khai CHÍNH THỨC của Nhà phát triển, dùng để kiểm tra Key Giám đốc.
 
-Thay bằng khóa công khai do `python tools/license_manager.py init` in ra trước khi phát hành chính thức.
-Khóa hiện tại là khóa THỬ NGHIỆM (DEV).
+Tạo ngày 21/10/2026 bằng `python tools/license_manager.py init --write-app`. Khóa bí mật đi cặp
+(KHOA_BI_MAT_NHA_PHAT_TRIEN.key) chỉ nằm ở nhà phát triển, không bao giờ đưa lên kho mã.
+Đổi khóa này thì mọi Key Giám đốc đã cấp trước đó hết hiệu lực.
 """
-VENDOR_PUBKEY = "fBiEDOA6hVcQIarCFDsiewQxciG8AjfS6bDHLYUw9Pc"
-VENDOR_KEY_LABEL = "DEV"
+VENDOR_PUBKEY = "uKLbpQySy4hsxovGWjHUg5pH_1TZkGTWC7Fc3hLy55E"
+VENDOR_KEY_LABEL = "PHAT-HANH"
