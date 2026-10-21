@@ -100,8 +100,14 @@ def test_license_manager_cli(tmp_path, capsys):
     lm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(lm)
     key_file = tmp_path / "vendor.key"
-    assert lm.main(["init", "--out", str(key_file)]) == 0
+    with pytest.raises(SystemExit):                       # cặp khóa cố định: phải xác nhận mới thay
+        lm.main(["init", "--out", str(key_file)])
+    assert lm.main(["init", "--out", str(key_file), "--thay-khoa-chinh-thuc"]) == 0
     pub = lic.public_from_b64(capsys.readouterr().out.strip().splitlines()[-1].split(":")[-1].strip())
+    # tệp khóa không khớp khóa chính thức của phần mềm thì không cấp được Key
+    with pytest.raises(lm.WrongKeyError):
+        lm.issue(key_file, "x", "Cty", "0109", 1)
+    lm.official_pub = lambda: pub
     m = Machine(tmp_path, "kh", pub)
     req = m.acc.activation_request()
     assert lm.main(["issue", "--key", str(key_file), "--request", req, "--company", "Cty KH", "--mst", "0109",

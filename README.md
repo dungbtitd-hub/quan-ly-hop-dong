@@ -6,18 +6,26 @@ Chạy trên Windows và macOS. Nhà phát triển: **Công ty cổ phần Công
 
 ## Tải bản cài đặt
 
-GitHub tự kiểm thử và đóng gói mỗi khi có thay đổi (tab **Actions** → lần chạy mới nhất → mục *Artifacts*):
+Bản chính thức nằm ở trang **Releases** của kho mã:
 
 | File | Dùng cho |
 |---|---|
-| `QuanLyHopDong-Windows` (.exe) | Máy Windows 10/11, chạy trực tiếp, không cần cài |
-| `QuanLyHopDong-macOS` (.zip chứa .app) | MacBook chip Apple (M1 trở lên) |
-| `CapMaBanQuyen-…-NOI-BO` | Phần mềm cấp Key của nhà phát triển, **không** gửi cho khách hàng |
+| `QuanLyHopDong-CaiDat-Windows-<phiên bản>.exe` | Bộ cài Windows 10/11 (64-bit): cài vào máy, tạo biểu tượng Desktop và Start menu, có gỡ cài đặt |
+| `QuanLyHopDong-macOS-<phiên bản>.dmg` | MacBook chip Apple (M1 trở lên): mở file, kéo *QuanLyHopDong* vào *Applications* |
 
-Khi gắn thẻ phiên bản (VD `v1.0.0`), GitHub tạo trang *Release* có sẵn file Windows và macOS để tải.
+Phần mềm cấp Key của nhà phát triển (`CapMaBanQuyen-…-NOI-BO`) chỉ có ở tab **Actions** → lần chạy mới nhất →
+mục *Artifacts*, **không** gửi cho khách hàng.
 
-Lần đầu mở trên macOS: bấm chuột phải vào ứng dụng → **Open** → **Open** (ứng dụng chưa ký số Apple).
-Trên Windows, nếu SmartScreen cảnh báo: **More info** → **Run anyway**.
+Bộ cài không cần quyền quản trị (cài cho người dùng hiện tại; muốn cài cho mọi người dùng thì chọn khi cài) và
+không cần cài thêm Python hay thư viện nào. Gỡ cài đặt không xóa dữ liệu. GitHub tự cài thử bộ cài trên máy sạch,
+chạy thử rồi gỡ ra ở mỗi lần build.
+
+Phần mềm chưa ký số, nên lần đầu cài:
+- Windows: nếu SmartScreen cảnh báo, bấm **More info** → **Run anyway**.
+- macOS: mở ứng dụng, nếu bị chặn vào **System Settings → Privacy & Security** → **Open Anyway**.
+
+Tạo trang Release: tab **Actions** → *Kiểm thử và đóng gói* → **Run workflow**, tích *Tạo trang Release*
+(thẻ phiên bản lấy từ `qlhd/__init__.py`).
 
 ## Quy trình sử dụng
 
@@ -76,12 +84,14 @@ Key Giám đốc được ký số Ed25519. Phần mềm chỉ chứa **khóa c�
 **khóa bí mật** nằm ở máy nhà phát triển, không bao giờ đưa lên kho mã (`*.key` đã nằm trong `.gitignore`).
 
 Phần mềm đang dùng khóa **CHÍNH THỨC** (tạo 21/10/2026). Key Giám đốc cấp bằng khóa thử nghiệm (DEV) trước đó
-không còn dùng được. Cấp Key: mở Phần mềm cấp mã (`CapMaBanQuyen`), chọn tệp `KHOA_BI_MAT_NHA_PHAT_TRIEN.key`,
-dán Mã yêu cầu của khách hàng.
+không còn dùng được. Cấp Key: mở Phần mềm cấp mã (`CapMaBanQuyen`), chọn tệp `KHOA_BI_MAT_NHA_PHAT_TRIEN.key` (chỉ chọn một lần,
+phần mềm nhớ; hoặc để tệp cạnh `CapMaBanQuyen` / trong thư mục Tài liệu), dán Mã yêu cầu của khách hàng.
+Cặp khóa là **cố định**: phần mềm cấp mã chỉ nhận đúng tệp khóa khớp khóa công khai chính thức, không có chức năng
+tạo cặp khóa mới.
 
 Giữ tệp `.key` an toàn và có bản sao dự phòng ngoài máy: mất tệp này thì không cấp được Key mới (phải đổi khóa và
 phát hành lại phần mềm); lộ tệp này thì người khác cấp được Key. Mọi Key đã cấp được ghi vào `NhatKyCapKey.csv`
-cạnh tệp khóa. Chỉ khi cần thay khóa mới chạy lại `python tools/license_manager.py init --write-app`.
+cạnh tệp khóa. Chỉ khi buộc phải thay khóa mới chạy `python tools/license_manager.py init --write-app --thay-khoa-chinh-thuc` từ mã nguồn.
 
 ### Cấu trúc mã
 

@@ -54,8 +54,8 @@ jobs:
 
       - name: Đóng gói phần mềm Quản lý Hợp đồng
         run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then MODE="--onefile"; else MODE="--onedir"; fi
-          pyinstaller --noconfirm --clean --windowed $MODE \
+          echo "APP_VERSION=$(python -c 'import qlhd; print(qlhd.__version__)')" >> "$GITHUB_ENV"
+          pyinstaller --noconfirm --clean --windowed --onedir \
             --name QuanLyHopDong --icon assets/icon.png \
             --exclude-module tkinter run_app.py
 
@@ -69,21 +69,50 @@ jobs:
       - name: Chạy thử bản đóng gói
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            pwsh -Command '$p = Start-Process -FilePath dist/QuanLyHopDong.exe -ArgumentList "--self-test" -Wait -PassThru; exit $p.ExitCode'
+            pwsh -Command '$p = Start-Process -FilePath dist/QuanLyHopDong/QuanLyHopDong.exe -ArgumentList "--self-test" -Wait -PassThru; exit $p.ExitCode'
           else
             dist/QuanLyHopDong.app/Contents/MacOS/QuanLyHopDong --self-test
           fi
 
-      - name: Nén kết quả
+      - name: Tạo bộ cài đặt Windows (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          mkdir -p out
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp dist/QuanLyHopDong.exe out/QuanLyHopDong-Windows.exe
-            cp dist/CapMaBanQuyen.exe out/CapMaBanQuyen-Windows.exe
-          else
-            ditto -c -k --sequesterRsrc --keepParent dist/QuanLyHopDong.app out/QuanLyHopDong-macOS.zip
-            ditto -c -k --sequesterRsrc --keepParent dist/CapMaBanQuyen.app out/CapMaBanQuyen-macOS.zip
-          fi
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          New-Item -ItemType Directory -Force out | Out-Null
+          & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$PWD\dist\QuanLyHopDong" "/DOutDir=$PWD\out" installer\QuanLyHopDong.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item dist\CapMaBanQuyen.exe out\CapMaBanQuyen-Windows.exe
+
+      - name: Cài thử như máy mới, chạy thử, gỡ cài đặt (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem out\QuanLyHopDong-CaiDat-Windows-*.exe).FullName
+          $dir = "$env:RUNNER_TEMP\CaiThu"
+          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/DIR=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Cài đặt lỗi: $($p.ExitCode)" }
+          $env:QLHD_DATA_DIR = "$env:RUNNER_TEMP\DuLieuThu"
+          $p = Start-Process -FilePath "$dir\QuanLyHopDong.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Bản đã cài chạy thử lỗi: $($p.ExitCode)" }
+          $p = Start-Process -FilePath "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Gỡ cài đặt lỗi: $($p.ExitCode)" }
+          Get-ChildItem out
+
+      - name: Tạo bộ cài đặt macOS (.dmg) và chạy thử
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out dmg
+          cp -R dist/QuanLyHopDong.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "QuanLyHopDong" -srcfolder dmg -ov -format UDZO "out/QuanLyHopDong-macOS-$APP_VERSION.dmg"
+          hdiutil attach "out/QuanLyHopDong-macOS-$APP_VERSION.dmg" -mountpoint /tmp/qlhd-dmg -nobrowse
+          QLHD_DATA_DIR="$RUNNER_TEMP/dulieuthu" /tmp/qlhd-dmg/QuanLyHopDong.app/Contents/MacOS/QuanLyHopDong --self-test
+          hdiutil detach /tmp/qlhd-dmg
+          ditto -c -k --sequesterRsrc --keepParent dist/CapMaBanQuyen.app out/CapMaBanQuyen-macOS.zip
           ls -la out
 
       - uses: actions/upload-artifact@v4
