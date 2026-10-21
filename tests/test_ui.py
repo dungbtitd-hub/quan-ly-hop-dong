@@ -47,6 +47,8 @@ def test_splash_and_about_show_developer(qtbot, ctx):
 
 
 def test_main_window_pages(qtbot, ctx, tmp_path):
+    from PySide6.QtWidgets import QLabel
+
     from qlhd.ui.main_window import MainWindow
 
     win = MainWindow(ctx)
@@ -61,6 +63,13 @@ def test_main_window_pages(qtbot, ctx, tmp_path):
     win.finance_page.refresh()
     assert win.finance_page.main_view is not None
     win.finance_page._r_preview()
+    from qlhd.core import finance_import
+    from qlhd.ui.finance_page import FinanceImportDialog
+
+    tpl = finance_import.write_template(tmp_path / "mau_tc.xlsx", ctx.finance)
+    dlg = FinanceImportDialog(finance_import.read_workbook(tpl, ctx.finance))
+    qtbot.addWidget(dlg)
+    assert "3 dòng hợp lệ" in dlg.findChildren(QLabel)[0].text()
     win.finance_page.lock()
     assert ctx.finance is None
     # báo cáo

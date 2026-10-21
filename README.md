@@ -46,6 +46,9 @@ Trên Windows, nếu SmartScreen cảnh báo: **More info** → **Run anyway**.
   chỉ Giám đốc và Người quản lý. Thu tự lấy từ thanh toán hợp đồng; chi theo dự án hoặc văn phòng, khoản mục nhiều cấp;
   tồn quỹ; báo cáo ngày / tháng / quý / năm, tổng hợp chi, thu - chi theo dự án; Excel có mật khẩu mở file;
   xóa theo khoảng thời gian hoặc toàn bộ; tự khóa; Mã khôi phục.
+- Nhập hàng loạt **phiếu chi / phiếu thu khác từ Excel** (Thu chi → Sổ thu chi → *Nhập từ Excel*, chỉ khi đã mở khóa):
+  file mẫu riêng, đọc được file Excel có mật khẩu, xem trước dòng lỗi / trùng, tự thêm khoản mục mới,
+  tùy chọn xóa file Excel nguồn sau khi nhập.
 - Sao lưu tự động khi thoát (giữ 30 bản), sao lưu / khôi phục thủ công.
 
 ## Dữ liệu nằm ở đâu

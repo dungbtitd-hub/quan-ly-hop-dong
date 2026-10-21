@@ -1,6 +1,7 @@
 """Module Thu chi trên giao diện: mở khóa, sổ thu chi, khoản mục, quỹ, báo cáo, xóa dữ liệu, bảo mật."""
 from __future__ import annotations
 
+import os
 from datetime import date
 
 from PySide6.QtCore import Qt, Signal
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
                                QStackedWidget, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import finance as fin
+from ..core import finance_import
 from ..core.finance import FinanceError, FinanceStore
 from ..core.reports import FinanceReports, export_xlsx, fmt_date, fmt_money, period_range
 from .widgets import (Combo, DataTable, DateEdit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
@@ -194,6 +196,45 @@ class VoucherDialog(QDialog):
             self.noi_dung.setFocus()
 
 
+class FinanceImportDialog(QDialog):
+    def __init__(self, rows, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Xem trước phiếu thu chi nhập từ Excel")
+        self.resize(1100, 580)
+        lay = QVBoxLayout(self)
+        ok = [r for r in rows if r.ok]
+        chi = sum(r.values["SoTien"] for r in ok if r.values["LoaiThuChi"] == "Chi")
+        thu = sum(r.values["SoTien"] for r in ok if r.values["LoaiThuChi"] == "Thu")
+        lay.addWidget(hint(f"{len(ok)} dòng hợp lệ sẽ được lưu (chi {fmt_money(chi)} đ, thu khác {fmt_money(thu)} đ); "
+                           f"{len(rows) - len(ok)} dòng lỗi hoặc trùng sẽ bỏ qua."))
+        table = DataTable([("line", "Dòng", "int"), ("status", "Kết quả", "text"), ("Ngay", "Ngày", "date"),
+                           ("Loai", "Loại", "text"), ("TenDuAn", "Dự án", "text"), ("KhoanMuc", "Khoản mục", "text"),
+                           ("NoiDung", "Nội dung", "text"), ("SoTien", "Số tiền", "money"),
+                           ("errors", "Ghi chú", "text")])
+        data = []
+        for r in rows:
+            v = r.values
+            loai = v.get("LoaiThuChi") or ""
+            if loai == "Chi" and v.get("PhanLoaiChi"):
+                loai = f"Chi {v['PhanLoaiChi'].lower()}"
+            data.append({"line": r.line, "status": r.status, "Ngay": v.get("NgayPhatSinh"), "Loai": loai,
+                         "TenDuAn": v.get("TenDuAn") or "", "KhoanMuc": v.get("KhoanMuc"),
+                         "NoiDung": v.get("NoiDung"), "SoTien": v.get("SoTien") or 0,
+                         "errors": "; ".join(r.errors)})
+        table.set_rows(data)
+        lay.addWidget(table)
+        self.delete_source = QCheckBox("Xóa file Excel nguồn sau khi lưu (để số liệu thu chi không còn nằm ngoài "
+                                       "tệp mã hóa)")
+        lay.addWidget(self.delete_source)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(f"Lưu {len(ok)} dòng hợp lệ")
+        bb.button(QDialogButtonBox.Ok).setEnabled(bool(ok))
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+
 class FinancePage(QWidget):
     unlocked = Signal()
     locked = Signal()
@@ -360,11 +401,14 @@ class FinancePage(QWidget):
         b2 = button("Thêm phiếu thu khác", lambda: self._new("Thu"))
         b3 = button("Sửa", self._edit)
         b4 = button("Xóa phiếu đã chọn", self._delete, "Danger")
+        b5 = button("Nhập từ Excel…", self._import_excel)
+        b6 = button("Tải file Excel mẫu", self._save_template)
         b1.setEnabled(can_add)
         b2.setEnabled(can_add)
         b3.setEnabled(self.ctx.can("ThuChi", "Sua"))
         b4.setEnabled(self.ctx.can("ThuChi", "Xoa"))
-        lay.addLayout(toolbar(b1, b2, b3, b4, "stretch"))
+        b5.setEnabled(can_add)
+        lay.addLayout(toolbar(b1, b2, b3, b4, "stretch", b5, b6))
         lay.addLayout(toolbar(QLabel("Từ"), self.f_tu, QLabel("đến"), self.f_den, self.f_loai, self.f_text, "stretch"))
         self.ledger = DataTable(ENTRY_COLS, multi=True)
         self.ledger.activated_row.connect(lambda _: self._edit())
@@ -410,6 +454,45 @@ class FinancePage(QWidget):
         if confirm(self, f"Xóa vĩnh viễn {len(rows)} phiếu, tổng {fmt_money(sum(r['Thu'] + r['Chi'] for r in rows))} đ?"):
             self.ctx.finance.delete_vouchers([r["Ma"] for r in rows])
             self.reload()
+
+    def _save_template(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Lưu file Excel mẫu nhập thu chi", "Mau_nhap_thu_chi.xlsx",
+                                              "Excel (*.xlsx)")
+        if path:
+            finance_import.write_template(path, self.ctx.finance)
+            info(self, f"Đã lưu file mẫu:\n{path}\n\nSheet Danh mục liệt kê khoản mục, quỹ và dự án hiện có "
+                       f"(không có số tiền). Nên đặt mật khẩu mở file khi đã điền số liệu.")
+
+    def _import_excel(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn file Excel thu chi", "", "Excel (*.xlsx)")
+        if not path:
+            return
+        password = None
+        if finance_import.is_encrypted(path):
+            password = ask_secret(self, "Mật khẩu file", "File Excel có mật khẩu mở file. Nhập mật khẩu:")
+            if password is None:
+                return
+        rows = run_safely(self, finance_import.read_workbook, path, self.ctx.finance, password)
+        if not rows:
+            return
+        dlg = FinanceImportDialog(rows, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        res = finance_import.import_rows(self.ctx.finance, rows)
+        msg = (f"Đã lưu {res['Chi']} phiếu chi ({fmt_money(res['tong_chi'])} đ) và {res['Thu']} phiếu thu khác "
+               f"({fmt_money(res['tong_thu'])} đ).")
+        if res["khoan_muc_moi"]:
+            msg += f"\nĐã thêm {res['khoan_muc_moi']} khoản mục mới."
+        if res["loi"]:
+            msg += "\n\nKhông lưu được:\n" + "\n".join(res["loi"][:20])
+        if dlg.delete_source.isChecked():
+            try:
+                os.remove(path)
+                msg += "\n\nĐã xóa file Excel nguồn."
+            except OSError as e:
+                msg += f"\n\nKhông xóa được file Excel nguồn: {e}"
+        info(self, msg)
+        self.reload()
 
     # ---- khoản mục
     def _tab_categories(self) -> QWidget:
