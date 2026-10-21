@@ -1,0 +1,110 @@
+name: Kiểm thử và đóng gói
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: macos-latest
+            label: macOS (Apple Silicon)
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Cài thư viện
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Chạy kiểm thử
+        run: python -m pytest -q
+
+      - name: Đóng gói phần mềm Quản lý Hợp đồng
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then MODE="--onefile"; else MODE="--onedir"; fi
+          pyinstaller --noconfirm --clean --windowed $MODE \
+            --name QuanLyHopDong --icon assets/icon.png \
+            --exclude-module tkinter run_app.py
+
+      - name: Đóng gói Phần mềm cấp mã (chỉ dùng tại nhà phát triển)
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then MODE="--onefile"; else MODE="--onedir"; fi
+          pyinstaller --noconfirm --windowed $MODE --paths . \
+            --name CapMaBanQuyen --icon assets/icon.png \
+            --exclude-module tkinter tools/license_manager.py
+
+      - name: Chạy thử bản đóng gói
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -Command '$p = Start-Process -FilePath dist/QuanLyHopDong.exe -ArgumentList "--self-test" -Wait -PassThru; exit $p.ExitCode'
+          else
+            dist/QuanLyHopDong.app/Contents/MacOS/QuanLyHopDong --self-test
+          fi
+
+      - name: Nén kết quả
+        run: |
+          mkdir -p out
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp dist/QuanLyHopDong.exe out/QuanLyHopDong-Windows.exe
+            cp dist/CapMaBanQuyen.exe out/CapMaBanQuyen-Windows.exe
+          else
+            ditto -c -k --sequesterRsrc --keepParent dist/QuanLyHopDong.app out/QuanLyHopDong-macOS.zip
+            ditto -c -k --sequesterRsrc --keepParent dist/CapMaBanQuyen.app out/CapMaBanQuyen-macOS.zip
+          fi
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuanLyHopDong-${{ runner.os }}
+          path: out/QuanLyHopDong-*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CapMaBanQuyen-${{ runner.os }}-NOI-BO
+          path: out/CapMaBanQuyen-*
+          if-no-files-found: error
+
+  release:
+    name: Phát hành
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: QuanLyHopDong-*
+          merge-multiple: true
+          path: release
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
