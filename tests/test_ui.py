@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from qlhd.core import licensing as lic  # noqa: E402
 from qlhd.core.finance import FinanceStore  # noqa: E402
+from qlhd.core.reports import CONTEXTS  # noqa: E402
 from tests.helpers import sample_data  # noqa: E402
 
 pytest.importorskip("PySide6.QtWidgets")
@@ -74,10 +75,10 @@ def test_main_window_pages(qtbot, ctx, tmp_path):
     assert ctx.finance is None
     # báo cáo
     rp = next(p for p in win.pages if type(p).__name__ == "ReportsPage")
-    for key in ("loai_hd", "nhom_cdt", "hoa_don_ra", "thoi_gian"):
+    for key, _ in CONTEXTS:
         rp.context.set_value(key)
         rp.preview()
-        assert rp.table.rowCount() > 0
+        assert rp.tabs.count() >= 1 and rp.tabs.widget(0).rowCount() > 0, key
     win.close()
 
 

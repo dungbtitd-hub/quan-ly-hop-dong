@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
                                QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core import excel_import
-from ..core.contracts import CONTRACT_STATUSES, PAY_METHODS, TASK_STATUSES, ValidationError
+from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, TASK_STATUSES, ValidationError,
+                              duration_text, end_date)
 from ..core.reports import fmt_date, fmt_money
 from .widgets import (Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title, require,
                       run_safely, toolbar)
@@ -57,8 +58,9 @@ class HomePage(QWidget):
 
 CONTRACT_COLS = [("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp đồng", "text"),
                  ("TenDoiTac", "Đối tác", "text"), ("ChieuHopDong", "Chiều", "text"), ("LoaiHD", "Loại", "text"),
-                 ("NgayKy", "Ngày ký", "date"), ("TinhTrangHopDong", "Tình trạng", "text"),
-                 ("GiaTriHD", "Giá trị HĐ", "money"), ("DaXuatHD", "Đã xuất HĐơn", "money"),
+                 ("NgayKy", "Ngày ký", "date"), ("ThoiGianTH", "Thời gian TH", "text"),
+                 ("NgayKetThucDuKien", "Ngày kết thúc", "date"), ("TinhTrangHopDong", "Tình trạng", "text"),
+                 ("GiaTriHD", "Giá trị HĐ", "money"), ("PhanTramTT", "% thanh toán", "pct"), ("DaXuatHD", "Đã xuất HĐơn", "money"),
                  ("DaThanhToan", "Đã thanh toán", "money"), ("ConPhaiThu", "Còn phải thu", "money")]
 
 
@@ -77,8 +79,14 @@ def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
         {"key": "GiaTriTruocThue", "label": "Giá trị trước thuế", "kind": "money"},
         {"key": "VAT", "label": "Tiền thuế VAT", "kind": "money"},
         {"key": "NgayKy", "label": "Ngày ký", "kind": "date"},
-        {"key": "NgayBatDauDuKien", "label": "Ngày bắt đầu dự kiến", "kind": "date", "optional": True},
+        {"key": "NgayBatDauDuKien", "label": "Ngày bắt đầu thực hiện", "kind": "date", "optional": True,
+         "hint": "Để trống thì tính từ ngày ký."},
+        {"key": "ThoiGianThucHien", "label": "Thời gian thực hiện", "kind": "int", "max": 100_000,
+         "hint": "Số ngày hoặc số tháng (chọn đơn vị bên dưới). Có nhập thì ngày kết thúc được tự tính."},
+        {"key": "DonViThoiGian", "label": "Đơn vị", "kind": "combo", "options": list(DURATION_UNITS)},
         {"key": "NgayKetThucDuKien", "label": "Ngày kết thúc dự kiến", "kind": "date", "optional": True},
+        {"key": "NhacTruocNgay", "label": "Nhắc trước khi hết hạn (ngày)", "kind": "int", "max": 3650,
+         "hint": f"Để 0 thì dùng cài đặt chung (hiện là {ctx.cs.remind_days()} ngày)."},
         {"key": "TinhTrangHopDong", "label": "Tình trạng", "kind": "combo", "options": list(CONTRACT_STATUSES)},
         {"key": "GhiChu", "label": "Ghi chú", "kind": "multiline"},
     ]
@@ -92,8 +100,22 @@ def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
             combo.addItem(p["TenDoiTac"], ma)
             combo.set_value(ma)
 
+    values.setdefault("DonViThoiGian", "ngày")
     dlg = FormDialog("Hợp đồng", fields, values, parent, extra_buttons=[("Thêm đối tác", add_partner)],
                      validate=lambda v: require(v.get("MaDoiTac"), "Chọn đối tác."))
+
+    def recalc(*_):
+        v = dlg.values()
+        end = end_date(v["NgayBatDauDuKien"] or v["NgayKy"], v["ThoiGianThucHien"], v["DonViThoiGian"])
+        dlg.widget("NgayKetThucDuKien").setEnabled(not end)
+        if end:
+            dlg.set_value("NgayKetThucDuKien", end)
+
+    for key in ("NgayKy", "NgayBatDauDuKien"):
+        dlg.widget(key).dateChanged.connect(recalc)
+    dlg.widget("ThoiGianThucHien").valueChanged.connect(recalc)
+    dlg.widget("DonViThoiGian").currentIndexChanged.connect(recalc)
+    recalc()
     return dlg.values() if dlg.exec() == QDialog.Accepted else None
 
 
@@ -199,6 +221,7 @@ class ContractsPage(QWidget):
             r = dict(hd)
             r.update(self.ctx.cs.summary(hd["Ma"]))
             r["LoaiHD"] = types.get(hd["MaLoaiHD"], "")
+            r["ThoiGianTH"] = duration_text(hd["ThoiGianThucHien"], hd["DonViThoiGian"])
             rows.append(r)
         self.table.set_rows(rows)
         tot = sum(r["GiaTriHD"] for r in rows)

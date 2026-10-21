@@ -66,6 +66,18 @@ def parse_invoice(source: str | Path | bytes) -> dict:
             if _local(el.tag) == "LTSuat":
                 thue_suat.append({"ThueSuat": _text(el, "TSuat"), "ThanhTien": _money(_text(el, "ThTien")),
                                   "TienThue": _money(_text(el, "TThue"))})
+    items, rates = [], []
+    for el in data.iter():
+        if _local(el.tag) == "HHDVu":
+            ten = " ".join(_text(el, "THHDVu").split())
+            if ten and ten not in items:
+                items.append(ten)
+            rate = _text(el, "TSuat")
+            if rate and rate not in rates:
+                rates.append(rate)
+    for ts in thue_suat:
+        if ts["ThueSuat"] and ts["ThueSuat"] not in rates:
+            rates.append(ts["ThueSuat"])
     so_hd = []
     for el in data.iter():
         if _local(el.tag) == "TTin":
@@ -93,4 +105,17 @@ def parse_invoice(source: str | Path | bytes) -> dict:
         "VAT": vat,
         "GiaTriSauThue": tong_sau,
         "ThueSuat": thue_suat,
+        "MatHang": join_items(items),
+        "ThueSuatHD": "; ".join(rates),
     }
+
+
+def join_items(items: list[str], limit: int = 250) -> str:
+    """Tên các mặt hàng nối bằng '; ', dài quá thì cắt và ghi số mặt hàng còn lại."""
+    out = ""
+    for i, name in enumerate(items):
+        nxt = f"{out}; {name}" if out else name
+        if len(nxt) > limit and out:
+            return f"{out}; … (+{len(items) - i} mặt hàng)"
+        out = nxt
+    return out

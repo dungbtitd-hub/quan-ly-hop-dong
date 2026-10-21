@@ -135,6 +135,23 @@ class Combo(QComboBox):
             self.setCurrentIndex(i)
 
 
+class EditCombo(QComboBox):
+    """Ô gõ tự do kèm danh sách gợi ý (VD tên nhân viên mua hàng)."""
+
+    def __init__(self, suggestions=(), value=None, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.addItems([""] + [x for x in suggestions if x])
+        self.set_value(value)
+
+    def value(self) -> str:
+        return self.currentText().strip()
+
+    def set_value(self, value) -> None:
+        self.setEditText(value or "")
+
+
 class CheckList(QListWidget):
     """Danh sách có ô tích để chọn nhiều."""
 
@@ -300,6 +317,8 @@ class FormDialog(QDialog):
             return DateEdit(v, optional=f.get("optional", False))
         if kind == "combo":
             return Combo(f.get("options", []), v)
+        if kind == "combo_edit":
+            return EditCombo(f.get("options", []), v)
         if kind == "multiline":
             w = QPlainTextEdit(v or "")
             w.setFixedHeight(70)
@@ -325,7 +344,7 @@ class FormDialog(QDialog):
 
     def set_value(self, key, v) -> None:
         w = self.widgets[key]
-        if isinstance(w, (MoneyEdit, DateEdit, Combo)):
+        if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
             w.set_value(v)
         elif isinstance(w, QPlainTextEdit):
             w.setPlainText(v or "")
@@ -339,7 +358,7 @@ class FormDialog(QDialog):
     def values(self) -> dict:
         out = {}
         for key, w in self.widgets.items():
-            if isinstance(w, (MoneyEdit, DateEdit, Combo)):
+            if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
                 out[key] = w.value()
             elif isinstance(w, QPlainTextEdit):
                 out[key] = w.toPlainText().strip()

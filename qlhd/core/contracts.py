@@ -63,6 +63,15 @@ def guess_tax_group(vat) -> str:
     return "Không chịu thuế"
 
 
+def rate_from_amounts(before_tax, vat) -> str:
+    """Thuế suất suy ra từ tiền hàng và tiền thuế khi hóa đơn không ghi rõ (chỉ nhận 5%, 8%, 10%)."""
+    before_tax, vat = int(before_tax or 0), int(vat or 0)
+    if before_tax <= 0 or vat <= 0:
+        return ""
+    r = vat * 100 / before_tax
+    return next((f"{std}%" for std in (10, 8, 5) if abs(r - std) < 0.2), "")
+
+
 def invoicing_status(value: int, invoiced: int) -> str:
     if invoiced <= 0:
         return "Chưa xuất"

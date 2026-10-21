@@ -107,6 +107,14 @@ def parse_text(text: str) -> dict:
     m = _first([r"(?:S[ốo] h[ợo]p đ[ồo]ng|H[ợo]p đ[ồo]ng s[ốo])(?:\s*\([^)]*\))?\s*[:：]\s*([^\s,;]+)"], flat)
     if m:
         out["SoHopDong"] = m.group(1).strip(".")
+    rates = []
+    for m in re.finditer(r"Thu[ếe] su[ấa]t(?: GTGT)?(?:\s*\([^)]*\))?\s*[:：]?\s*(\d{1,2}\s*%|KCT|KKKNT)", flat,
+                         re.IGNORECASE):
+        r = m.group(1).replace(" ", "").upper()
+        if r not in rates:
+            rates.append(r)
+    out["ThueSuatHD"] = "; ".join(rates)
+    out["MatHang"] = ""
     labels = {"SoHoaDon": "Số hóa đơn", "NgayLap": "Ngày lập", "KyHieuHD": "Ký hiệu",
               "MSTNguoiBan": "MST người bán", "GiaTriSauThue": "Tổng thanh toán"}
     out["ThieuTruong"] = [label for k, label in labels.items() if not out[k]]
