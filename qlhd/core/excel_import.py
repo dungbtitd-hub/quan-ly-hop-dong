@@ -76,8 +76,9 @@ GUIDE = [
     " (hợp đồng phải có trong file hoặc đã có trong phần mềm).",
     "5. Số tiền nhập dạng số, đơn vị đồng (VD 100000000). Ngày nhập dạng ngày của Excel hoặc dd/mm/yyyy.",
     "6. Loại hợp đồng, đối tác chưa có trong phần mềm sẽ được tự thêm vào danh mục.",
-    "7. Phần mềm kiểm tra trùng: hợp đồng trùng Số hợp đồng + đối tác, hóa đơn trùng Ký hiệu + Số hóa đơn."
-    " Dòng trùng hoặc lỗi được đánh dấu ở màn hình xem trước và không được lưu.",
+    "7. Phần mềm kiểm tra trùng: hợp đồng trùng Số hợp đồng + đối tác, hóa đơn trùng Ký hiệu + Số hóa đơn"
+    " (cả với hóa đơn đã có lẫn các dòng khác trong file) và báo ngay khi chọn file. Dòng trùng hoặc lỗi"
+    " không được lưu. Hóa đơn trùng số nhưng thiếu ký hiệu được đánh dấu Nghi trùng để bạn tự quyết định.",
     "8. Trong phần mềm: Hợp đồng → Nhập từ Excel → chọn file → kiểm tra bảng xem trước → bấm Lưu các dòng hợp lệ.",
 ]
 
@@ -142,11 +143,18 @@ class ImportRow:
     line: int
     values: dict
     errors: list[str] = field(default_factory=list)
-    status: str = "Hợp lệ"          # Hợp lệ / Trùng / Lỗi
+    status: str = "Hợp lệ"          # Hợp lệ / Trùng / Nghi trùng / Lỗi
+    force: bool = False             # người dùng chọn vẫn lưu dòng "Nghi trùng"
 
     @property
     def ok(self) -> bool:
-        return self.status == "Hợp lệ"
+        return self.status == "Hợp lệ" or (self.status == "Nghi trùng" and self.force)
+
+
+def invoice_no(so) -> str:
+    """Số hóa đơn để so trùng: bỏ khoảng trắng và số 0 đứng đầu (00000123 và 123 là một)."""
+    s = "".join(str(so or "").split()).lower()
+    return s.lstrip("0") or s
 
 
 def _to_date(v) -> str | None:
@@ -250,8 +258,12 @@ def _check(rows: list[ImportRow], db: Database) -> None:
             seen.add(k)
             file_no[v["SoHopDong"].lower()] = file_no.get(v["SoHopDong"].lower(), 0) + 1
     known_no = existing_no | set(file_no)
-    inv_existing = {((r["KyHieuHD"] or "").lower(), r["SoHoaDon"].lower()) for r in db.active("HoaDonDauRa")}
-    inv_seen = set()
+    contract_no = {r["Ma"]: r["SoHopDong"] for r in db.query("SELECT Ma, SoHopDong FROM HopDong")}
+    by_no: dict[str, list[dict]] = {}       # số hóa đơn → các hóa đơn đã có / dòng trước trong file
+    for inv in db.active("HoaDonDauRa"):
+        by_no.setdefault(invoice_no(inv["SoHoaDon"]), []).append(
+            {"kh": (inv["KyHieuHD"] or "").upper(), "so": inv["SoHoaDon"],
+             "noi": f"đã có trong phần mềm (ngày {_vn(inv['NgayXuatHD'])}, HĐ {contract_no.get(inv['MaHopDong'], '')})"})
     for r in rows:
         if r.sheet == "Hợp đồng" or not r.ok:
             continue
@@ -263,12 +275,35 @@ def _check(rows: list[ImportRow], db: Database) -> None:
             r.status, r.errors = "Lỗi", ["Số hợp đồng này có nhiều dòng trong file, không xác định được hợp đồng"]
             continue
         if r.sheet == "Hóa đơn đầu ra":
-            k = ((r.values["KyHieuHD"] or "").lower(), r.values["SoHoaDon"].lower())
-            if k in inv_existing or k in inv_seen:
-                r.status, r.errors = "Trùng", ["Hóa đơn (ký hiệu + số) đã có"]
-            inv_seen.add(k)
+            _check_invoice_no(r, by_no)
         if r.sheet == "Thanh toán" and r.values["SoTien"] <= 0:
             r.status, r.errors = "Lỗi", ["Số tiền phải lớn hơn 0"]
+
+
+def _vn(d: str | None) -> str:
+    return datetime.strptime(d[:10], "%Y-%m-%d").strftime("%d/%m/%Y") if d else ""
+
+
+def _check_invoice_no(r: ImportRow, by_no: dict[str, list[dict]]) -> None:
+    """Trùng ký hiệu + số: bỏ qua. Trùng số mà một bên thiếu ký hiệu: Nghi trùng (người dùng quyết định).
+    Trùng số nhưng khác ký hiệu: vẫn hợp lệ, kèm lời nhắc."""
+    kh, so = (r.values["KyHieuHD"] or "").upper(), r.values["SoHoaDon"]
+    same = by_no.setdefault(invoice_no(so), [])
+    exact = [x for x in same if x["kh"] == kh]
+    unsure = [x for x in same if x["kh"] != kh and not (x["kh"] and kh)]
+    other = [x for x in same if x["kh"] != kh and x["kh"] and kh]
+    label = lambda x: f"hóa đơn {(x['kh'] + ' ') if x['kh'] else ''}số {x['so']} {x['noi']}"  # noqa: E731
+    if exact:
+        r.status, r.errors = "Trùng", ["Trùng số hóa đơn: " + label(exact[0])]
+    elif unsure:
+        r.status, r.errors = "Nghi trùng", ["Trùng số hóa đơn, thiếu ký hiệu để phân biệt: " + label(unsure[0])]
+    elif other:
+        r.errors = ["Lưu ý: cùng số với " + label(other[0]) + ", khác ký hiệu"]
+    same.append({"kh": kh, "so": so, "noi": f"ở dòng {r.line} trong file"})
+
+
+def duplicate_invoice_rows(rows: list[ImportRow]) -> list[ImportRow]:
+    return [r for r in rows if r.sheet == "Hóa đơn đầu ra" and r.status in ("Trùng", "Nghi trùng")]
 
 
 def import_rows(db: Database, rows: list[ImportRow]) -> dict:
@@ -299,7 +334,8 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
     def contract_for(so: str) -> str | None:
         if so.lower() in by_no:
             return by_no[so.lower()]
-        hit = db.active("HopDong", "lower(SoHopDong) = ?", (so.lower(),))
+        # so sánh bằng Python: lower() của SQLite không đổi chữ có dấu (Đ, Ư…)
+        hit = [h for h in db.active("HopDong") if h["SoHopDong"].lower() == so.lower()]
         return hit[0]["Ma"] if len(hit) == 1 else None
 
     inv_by_no: dict[str, str] = {}
@@ -312,7 +348,7 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
             if not ma_hd:
                 raise ValidationError("Không tìm thấy hợp đồng")
             v["MaHopDong"] = ma_hd
-            inv_by_no[v["SoHoaDon"].lower()] = cs.save_out_invoice(v)
+            inv_by_no[invoice_no(v["SoHoaDon"])] = cs.save_out_invoice(v)
             saved["Hóa đơn đầu ra"] += 1
         except ValidationError as e:
             r.status, r.errors = "Lỗi", [str(e)]
@@ -328,9 +364,10 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
                 raise ValidationError("Không tìm thấy hợp đồng")
             v["MaHopDong"] = ma_hd
             if so_hd:
-                ma_inv = inv_by_no.get(so_hd.lower())
+                ma_inv = inv_by_no.get(invoice_no(so_hd))
                 if not ma_inv:
-                    hit = db.active("HoaDonDauRa", "MaHopDong = ? AND lower(SoHoaDon) = ?", (ma_hd, so_hd.lower()))
+                    hit = [i for i in db.active("HoaDonDauRa", "MaHopDong = ?", (ma_hd,))
+                           if invoice_no(i["SoHoaDon"]) == invoice_no(so_hd)]
                     ma_inv = hit[0]["Ma"] if hit else None
                 v["MaHDDauRa"] = ma_inv
             v["HinhThuc"] = v["HinhThuc"] or "Chuyển khoản"

@@ -75,6 +75,9 @@ CREATE TABLE IF NOT EXISTS HopDong (
     NgayKy TEXT NOT NULL,
     NgayBatDauDuKien TEXT,
     NgayKetThucDuKien TEXT,
+    ThoiGianThucHien INTEGER,             -- số ngày / tháng thực hiện, dùng tự tính ngày kết thúc
+    DonViThoiGian TEXT,                   -- 'ngày' / 'tháng'
+    NhacTruocNgay INTEGER,                -- nhắc trước khi hết hạn (để trống = theo cài đặt chung)
     TinhTrangHopDong TEXT NOT NULL DEFAULT 'Chưa bắt đầu'
         CHECK(TinhTrangHopDong IN ('Chưa bắt đầu', 'Đang thực hiện', 'Đã nghiệm thu',
                                    'Hoàn thành', 'Tạm dừng', 'Hủy')),
@@ -120,6 +123,8 @@ CREATE TABLE IF NOT EXISTS HoaDonDauRa (
     GiaTriSauThue INTEGER NOT NULL DEFAULT 0,
     TinhChatHD TEXT NOT NULL DEFAULT 'Gốc'
         CHECK(TinhChatHD IN ('Gốc', 'Điều chỉnh', 'Thay thế', 'Đã hủy')),
+    MatHang TEXT,
+    ThueSuat TEXT,
     DuongDanTep TEXT,
     GhiChuHDDR TEXT,{SYNC_COLS}
 );
@@ -145,6 +150,11 @@ CREATE TABLE IF NOT EXISTS HoaDonDauVao (
     VAT INTEGER NOT NULL DEFAULT 0,
     GiaTriSauThue INTEGER NOT NULL DEFAULT 0,
     MaHopDong TEXT REFERENCES HopDong(Ma),
+    MatHang TEXT,
+    ThueSuat TEXT,                        -- '10%', '8%', '0%', 'KCT', …
+    NhomThue TEXT,                        -- 'Chịu thuế' / 'Không chịu thuế'
+    NguoiMuaHang TEXT,                    -- nhân viên mua hàng
+    SoThamChieuSK TEXT,                   -- số tham chiếu trên sao kê ngân hàng
     DuongDanTep TEXT,
     GhiChuHDDV TEXT,{SYNC_COLS}
 );
@@ -240,6 +250,21 @@ CREATE TABLE IF NOT EXISTS CaiDat (
     GiaTri TEXT
 );
 """
+
+
+# Cột thêm ở các phiên bản sau: tệp dữ liệu cũ được bổ sung khi mở (bảng, cột, kiểu).
+ADDED_COLUMNS = [
+    ("HopDong", "ThoiGianThucHien", "INTEGER"),
+    ("HopDong", "DonViThoiGian", "TEXT"),
+    ("HopDong", "NhacTruocNgay", "INTEGER"),
+    ("HoaDonDauRa", "MatHang", "TEXT"),
+    ("HoaDonDauRa", "ThueSuat", "TEXT"),
+    ("HoaDonDauVao", "MatHang", "TEXT"),
+    ("HoaDonDauVao", "ThueSuat", "TEXT"),
+    ("HoaDonDauVao", "NhomThue", "TEXT"),
+    ("HoaDonDauVao", "NguoiMuaHang", "TEXT"),
+    ("HoaDonDauVao", "SoThamChieuSK", "TEXT"),
+]
 
 
 def now_iso() -> str:
@@ -349,7 +374,13 @@ class Database(Store):
         super().__init__(conn, machine_id)
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        self._upgrade()
         self.conn.commit()
+
+    def _upgrade(self) -> None:
+        for table, col, kind in ADDED_COLUMNS:
+            if col not in self.columns(table):
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
 
     def backup_to(self, dest: str | Path) -> None:
         target = sqlite3.connect(str(dest))
@@ -361,6 +392,8 @@ class Database(Store):
         source = sqlite3.connect(str(src))
         source.backup(self.conn)
         source.close()
+        self._upgrade()
+        self.conn.commit()
 
     # ---- cài đặt & nhật ký
     def setting(self, key: str, default: str | None = None) -> str | None:

@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QLabel, QLineEdit,
                                QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core import excel_import
@@ -334,6 +334,14 @@ class ContractsPage(QWidget):
         rows = run_safely(self, excel_import.read_workbook, path, self.ctx.db)
         if not rows:
             return
+        dups = excel_import.duplicate_invoice_rows(rows)
+        if dups:
+            lines = [f"• Dòng {r.line}: số {r.values['SoHoaDon']} – {r.status.lower()}: {r.errors[0].split(': ', 1)[-1]}"
+                     for r in dups[:15]]
+            more = f"\n… và {len(dups) - 15} dòng khác." if len(dups) > 15 else ""
+            error(self, f"Có {len(dups)} hóa đơn đầu ra bị trùng số hóa đơn:\n\n" + "\n".join(lines) + more +
+                  "\n\nCác dòng trùng sẽ không được lưu. Dòng nghi trùng (thiếu ký hiệu) chỉ được lưu"
+                  " nếu bạn tích \"Vẫn lưu\" ở màn hình xem trước.", "Trùng số hóa đơn")
         dlg = ImportPreviewDialog(rows, self)
         if dlg.exec() == QDialog.Accepted:
             res = excel_import.import_rows(self.ctx.db, rows)
@@ -352,8 +360,9 @@ class ImportPreviewDialog(QDialog):
         self.setWindowTitle("Xem trước dữ liệu nhập từ Excel")
         self.resize(1000, 560)
         lay = QVBoxLayout(self)
-        ok = sum(1 for r in rows if r.ok)
-        lay.addWidget(hint(f"{ok} dòng hợp lệ sẽ được lưu; {len(rows) - ok} dòng lỗi hoặc trùng sẽ bỏ qua."))
+        self.rows = rows
+        self.summary = hint("")
+        lay.addWidget(self.summary)
         table = DataTable([("sheet", "Sheet", "text"), ("line", "Dòng", "int"), ("status", "Kết quả", "text"),
                            ("SoHopDong", "Số HĐ", "text"), ("noi_dung", "Nội dung", "text"),
                            ("errors", "Ghi chú", "text")])
@@ -366,13 +375,27 @@ class ImportPreviewDialog(QDialog):
                          "noi_dung": noi_dung, "errors": "; ".join(r.errors)})
         table.set_rows(data)
         lay.addWidget(table)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText(f"Lưu {ok} dòng hợp lệ")
-        bb.button(QDialogButtonBox.Ok).setEnabled(ok > 0)
+        self.unsure = [r for r in rows if r.status == "Nghi trùng"]
+        if self.unsure:
+            self.force = QCheckBox(f"Vẫn lưu {len(self.unsure)} hóa đơn nghi trùng (đã kiểm tra, không phải trùng)")
+            self.force.toggled.connect(self._update)
+            lay.addWidget(self.force)
+        self.bb = bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        self._update()
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+
+    def _update(self, force: bool = False):
+        for r in self.unsure:
+            r.force = force
+        ok = sum(1 for r in self.rows if r.ok)
+        dup = sum(1 for r in self.rows if r.status in ("Trùng", "Nghi trùng") and not r.ok)
+        self.summary.setText(f"{ok} dòng hợp lệ sẽ được lưu; {len(self.rows) - ok} dòng bỏ qua"
+                             + (f" (trong đó {dup} dòng trùng)." if dup else "."))
+        self.bb.button(QDialogButtonBox.Ok).setText(f"Lưu {ok} dòng hợp lệ")
+        self.bb.button(QDialogButtonBox.Ok).setEnabled(ok > 0)
 
 
 class CatalogPage(QWidget):

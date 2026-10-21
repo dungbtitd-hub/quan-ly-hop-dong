@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date, timedelta
 
 from .db import Database
 
@@ -10,6 +11,16 @@ TASK_STATUSES = ("Chưa làm", "Đang làm", "Đã bàn giao", "Đã nghiệm th
 INVOICE_KINDS = ("Gốc", "Điều chỉnh", "Thay thế", "Đã hủy")
 PARTNER_ROLES = ("Chủ đầu tư", "Nhà cung cấp", "Cả hai")
 PAY_METHODS = ("Chuyển khoản", "Tiền mặt")
+DURATION_UNITS = ("ngày", "tháng")
+TAX_GROUPS = ("Chịu thuế", "Không chịu thuế")
+# Tên nhóm theo bảng kê hóa đơn mua vào (mẫu quản trị).
+TAX_GROUP_TITLES = {
+    "Chịu thuế": "1. Hàng hoá, dịch vụ dùng riêng cho SXKD chịu thuế GTGT và sử dụng cho các hoạt động cung cấp "
+                 "hàng hoá, dịch vụ không kê khai, nộp thuế GTGT đủ điều kiện khấu trừ thuế",
+    "Không chịu thuế": "5. Hàng hóa, dịch vụ không phải tổng hợp trên tờ khai 01/GTGT",
+}
+OPEN_STATUSES = ("Chưa bắt đầu", "Đang thực hiện", "Tạm dừng")
+DEFAULT_REMIND_DAYS = 30
 
 
 class ValidationError(Exception):
@@ -22,6 +33,34 @@ def payment_status(invoiced: int, paid: int) -> str:
     if paid >= invoiced:
         return "Đã thu đủ"
     return "Thu một phần"
+
+
+def add_months(d: date, months: int) -> date:
+    m = d.month - 1 + months
+    y, m = d.year + m // 12, m % 12 + 1
+    last = (date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1)).day
+    return date(y, m, min(d.day, last))
+
+
+def end_date(start: str | None, amount, unit: str | None) -> str | None:
+    """Ngày kết thúc khi thực hiện `amount` ngày / tháng, tính cả ngày bắt đầu (30 ngày từ 01/03 → 30/03)."""
+    if not start or not amount or int(amount) <= 0:
+        return None
+    d = date.fromisoformat(start[:10])
+    if unit == "tháng":
+        return (add_months(d, int(amount)) - timedelta(days=1)).isoformat()
+    return (d + timedelta(days=int(amount) - 1)).isoformat()
+
+
+def duration_text(amount, unit) -> str:
+    return f"{amount} {unit or 'ngày'}" if amount else ""
+
+
+def guess_tax_group(vat) -> str:
+    """Hóa đơn có tiền thuế GTGT thì chịu thuế; 0%, KCT, KKKNT, không có thuế thì xếp nhóm không chịu thuế."""
+    if int(vat or 0) > 0:
+        return "Chịu thuế"
+    return "Không chịu thuế"
 
 
 def invoicing_status(value: int, invoiced: int) -> str:
@@ -150,6 +189,15 @@ class ContractService:
         v["GiaTriTruocThue"] = int(v.get("GiaTriTruocThue") or 0)
         v["VAT"] = int(v.get("VAT") or 0)
         v["GiaTriTongSauThue"] = v["GiaTriTruocThue"] + v["VAT"]
+        if "ThoiGianThucHien" in v:
+            v["ThoiGianThucHien"] = int(v.get("ThoiGianThucHien") or 0) or None
+            if v.get("DonViThoiGian") not in DURATION_UNITS:
+                v["DonViThoiGian"] = "ngày"
+            if v["ThoiGianThucHien"]:
+                v["NgayKetThucDuKien"] = end_date(v.get("NgayBatDauDuKien") or v["NgayKy"], v["ThoiGianThucHien"],
+                                                  v["DonViThoiGian"])
+        if "NhacTruocNgay" in v:
+            v["NhacTruocNgay"] = int(v.get("NhacTruocNgay") or 0) or None
         dup = self.db.one(
             "SELECT Ma FROM HopDong WHERE DaXoa = 0 AND SoHopDong = ? AND COALESCE(MaThueDoiTac, TenDoiTac) = ?"
             " AND Ma != ?", (v["SoHopDong"], v.get("MaThueDoiTac") or v["TenDoiTac"], ma or ""))
@@ -289,14 +337,16 @@ class ContractService:
 
     def save_in_invoice(self, values: dict, ma: str | None = None) -> str:
         v = dict(values)
-        for f, label in (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Nhà cung cấp"),
-                         ("MaThueNCC", "MST nhà cung cấp"), ("NgayNhanHD", "Ngày hóa đơn")):
+        for f, label in (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Tên người bán"),
+                         ("MaThueNCC", "MST người bán"), ("NgayNhanHD", "Ngày hóa đơn")):
             if not v.get(f):
                 raise ValidationError(f"Chưa nhập {label}.")
         v["GiaTriTruocThue"] = int(v.get("GiaTriTruocThue") or 0)
         v["VAT"] = int(v.get("VAT") or 0)
         v["GiaTriSauThue"] = int(v.get("GiaTriSauThue") or (v["GiaTriTruocThue"] + v["VAT"]))
         v["MaHopDong"] = v.get("MaHopDong") or None
+        if v.get("NhomThue") not in TAX_GROUPS:
+            v["NhomThue"] = guess_tax_group(v["VAT"])
         dup = self.db.one("SELECT 1 FROM HoaDonDauVao WHERE DaXoa = 0 AND MaThueNCC = ? AND COALESCE(KyHieuHD,'') = ?"
                           " AND SoHoaDonGoc = ? AND Ma != ?",
                           (v["MaThueNCC"], v.get("KyHieuHD") or "", v["SoHoaDonGoc"], ma or ""))
@@ -310,6 +360,43 @@ class ContractService:
     def delete_in_invoice(self, ma: str) -> None:
         self.db.soft_delete("HoaDonDauVao", ma)
 
+    def invoice_exists(self, kind: str, values: dict) -> bool:
+        """Hóa đơn đã có trong dữ liệu chưa (kind 'ra' / 'vao'), để bỏ qua khi nhập nhiều file."""
+        if kind == "ra":
+            return self.db.one("SELECT 1 FROM HoaDonDauRa WHERE DaXoa = 0 AND COALESCE(KyHieuHD,'') = ?"
+                               " AND SoHoaDon = ?", (values.get("KyHieuHD") or "", values.get("SoHoaDon") or "")) \
+                is not None
+        return self.db.one("SELECT 1 FROM HoaDonDauVao WHERE DaXoa = 0 AND MaThueNCC = ? AND COALESCE(KyHieuHD,'') = ?"
+                           " AND SoHoaDonGoc = ?", (values.get("MaThueNCC") or "", values.get("KyHieuHD") or "",
+                                                    values.get("SoHoaDonGoc") or "")) is not None
+
+    # ---- nhắc hợp đồng sắp hết hạn
+    def remind_days(self) -> int:
+        try:
+            return max(int(self.db.setting("nhac_het_han_truoc") or DEFAULT_REMIND_DAYS), 0)
+        except ValueError:
+            return DEFAULT_REMIND_DAYS
+
+    def set_remind_days(self, days: int) -> None:
+        self.db.set_setting("nhac_het_han_truoc", str(max(int(days), 0)))
+
+    def expiring(self, today: str) -> list[dict]:
+        """Hợp đồng chưa xong sắp đến (trong số ngày nhắc) hoặc đã quá ngày kết thúc dự kiến."""
+        default = self.remind_days()
+        t = date.fromisoformat(today)
+        out = []
+        for hd in self.db.active("HopDong", f"TinhTrangHopDong IN ({','.join('?' * len(OPEN_STATUSES))})"
+                                 " AND NgayKetThucDuKien IS NOT NULL", OPEN_STATUSES, "NgayKetThucDuKien"):
+            left = (date.fromisoformat(hd["NgayKetThucDuKien"][:10]) - t).days
+            before = hd["NhacTruocNgay"] if hd["NhacTruocNgay"] else default
+            if left <= before:
+                r = dict(hd)
+                r["ConLai"] = left
+                r["ConLaiText"] = ("Hết hạn hôm nay" if left == 0 else f"Còn {left} ngày" if left > 0
+                                   else f"Quá hạn {-left} ngày")
+                out.append(r)
+        return out
+
     # ---- trang chủ
     def dashboard(self, today: str) -> dict:
         n_out = self.db.one("SELECT COUNT(*) n FROM HopDong WHERE DaXoa = 0 AND ChieuHopDong = 'Đầu ra'")["n"]
@@ -321,9 +408,6 @@ class ContractService:
             "SELECT c.TenNoiDungCV, h.SoHopDong, c.NgayDuKienHT FROM CongViec c JOIN HopDong h ON h.Ma = c.MaHopDong"
             " WHERE c.DaXoa = 0 AND h.DaXoa = 0 AND c.TinhTrangCV NOT IN ('Hoàn thành', 'Đã nghiệm thu')"
             " AND c.NgayDuKienHT IS NOT NULL AND c.NgayDuKienHT < ? ORDER BY c.NgayDuKienHT", (today,))
-        ending = self.db.query(
-            "SELECT SoHopDong, TenHopDong, NgayKetThucDuKien FROM HopDong WHERE DaXoa = 0"
-            " AND TinhTrangHopDong IN ('Chưa bắt đầu', 'Đang thực hiện') AND NgayKetThucDuKien IS NOT NULL"
-            " AND NgayKetThucDuKien BETWEEN ? AND date(?, '+30 day') ORDER BY NgayKetThucDuKien", (today, today))
+        ending = self.expiring(today)
         return {"hd_dau_ra": n_out, "hd_dau_vao": n_in, "con_phai_thu": receivable,
                 "cv_qua_han": overdue, "hd_sap_het_han": ending}

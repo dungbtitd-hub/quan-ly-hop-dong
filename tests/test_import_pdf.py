@@ -1,4 +1,4 @@
-from qlhd.core.excel_import import import_rows, read_workbook, write_template
+from qlhd.core.excel_import import duplicate_invoice_rows, import_rows, read_workbook, write_template
 from qlhd.core.pdf_invoice import parse_invoice, parse_text
 from tests.helpers import sample_data
 
@@ -56,7 +56,6 @@ def test_parse_real_pdf_file(tmp_path):
 
 def test_excel_template_roundtrip(company, tmp_path):
     db = company["kt"].db
-    sample_data(db)
     tpl = write_template(tmp_path / "mau.xlsx")
     rows = read_workbook(tpl, db)
     contracts = [r for r in rows if r.sheet == "Hợp đồng"]
@@ -64,4 +63,32 @@ def test_excel_template_roundtrip(company, tmp_path):
     saved = import_rows(db, rows)
     assert saved["Hợp đồng"] == 2 and saved["Hóa đơn đầu ra"] == 1 and saved["Thanh toán"] == 1, saved
     again = read_workbook(tpl, db)
-    assert all(r.status == "Trùng" for r in again if r.sheet == "Hợp đồng")
+    assert all(r.status == "Trùng" for r in again if r.sheet in ("Hợp đồng", "Hóa đơn đầu ra"))
+
+
+def test_excel_duplicate_invoice_numbers(company, tmp_path):
+    from openpyxl import load_workbook
+
+    db = company["kt"].db
+    sample_data(db)                     # đã có hóa đơn C26TAA số 12 của HĐ 01/2026/HĐTV
+    tpl = write_template(tmp_path / "mau.xlsx")
+    wb = load_workbook(tpl)
+    ws = wb["Hóa đơn đầu ra"]
+    first = [c.value for c in ws[2]]
+    ws.delete_rows(2, ws.max_row)
+    cols = [c.value for c in ws[1]]
+    i_so, i_kh, i_hd = (next(i for i, c in enumerate(cols) if c.startswith(x))
+                        for x in ("Số hóa đơn", "Ký hiệu hóa đơn", "Số hợp đồng"))
+    for kh, so in (("C26TAA", "00000012"), ("C25TAA", "12"), ("", "12"), ("C26TAA", "99"), ("C26TAA", "99")):
+        row = list(first)
+        row[i_kh], row[i_so], row[i_hd] = kh, so, "01/2026/HĐTV"
+        ws.append(row)
+    wb.save(tpl)
+    rows = [r for r in read_workbook(tpl, db) if r.sheet == "Hóa đơn đầu ra"]
+    assert [r.status for r in rows] == ["Trùng", "Hợp lệ", "Nghi trùng", "Hợp lệ", "Trùng"], \
+        [(r.status, r.errors) for r in rows]
+    assert "đã có trong phần mềm" in rows[0].errors[0] and "dòng 5" in rows[4].errors[0]
+    assert rows[1].errors[0].startswith("Lưu ý")
+    assert len(duplicate_invoice_rows(rows)) == 3
+    rows[2].force = True
+    assert import_rows(db, rows)["Hóa đơn đầu ra"] == 3
