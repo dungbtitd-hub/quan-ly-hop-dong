@@ -50,10 +50,11 @@ class DeveloperInfo(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 14, 24, 8)
         cap = QLabel("NHÀ PHÁT TRIỂN")
-        cap.setStyleSheet("color:#5a6b80; font-weight:600; letter-spacing:1px;")
+        cap.setObjectName("StatLabel")
+        cap.setStyleSheet("font-weight:600; letter-spacing:1px;")
         lay.addWidget(cap)
         name = QLabel(DEVELOPER["ten"])
-        name.setStyleSheet("color:#1e395b; font-size:12pt; font-weight:700;")
+        name.setObjectName("CardTitle")
         lay.addWidget(name)
         grid = QGridLayout()
         grid.setHorizontalSpacing(14)
@@ -61,29 +62,27 @@ class DeveloperInfo(QWidget):
         rows = developer_lines() + (extra or [])
         for i, (label, value) in enumerate(rows):
             l1 = QLabel(label + ":")
-            l1.setStyleSheet("color:#5a6b80;")
+            l1.setObjectName("Hint")
             l2 = QLabel(value)
             l2.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            l2.setStyleSheet("color:#1b1b1b;")
             grid.addWidget(l1, i, 0, Qt.AlignRight)
             grid.addWidget(l2, i, 1)
         lay.addLayout(grid)
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color:#c9d6e8;")
+        line.setObjectName("Line")
         lay.addWidget(line)
         lic = QLabel(license_text)
         lic.setWordWrap(True)
         if "HẾT HIỆU LỰC" in license_text:
-            color = "#a32020"
+            lic.setObjectName("Danger")
         elif "Đã kích hoạt" in license_text and "(còn" not in license_text:
-            color = "#1e7b34"
+            lic.setObjectName("Success")
         else:
-            color = "#9c5700"
-        lic.setStyleSheet(f"color:{color}; font-weight:600;")
+            lic.setObjectName("Warn")
         lay.addWidget(lic)
         cp = QLabel(copyright_line())
-        cp.setStyleSheet("color:#5a6b80;")
+        cp.setObjectName("Hint")
         lay.addWidget(cp)
 
 
@@ -107,7 +106,6 @@ class SplashDialog(QDialog):
     def __init__(self, acc=None, seconds: int = 4, parent=None):
         super().__init__(parent, Qt.Dialog | Qt.FramelessWindowHint)
         self.setObjectName("Splash")
-        self.setStyleSheet("#Splash { background:white; border:1px solid #6d8fbf; }")
         self.setFixedWidth(520)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -117,7 +115,7 @@ class SplashDialog(QDialog):
         bottom = QHBoxLayout()
         bottom.setContentsMargins(24, 4, 16, 14)
         self.count = QLabel()
-        self.count.setStyleSheet("color:#8a97a8;")
+        self.count.setObjectName("Hint")
         bottom.addWidget(self.count)
         bottom.addStretch(1)
         btn = QPushButton("Tiếp tục")

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
                                QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.auth import AuthError
 from ..core.licensing import LicenseError
+from .. import APP_NAME, __version__
 from ..developer import DEVELOPER
 from .widgets import copy_text, error, hint, info
 
@@ -30,7 +31,7 @@ class ActivationDialog(QDialog):
         mrow.addWidget(QLabel("Mã máy này:"))
         mid = QLineEdit(ctx.machine_id)
         mid.setReadOnly(True)
-        mid.setStyleSheet("font-family: Consolas, Menlo, monospace; font-size: 11pt;")
+        mid.setObjectName("Mono")
         mrow.addWidget(mid, 1)
         b = QPushButton("Sao chép")
         b.clicked.connect(lambda: (copy_text(ctx.machine_id), info(self, "Đã sao chép Mã máy.")))
@@ -130,15 +131,36 @@ class LoginDialog(QDialog):
         super().__init__(parent)
         self.ctx = ctx
         self.setWindowTitle(f"Đăng nhập – {ctx.company}")
-        self.setFixedWidth(380)
+        self.setFixedWidth(420)
         lay = QVBoxLayout(self)
-        title = QLabel(ctx.company)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(12)
+        brand = QHBoxLayout()
+        logo = QLabel("Q")
+        logo.setObjectName("Logo")
+        logo.setFixedSize(44, 44)
+        logo.setAlignment(Qt.AlignCenter)
+        brand.addWidget(logo)
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        app = QLabel(APP_NAME)
+        app.setObjectName("CardTitle")
+        names.addWidget(app)
+        company = QLabel(ctx.company)
+        company.setObjectName("Hint")
+        company.setWordWrap(True)
+        names.addWidget(company)
+        brand.addLayout(names, 1)
+        lay.addLayout(brand)
+        title = QLabel("Đăng nhập")
         title.setObjectName("PageTitle")
-        title.setWordWrap(True)
         lay.addWidget(title)
         form = QFormLayout()
+        form.setVerticalSpacing(10)
         self.user = QLineEdit(ctx.db.setting("dang_nhap_cuoi") or "")
+        self.user.setPlaceholderText("Tên đăng nhập")
         self.pw = _pw()
+        self.pw.setPlaceholderText("Mật khẩu")
         form.addRow("Tên đăng nhập", self.user)
         form.addRow("Mật khẩu", self.pw)
         lay.addLayout(form)
@@ -153,6 +175,10 @@ class LoginDialog(QDialog):
         row.addWidget(b)
         row.addWidget(c)
         lay.addLayout(row)
+        foot = QLabel(f"Phiên bản {__version__} · {DEVELOPER['ten']}")
+        foot.setObjectName("Hint")
+        foot.setWordWrap(True)
+        lay.addWidget(foot)
         (self.pw if self.user.text() else self.user).setFocus()
 
     def _login(self):
@@ -165,12 +191,59 @@ class LoginDialog(QDialog):
         self.accept()
 
 
-class ChangePasswordDialog(QDialog):
-    def __init__(self, ctx, parent=None):
+class MyAccountDialog(QDialog):
+    """Tài khoản của tôi: xem thông tin, đổi tên đăng nhập, đổi mật khẩu."""
+
+    def __init__(self, ctx, parent=None, tab: int = 0):
         super().__init__(parent)
         self.ctx = ctx
-        self.setWindowTitle("Đổi mật khẩu đăng nhập")
+        self.setWindowTitle("Tài khoản của tôi")
+        self.setMinimumWidth(480)
         lay = QVBoxLayout(self)
+        u = ctx.user
+        head = QLabel(u["HoTen"])
+        head.setObjectName("PageTitle")
+        lay.addWidget(head)
+        self.info = hint("")
+        lay.addWidget(self.info)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._name_tab(), "Đổi tên đăng nhập")
+        self.tabs.addTab(self._pw_tab(), "Đổi mật khẩu")
+        self.tabs.setCurrentIndex(tab)
+        lay.addWidget(self.tabs)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close = QPushButton("Đóng")
+        close.clicked.connect(self.accept)
+        row.addWidget(close)
+        lay.addLayout(row)
+        self._show_info()
+
+    def _show_info(self):
+        u = self.ctx.user
+        self.info.setText(f"Tên đăng nhập: {u['TenDangNhap']}  ·  Vai trò: {u['VaiTro']}  ·  {self.ctx.company}")
+
+    def _name_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        form = QFormLayout()
+        self.new_name = QLineEdit(self.ctx.user["TenDangNhap"])
+        self.name_pw = _pw()
+        form.addRow("Tên đăng nhập mới", self.new_name)
+        form.addRow("Mật khẩu hiện tại", self.name_pw)
+        lay.addLayout(form)
+        lay.addWidget(hint("3–32 ký tự: chữ không dấu, số và dấu . _ -. Mật khẩu và Khóa thu chi giữ nguyên. "
+                           "Tên mới chỉ đổi trên máy này; máy khác vẫn đăng nhập bằng tài khoản của máy đó."))
+        b = QPushButton("Đổi tên đăng nhập")
+        b.setObjectName("Primary")
+        b.clicked.connect(self._rename)
+        lay.addWidget(b, 0, Qt.AlignRight)
+        lay.addStretch(1)
+        return w
+
+    def _pw_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
         form = QFormLayout()
         self.old, self.new, self.new2 = _pw(), _pw(), _pw()
         form.addRow("Mật khẩu hiện tại", self.old)
@@ -179,17 +252,85 @@ class ChangePasswordDialog(QDialog):
         lay.addLayout(form)
         b = QPushButton("Đổi mật khẩu")
         b.setObjectName("Primary")
-        b.clicked.connect(self._save)
+        b.clicked.connect(self._save_pw)
         lay.addWidget(b, 0, Qt.AlignRight)
+        lay.addStretch(1)
+        return w
 
-    def _save(self):
+    def _rename(self):
+        try:
+            self.ctx.acc.change_username(self.ctx.user["MaNguoiDung"], self.name_pw.text(), self.new_name.text())
+        except AuthError as e:
+            return error(self, str(e))
+        self.name_pw.clear()
+        self.ctx.refresh_user()
+        self.ctx.db.set_setting("dang_nhap_cuoi", self.ctx.user["TenDangNhap"])
+        self._show_info()
+        info(self, f"Đã đổi tên đăng nhập thành \"{self.ctx.user['TenDangNhap']}\". Lần sau đăng nhập bằng tên mới.")
+
+    def _save_pw(self):
         if self.new.text() != self.new2.text():
             return error(self, "Hai lần nhập mật khẩu mới không khớp.")
         try:
             self.ctx.acc.change_password(self.ctx.user["MaNguoiDung"], self.old.text(), self.new.text())
         except AuthError as e:
             return error(self, str(e))
+        for w in (self.old, self.new, self.new2):
+            w.clear()
         info(self, "Đã đổi mật khẩu.")
+
+
+WIPE_CONFIRM = "XOA SACH"
+
+
+class WipeDataDialog(QDialog):
+    """Xóa sạch toàn bộ dữ liệu trên máy, không để lại dấu vết (chỉ Giám đốc)."""
+
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.files = 0
+        self.setWindowTitle("Xóa sạch dữ liệu")
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        t = QLabel("Xóa sạch toàn bộ dữ liệu trên máy này")
+        t.setObjectName("Danger")
+        lay.addWidget(t)
+        lay.addWidget(hint("Hợp đồng, hóa đơn, thanh toán, danh mục, sổ thu chi, các bản sao lưu tự động, nhật ký và "
+                           "lịch sử đồng bộ đều bị hủy. Tệp được ghi đè ngẫu nhiên trước khi xóa nên không khôi phục "
+                           "được bằng công cụ cứu dữ liệu. Không thể hoàn tác. Nên xuất dữ liệu sang máy khác "
+                           "trước nếu còn cần."))
+        self.keep = QCheckBox("Giữ bản quyền và tài khoản đăng nhập để dùng tiếp trên máy này")
+        self.keep.setChecked(True)
+        lay.addWidget(self.keep)
+        lay.addWidget(hint("Bỏ chọn thì máy trở về trạng thái chưa kích hoạt, cần nhập lại Key."))
+        form = QFormLayout()
+        self.pw = _pw()
+        self.confirm = QLineEdit()
+        self.confirm.setPlaceholderText(WIPE_CONFIRM)
+        form.addRow("Mật khẩu Giám đốc", self.pw)
+        form.addRow(f"Gõ \"{WIPE_CONFIRM}\" để xác nhận", self.confirm)
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.ok = QPushButton("Xóa sạch dữ liệu")
+        self.ok.setObjectName("Danger")
+        self.ok.setEnabled(False)
+        self.ok.clicked.connect(self._wipe)
+        cancel = QPushButton("Hủy")
+        cancel.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        row.addWidget(self.ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+        self.confirm.textChanged.connect(lambda s: self.ok.setEnabled(s.strip().upper() == WIPE_CONFIRM))
+
+    def _wipe(self):
+        try:
+            self.files = self.ctx.wipe_all(self.pw.text(), keep_license=self.keep.isChecked())
+        except AuthError as e:
+            self.pw.clear()
+            return error(self, str(e))
         self.accept()
 
 
@@ -207,8 +348,7 @@ class RenewDialog(QDialog):
         if st["thong_bao"]:
             msg = QLabel(st["thong_bao"])
             msg.setWordWrap(True)
-            msg.setStyleSheet("color:#a32020; font-weight:600;" if st["trang_thai"] in ("het_han", "lui_ngay", "loi")
-                              else "color:#9c5700; font-weight:600;")
+            msg.setObjectName("Danger" if st["trang_thai"] in ("het_han", "lui_ngay", "loi") else "Warn")
             lay.addWidget(msg)
         primary = ctx.acc.is_primary_director_machine()
         if primary:

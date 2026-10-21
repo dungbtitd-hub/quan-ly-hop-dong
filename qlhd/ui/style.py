@@ -1,6 +1,8 @@
 """Giao diện phẳng hiện đại, thanh điều hướng tối bên trái; hai chế độ sáng / tối."""
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from string import Template
 
 from PySide6.QtGui import QColor, QPalette
@@ -32,14 +34,16 @@ QSS = Template("""
 * { font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif; font-size: 10pt; color: $text; }
 QMainWindow, QDialog, QStackedWidget, QScrollArea, QScrollArea > QWidget > QWidget { background: $bg; }
 QWidget#Page, QWidget#Content { background: $bg; }
+QDialog#Splash { background: $card; border: 1px solid $border_strong; }
 QToolTip { background: $card; color: $text; border: 1px solid $border_strong; padding: 4px; }
 
 /* ---- thanh điều hướng tối */
 QWidget#Sidebar { background: $sidebar; }
 QWidget#Sidebar QLabel { color: $sidebar_text; background: transparent; }
-QLabel#AppName { color: #ffffff; font-size: 12pt; font-weight: 700; }
-QLabel#AppCompany { color: $sidebar_text; font-size: 9pt; }
-QLabel#Logo { background: $accent; color: #ffffff; border-radius: 6px; font-weight: 700; font-size: 12pt; }
+QWidget#Sidebar QLabel#AppName { color: #ffffff; font-size: 12pt; font-weight: 700; }
+QWidget#Sidebar QLabel#AppCompany { color: $sidebar_head; font-size: 9pt; }
+QLabel#Logo, QWidget#Sidebar QLabel#Logo { background: $accent; color: #ffffff; border-radius: 8px; font-weight: 700;
+                              font-size: 14pt; }
 QListWidget#Nav { background: $sidebar; border: none; outline: 0; padding: 4px 8px; }
 QListWidget#Nav::item { color: $sidebar_text; padding: 8px 10px; margin: 1px 0; border-radius: 6px; }
 QListWidget#Nav::item:hover { background: $sidebar_hover; }
@@ -52,7 +56,7 @@ QWidget#Sidebar QLabel#DevLine { color: $sidebar_text; font-size: 9pt; }
 
 /* ---- thanh trên */
 QWidget#TopBar { background: $topbar; border-bottom: 1px solid $border; }
-QLabel#TopTitle { font-weight: 600; }
+QLabel#TopTitle { font-size: 12pt; font-weight: 600; }
 QToolButton#UserCard { background: $card; border: 1px solid $border; border-radius: 8px; padding: 4px 10px;
                        text-align: left; }
 QToolButton#UserCard:hover { border-color: $border_strong; }
@@ -79,7 +83,7 @@ QLabel#Pill[tone="danger"] { background: $danger_soft; color: $danger; }
 QLabel#Pill[tone="warn"] { background: $warn_soft; color: $warn; }
 QLabel#Pill[tone="success"] { background: $success_soft; color: $success; }
 QLabel#Pill[tone="accent"] { background: $accent_soft; color: $accent; }
-QLabel#Mono { font-family: Consolas, Menlo, monospace; font-size: 11pt; }
+QLabel#Mono, QLineEdit#Mono { font-family: Consolas, Menlo, monospace; font-size: 11pt; }
 
 /* ---- thẻ */
 QFrame#Card, QLabel#Card { background: $card; border: 1px solid $border; border-radius: 10px; }
@@ -115,7 +119,24 @@ QLineEdit, QComboBox, QDateEdit, QSpinBox, QPlainTextEdit, QTextEdit {
 QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QSpinBox:focus, QPlainTextEdit:focus { border-color: $accent; }
 QLineEdit:read-only { background: $bg; }
 QLineEdit:disabled, QComboBox:disabled, QDateEdit:disabled, QSpinBox:disabled { color: $muted; background: $bg; }
-QComboBox::drop-down, QDateEdit::drop-down { width: 20px; border: none; }
+QComboBox::drop-down, QDateEdit::drop-down { width: 22px; border: none; }
+QComboBox::down-arrow, QDateEdit::down-arrow { image: url($down); width: 12px; height: 12px; }
+QSpinBox { padding-right: 18px; }
+QSpinBox::up-button, QSpinBox::down-button { width: 18px; border: none; background: transparent; }
+QSpinBox::up-arrow { image: url($up); width: 10px; height: 10px; }
+QSpinBox::down-arrow { image: url($down); width: 10px; height: 10px; }
+QCheckBox::indicator, QRadioButton::indicator, QListView::indicator, QTableView::indicator,
+QTreeView::indicator, QGroupBox::indicator {
+    width: 15px; height: 15px; border: 1px solid $border_strong; border-radius: 4px; background: $input;
+}
+QRadioButton::indicator { border-radius: 8px; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover, QListView::indicator:hover { border-color: $accent; }
+QCheckBox::indicator:checked, QListView::indicator:checked, QTableView::indicator:checked,
+QTreeView::indicator:checked, QGroupBox::indicator:checked {
+    background: $accent; border-color: $accent; image: url($check);
+}
+QRadioButton::indicator:checked { background: $input; border: 5px solid $accent; width: 7px; height: 7px; }
+QCheckBox::indicator:disabled, QListView::indicator:disabled { background: $bg; border-color: $border; }
 QComboBox QAbstractItemView { background: $card; border: 1px solid $border_strong; selection-background-color: $sel;
                               selection-color: $sel_text; outline: 0; }
 QCheckBox, QRadioButton { background: transparent; spacing: 6px; }
@@ -161,8 +182,32 @@ QMessageBox QLabel { background: transparent; }
 """)
 
 
+_ARROW = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2.6" '
+          'stroke-linecap="round" stroke-linejoin="round"><path d="{d}"/></svg>')
+_SHAPES = {"down": "M6 9l6 6 6-6", "up": "M6 15l6-6 6 6", "check": "M5 12.5l4.5 4.5L19 7.5"}
+
+
+def _assets(theme: str) -> dict[str, str]:
+    """Ghi các hình mũi tên / dấu tích ra thư mục tạm để QSS tham chiếu (QSS không nhúng được SVG trực tiếp)."""
+    t = THEMES[theme]
+    d = Path(tempfile.gettempdir()) / "QuanLyHopDong-ui" / theme
+    out = {}
+    for name, shape in _SHAPES.items():
+        f = d / f"{name}.svg"
+        svg = _ARROW.format(c="#ffffff" if name == "check" else t["muted"], d=shape)
+        try:
+            if not f.exists() or f.read_text(encoding="utf-8") != svg:
+                d.mkdir(parents=True, exist_ok=True)
+                f.write_text(svg, encoding="utf-8")
+        except OSError:
+            pass
+        out[name] = f.as_posix()
+    return out
+
+
 def qss(theme: str = "sang") -> str:
-    return QSS.substitute(THEMES.get(theme, THEMES["sang"]))
+    theme = theme if theme in THEMES else "sang"
+    return QSS.substitute({**THEMES[theme], **_assets(theme)})
 
 
 def color(key: str) -> str:
@@ -190,6 +235,3 @@ def apply_theme(app, theme: str = "sang") -> None:
     app.setPalette(pal)
     app.setStyleSheet(qss(_current))
 
-
-# Giữ tên cũ cho mã đang dùng.
-WIN7_QSS = qss("sang")

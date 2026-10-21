@@ -5,7 +5,7 @@ import json
 from datetime import date
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QRadioButton,
+from PySide6.QtWidgets import (QComboBox, QCheckBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QRadioButton,
                                QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.contracts import CONTRACT_STATUSES
@@ -52,7 +52,7 @@ class ReportsPage(QWidget):
         self.tinh_theo = Combo([("Ngày ký hợp đồng", "NgayKy"), ("Ngày lập hóa đơn", "NgayHoaDon"),
                                 ("Ngày tiền về", "NgayTienVe")])
         self.chieu = Combo([("Tất cả", None), ("Đầu ra", "Đầu ra"), ("Đầu vào", "Đầu vào")])
-        self.gop = QCheckBox("Gộp đầu ra và đầu vào chung một bảng")
+        self.gop = QCheckBox("Gộp đầu ra, đầu vào chung bảng")
         self.gop.setToolTip("Mặc định hợp đồng / hóa đơn đầu ra và đầu vào được tách thành bảng (sheet) riêng.")
         self.loai = CheckList()
         self.doi_tac = CheckList()
@@ -92,7 +92,13 @@ class ReportsPage(QWidget):
         scroll = QScrollArea()
         scroll.setWidget(filt)
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(380)
+        scroll.setMinimumWidth(440)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        g.setColumnStretch(1, 1)
+        for cb in filt.findChildren(QComboBox):
+            cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(12)
         split.addWidget(scroll)
         right = QWidget()
         rl = QVBoxLayout(right)
@@ -105,7 +111,7 @@ class ReportsPage(QWidget):
         self.tabs = QTabWidget()
         rl.addWidget(self.tabs, 1)
         split.addWidget(right)
-        split.setSizes([400, 820])
+        split.setSizes([450, 800])
         lay.addWidget(split, 1)
         self._context_changed()
 

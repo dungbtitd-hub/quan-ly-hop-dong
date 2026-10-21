@@ -406,17 +406,48 @@ class ContractService:
                 out.append(r)
         return out
 
+    def overdue_tasks(self, today: str) -> list[dict]:
+        t = date.fromisoformat(today)
+        out = []
+        for r in self.db.query(
+                "SELECT c.TenNoiDungCV, h.SoHopDong, h.Ma MaHopDong, c.NgayDuKienHT FROM CongViec c"
+                " JOIN HopDong h ON h.Ma = c.MaHopDong"
+                " WHERE c.DaXoa = 0 AND h.DaXoa = 0 AND c.TinhTrangCV NOT IN ('Hoàn thành', 'Đã nghiệm thu')"
+                " AND c.NgayDuKienHT IS NOT NULL AND c.NgayDuKienHT < ? ORDER BY c.NgayDuKienHT", (today,)):
+            r = dict(r)
+            r["QuaHan"] = (t - date.fromisoformat(r["NgayDuKienHT"][:10])).days
+            out.append(r)
+        return out
+
     # ---- trang chủ
-    def dashboard(self, today: str) -> dict:
+    def dashboard(self, today: str, days: int = 14) -> dict:
         n_out = self.db.one("SELECT COUNT(*) n FROM HopDong WHERE DaXoa = 0 AND ChieuHopDong = 'Đầu ra'")["n"]
         n_in = self.db.one("SELECT COUNT(*) n FROM HopDong WHERE DaXoa = 0 AND ChieuHopDong = 'Đầu vào'")["n"]
-        receivable = 0
+        running = self.db.one("SELECT COUNT(*) n FROM HopDong WHERE DaXoa = 0 AND TinhTrangHopDong = 'Đang thực hiện'")["n"]
+        receivable, debts = 0, []
         for hd in self.contracts("Đầu ra"):
-            receivable += max(self.summary(hd["Ma"])["ConPhaiThu"], 0)
-        overdue = self.db.query(
-            "SELECT c.TenNoiDungCV, h.SoHopDong, c.NgayDuKienHT FROM CongViec c JOIN HopDong h ON h.Ma = c.MaHopDong"
-            " WHERE c.DaXoa = 0 AND h.DaXoa = 0 AND c.TinhTrangCV NOT IN ('Hoàn thành', 'Đã nghiệm thu')"
-            " AND c.NgayDuKienHT IS NOT NULL AND c.NgayDuKienHT < ? ORDER BY c.NgayDuKienHT", (today,))
+            s = self.summary(hd["Ma"])
+            if s["ConPhaiThu"] > 0:
+                receivable += s["ConPhaiThu"]
+                debts.append({"Ma": hd["Ma"], "SoHopDong": hd["SoHopDong"], "TenHopDong": hd["TenHopDong"],
+                              "TenDoiTac": hd["TenDoiTac"], **s})
+        debts.sort(key=lambda r: -r["ConPhaiThu"])
+        t = date.fromisoformat(today)
+        overdue = self.overdue_tasks(today)
         ending = self.expiring(today)
-        return {"hd_dau_ra": n_out, "hd_dau_vao": n_in, "con_phai_thu": receivable,
-                "cv_qua_han": overdue, "hd_sap_het_han": ending}
+        # Lịch các ngày tới: hạn công việc và ngày kết thúc hợp đồng.
+        last = (t + timedelta(days=days - 1)).isoformat()
+        events: dict[str, list[str]] = {}
+        for r in self.db.query(
+                "SELECT c.TenNoiDungCV, h.SoHopDong, c.NgayDuKienHT d FROM CongViec c JOIN HopDong h ON h.Ma = c.MaHopDong"
+                " WHERE c.DaXoa = 0 AND h.DaXoa = 0 AND c.TinhTrangCV NOT IN ('Hoàn thành', 'Đã nghiệm thu')"
+                " AND substr(c.NgayDuKienHT, 1, 10) BETWEEN ? AND ?", (today, last)):
+            events.setdefault(r["d"][:10], []).append(f"Hạn công việc: {r['TenNoiDungCV']} ({r['SoHopDong']})")
+        for r in self.db.active("HopDong", f"TinhTrangHopDong IN ({','.join('?' * len(OPEN_STATUSES))})"
+                                " AND substr(NgayKetThucDuKien, 1, 10) BETWEEN ? AND ?",
+                                (*OPEN_STATUSES, today, last)):
+            events.setdefault(r["NgayKetThucDuKien"][:10], []).append(f"Hết hạn hợp đồng {r['SoHopDong']}")
+        calendar = [((t + timedelta(days=i)).isoformat(), events.get((t + timedelta(days=i)).isoformat(), []))
+                    for i in range(days)]
+        return {"hd_dau_ra": n_out, "hd_dau_vao": n_in, "dang_thuc_hien": running, "con_phai_thu": receivable,
+                "cong_no": debts, "cv_qua_han": overdue, "hd_sap_het_han": ending, "lich": calendar}

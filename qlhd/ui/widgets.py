@@ -5,7 +5,7 @@ from datetime import date
 
 from PySide6.QtCore import QDate, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QGuiApplication, QPainter
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QAbstractItemView, QStyle, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
                                QFormLayout, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
@@ -203,7 +203,7 @@ class PercentDelegate(QStyledItemDelegate):
             return super().paint(painter, option, index)
         self.initStyleOption(option, index)
         option.text = ""
-        option.widget.style().drawControl(option.widget.style().CE_ItemViewItem, option, painter, option.widget)
+        option.widget.style().drawControl(QStyle.CE_ItemViewItem, option, painter, option.widget)
         r = option.rect.adjusted(8, 0, -8, 0)
         bar = QRectF(r.left(), r.center().y() - 3, max(r.width() - 46, 20), 6)
         painter.save()

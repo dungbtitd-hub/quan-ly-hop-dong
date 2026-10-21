@@ -12,6 +12,7 @@ from ..core import invoice_match, pdf_invoice, xml_invoice
 from ..core.contracts import INVOICE_KINDS, TAX_GROUPS, ValidationError, guess_tax_group, rate_from_amounts
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import payment_dialog
+from . import style
 from .widgets import (Combo, DataTable, EditCombo, FormDialog, button, confirm, error, hint, info, page_title,
                       run_safely, toolbar)
 
@@ -74,6 +75,7 @@ class InvoicesPage(QWidget):
         lay.addWidget(page_title("Hóa đơn đầu ra" if kind == "ra" else "Hóa đơn đầu vào"))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Tìm số hóa đơn, đối tác, MST, mặt hàng…")
+        self.search.setMinimumWidth(280)
         self.search.textChanged.connect(self.refresh)
         add_ok = ctx.can(self.feature, "Them")
         b_add = button("Nhập tay", self.add_manual, "Primary")
@@ -436,8 +438,8 @@ class BatchInvoiceDialog(QDialog):
         missing = [i for i in new if self.items[i]["values"].get("MaHopDong") == CHOOSE]
         for i in range(len(self.items)):
             st = self.items[i]["status"]
-            color = (QColor("#fde3d6") if st == "loi" else QColor("#eceff3") if st == "da_co"
-                     else QColor("#fff1c7") if i in missing else QColor("white"))
+            color = QColor(style.color("danger_soft" if st == "loi" else "total_bg" if st == "da_co"
+                                       else "warn_soft" if i in missing else "card"))
             for j in range(len(self.cols)):
                 item = self.table.item(i, j)
                 if item is not None:

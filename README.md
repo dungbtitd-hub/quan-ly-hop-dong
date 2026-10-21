@@ -44,14 +44,28 @@ Tạo trang Release: tab **Actions** → *Kiểm thử và đóng gói* → **Ru
 
 ## Chức năng chính
 
+- Giao diện phẳng với thanh điều hướng tối bên trái (thông tin nhà phát triển ở góc dưới), trang **Tổng quan**
+  (hợp đồng sắp hết hạn, công việc quá hạn, lịch 14 ngày tới, công nợ theo hợp đồng), chuyển **sáng / tối** bằng nút
+  trên thanh tiêu đề (phần mềm nhớ lựa chọn).
+- Hợp đồng có **thời gian thực hiện** (ngày hoặc tháng), ngày kết thúc tự tính; **nhắc hợp đồng sắp hết hạn** trước
+  số ngày cài đặt (mặc định 30, chỉnh ở *Tổng quan → Cài đặt nhắc hạn*, từng hợp đồng đặt riêng được), nhắc mỗi
+  ngày một lần khi đăng nhập và trên chuông thông báo.
+- **Tài khoản của tôi** (bấm vào tên ở góc trên phải): đổi tên đăng nhập, đổi mật khẩu.
+- **Xóa sạch dữ liệu** (chỉ Giám đốc): ghi đè ngẫu nhiên rồi xóa toàn bộ dữ liệu, sao lưu, nhật ký; tùy chọn giữ
+  bản quyền và tài khoản.
+
 - Hợp đồng đầu ra / đầu vào, công việc, bàn giao, nghiệm thu, danh mục loại hợp đồng, đối tác, nhóm chủ đầu tư.
 - Nhập hàng loạt hợp đồng, hóa đơn đầu ra, thanh toán từ **Excel mẫu** (nút *Tải file Excel mẫu*).
-- Hóa đơn đầu ra và đầu vào đọc từ **XML** hoặc **PDF** hóa đơn điện tử (PDF có lớp chữ; bản scan nhập tay).
+- Hóa đơn đầu ra và đầu vào đọc từ **XML** hoặc **PDF** hóa đơn điện tử (PDF có lớp chữ; bản scan nhập tay),
+  **chọn nhiều file cùng lúc**; nhập Excel cảnh báo trùng số hóa đơn. Hóa đơn đầu vào có Tên người bán, Mặt hàng,
+  Thuế suất, nhóm chịu thuế / không chịu thuế GTGT, Người mua hàng, Số tham chiếu sao kê.
   Phần mềm tự gắn hóa đơn với hợp đồng đầu ra / đầu vào theo số hợp đồng ghi trên hóa đơn (kèm kiểm tra MST đối tác);
   không nhận ra được thì bắt người nhập tự chọn hợp đồng (có gợi ý), không điền sẵn để tránh gắn nhầm.
 - Thanh toán nhiều lần cho mỗi hợp đồng / hóa đơn; tình trạng thu tiền tự tính.
-- Báo cáo Excel theo **9 ngữ cảnh** (loại HĐ, chủ đầu tư, nhóm chủ đầu tư, hợp đồng, hóa đơn đã xuất, hợp đồng đã
-  thanh toán, nhà cung cấp, hóa đơn đầu vào, thời gian) với **10 bộ lọc**, trong kỳ hoặc lũy kế, lưu mẫu báo cáo.
+- Báo cáo Excel theo **12 ngữ cảnh** (tổng hợp mọi trường hợp đồng, loại HĐ, chủ đầu tư, nhóm chủ đầu tư, hợp đồng,
+  hóa đơn đã xuất, hóa đơn đầu ra theo người mua – mỗi người mua một sheet, hợp đồng đã thanh toán, nhà cung cấp,
+  bảng kê hóa đơn đầu vào theo nhóm thuế, hóa đơn đầu ra + đầu vào, thời gian) với **12 bộ lọc**, trong kỳ hoặc lũy
+  kế. Đầu ra và đầu vào tách bảng riêng trừ khi chọn gộp. Lưu mẫu báo cáo và đặt thành nút **Xuất nhanh**.
 - **Thu chi bảo mật**: tệp `ThuChi.dat` mã hóa AES-256-GCM, mở bằng Khóa thu chi riêng (khác mật khẩu đăng nhập),
   chỉ Giám đốc và Người quản lý. Thu tự lấy từ thanh toán hợp đồng; chi theo dự án hoặc văn phòng, khoản mục nhiều cấp;
   tồn quỹ; báo cáo ngày / tháng / quý / năm, tổng hợp chi, thu - chi theo dự án; Excel có mật khẩu mở file;
@@ -67,6 +81,7 @@ Tạo trang Release: tab **Actions** → *Kiểm thử và đóng gói* → **Ru
 - macOS: `~/Library/Application Support/QuanLyHopDong`
 
 Gồm `QuanLyHopDong.db` (hợp đồng, hóa đơn, tài khoản), `ThuChi.dat` (thu chi, đã mã hóa), thư mục `SaoLuu`.
+Cài bản mới đè lên bản cũ giữ nguyên dữ liệu: phần mềm tự bổ sung các cột mới khi mở.
 
 ## Dành cho nhà phát triển
 
@@ -103,9 +118,9 @@ cạnh tệp khóa. Chỉ khi buộc phải thay khóa mới chạy `python tool
 
 ```
 qlhd/core/   licensing (Key, mã nhân viên, thu hồi) · auth (tài khoản, phân quyền) · db (SQLite + cột đồng bộ)
-             contracts · finance (thu chi mã hóa) · reports (9 ngữ cảnh, Excel) · sync (gói .qlhd, Gói Giám đốc)
+             contracts · finance (thu chi mã hóa) · reports (12 ngữ cảnh, Excel) · sync (gói .qlhd, Gói Giám đốc)
              xml_invoice · pdf_invoice · excel_import · crypto · machine
-qlhd/ui/     giao diện PySide6 kiểu Windows 7
+qlhd/ui/     giao diện PySide6 (style.py: chủ đề sáng / tối, icons.py: biểu tượng SVG)
 tools/       license_manager.py (Phần mềm cấp mã)
 .github/     build.yml: kiểm thử + đóng gói Windows / macOS bằng PyInstaller
 ```

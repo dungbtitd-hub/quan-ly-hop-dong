@@ -13,7 +13,7 @@ from .context import AppContext
 from .ui.auth_dialogs import ActivationDialog, LoginDialog, RenewDialog
 from .ui.main_window import MainWindow
 from .ui.splash import SplashDialog
-from .ui.style import WIN7_QSS
+from .ui.style import apply_theme
 
 
 def create_app(argv=None) -> QApplication:
@@ -21,7 +21,7 @@ def create_app(argv=None) -> QApplication:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("ITD Viet Nam")
     app.setStyle("Fusion")
-    app.setStyleSheet(WIN7_QSS)
+    apply_theme(app, "sang")
     f = QFont("Segoe UI", 9)
     f.setStyleHint(QFont.SansSerif)
     app.setFont(f)
@@ -63,6 +63,7 @@ def main(argv=None) -> int:
         return self_test()
     app = create_app(argv)
     ctx = AppContext()
+    apply_theme(app, ctx.db.setting("giao_dien") or "sang")
     try:
         SplashDialog(ctx.acc).exec()
         if not ctx.acc.is_activated():

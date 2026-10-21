@@ -14,10 +14,11 @@ from ..core.finance import FinanceError, FinanceStore
 from ..core.reports import fmt_date
 from ..core.sync import (A_BOTH, A_KEEP, A_MERGE, A_SKIP, A_TAKE, ACTION_LABELS, PKG_EXT, ST_CONFLICT, ST_DUP,
                          ST_SAME, SyncError)
+from . import style
 from .widgets import (CheckList, Combo, DataTable, DateEdit, ask_secret, button, confirm, error, hint, info,
                       page_title, toolbar)
 
-STATUS_COLORS = {ST_CONFLICT: "#b00020", ST_DUP: "#9c5700", ST_SAME: "#7a869a"}
+STATUS_COLORS = {ST_CONFLICT: "danger", ST_DUP: "warn", ST_SAME: "muted"}
 
 
 def _pw() -> QLineEdit:
@@ -184,7 +185,7 @@ class SyncPage(QWidget):
         if self.pkg.is_director:
             txt += " <b>Gói Giám đốc (kèm thu chi đã mã hóa).</b>"
         if self.pkg.already_imported:
-            txt += " <span style='color:#9c5700'>Gói này đã được nhận trước đây.</span>"
+            txt += " <span style='color:" + style.color("warn") + "'>Gói này đã được nhận trước đây.</span>"
         self.pkg_info.setText(txt)
         self._fill_tree()
         self.b_all.setEnabled(True)
@@ -218,7 +219,7 @@ class SyncPage(QWidget):
             row = QTreeWidgetItem([it.label, it.status, ", ".join(it.diff[:6])])
             if it.status in STATUS_COLORS:
                 from PySide6.QtGui import QColor
-                row.setForeground(1, QColor(STATUS_COLORS[it.status]))
+                row.setForeground(1, QColor(style.color(STATUS_COLORS[it.status])))
             groups[key].addChild(row)
             opts = {ST_DUP: [A_MERGE, A_BOTH, A_SKIP]}.get(it.status, [A_TAKE, A_KEEP] if it.local else [A_TAKE, A_SKIP])
             combo = Combo([("(chọn)", None)] + [(ACTION_LABELS[a], a) for a in opts] if it.action is None

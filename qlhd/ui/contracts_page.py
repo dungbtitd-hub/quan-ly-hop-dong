@@ -1,11 +1,10 @@
 """Màn hình Trang chủ, Hợp đồng (kèm công việc, hóa đơn, thanh toán) và nhập từ Excel."""
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QLabel, QLineEdit,
                                QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core import excel_import
@@ -14,46 +13,6 @@ from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, TA
 from ..core.reports import fmt_date, fmt_money
 from .widgets import (Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title, require,
                       run_safely, toolbar)
-
-
-class HomePage(QWidget):
-    def __init__(self, ctx, parent=None):
-        super().__init__(parent)
-        self.ctx = ctx
-        lay = QVBoxLayout(self)
-        lay.addWidget(page_title("Trang chủ"))
-        self.cards = QGridLayout()
-        lay.addLayout(self.cards)
-        lay.addWidget(QLabel("Công việc quá hạn"))
-        self.overdue = DataTable([("SoHopDong", "Số HĐ", "text"), ("TenNoiDungCV", "Công việc", "text"),
-                                  ("NgayDuKienHT", "Hạn", "date")])
-        lay.addWidget(self.overdue)
-        lay.addWidget(QLabel("Hợp đồng sắp hết hạn (30 ngày tới)"))
-        self.ending = DataTable([("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp đồng", "text"),
-                                 ("NgayKetThucDuKien", "Ngày kết thúc", "date")])
-        lay.addWidget(self.ending)
-        self.sync_info = hint("")
-        lay.addWidget(self.sync_info)
-
-    def refresh(self):
-        d = self.ctx.cs.dashboard(date.today().isoformat())
-        while self.cards.count():
-            self.cards.takeAt(0).widget().deleteLater()
-        for i, (label, value) in enumerate([("Hợp đồng đầu ra", str(d["hd_dau_ra"])),
-                                            ("Hợp đồng đầu vào", str(d["hd_dau_vao"])),
-                                            ("Còn phải thu", fmt_money(d["con_phai_thu"]) + " đ"),
-                                            ("Công việc quá hạn", str(len(d["cv_qua_han"])))]):
-            card = QLabel(f"<div style='color:#5a6b80'>{label}</div><div style='font-size:15pt;font-weight:600'>{value}</div>")
-            card.setObjectName("Card")
-            self.cards.addWidget(card, 0, i)
-        self.overdue.set_rows(d["cv_qua_han"])
-        self.ending.set_rows(d["hd_sap_het_han"])
-        partners = self.ctx.sync.partners()
-        if partners:
-            p = partners[0]
-            self.sync_info.setText(f"Lần đồng bộ gần nhất: {p['TenMay']} lúc {fmt_date(p['LanCuoi'][:10])}.")
-        else:
-            self.sync_info.setText("Chưa đồng bộ với máy nào.")
 
 
 CONTRACT_COLS = [("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp đồng", "text"),
@@ -164,6 +123,7 @@ class ContractsPage(QWidget):
         self.filter.currentIndexChanged.connect(self.refresh)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Tìm số HĐ, tên HĐ, đối tác…")
+        self.search.setMinimumWidth(260)
         self.search.textChanged.connect(self.refresh)
         can_add = ctx.can("HopDong", "Them")
         self.b_add = button("Thêm hợp đồng", self.add, "Primary")
@@ -228,6 +188,22 @@ class ContractsPage(QWidget):
         self.summary.setText(f"{len(rows)} hợp đồng · Tổng giá trị {fmt_money(tot)} đ · Còn phải thu "
                              f"{fmt_money(sum(max(r['ConPhaiThu'], 0) for r in rows if r['ChieuHopDong'] == 'Đầu ra'))} đ")
         self.refresh_detail()
+
+    def select_contract(self, ma: str) -> None:
+        """Mở trang ở hợp đồng được chọn (từ Tổng quan)."""
+        self.filter.blockSignals(True)
+        self.search.blockSignals(True)
+        self.filter.setCurrentIndex(0)
+        self.search.clear()
+        self.filter.blockSignals(False)
+        self.search.blockSignals(False)
+        self.refresh()
+        for i in range(self.table.rowCount()):
+            r = self.table._row_of(self.table.item(i, 0))
+            if r and r["Ma"] == ma:
+                self.table.selectRow(i)
+                self.table.scrollToItem(self.table.item(i, 0))
+                break
 
     def current_id(self) -> str | None:
         r = self.table.current()
@@ -544,4 +520,4 @@ class CatalogPage(QWidget):
             self.refresh()
 
 
-__all__ = ["HomePage", "ContractsPage", "CatalogPage", "contract_dialog", "partner_dialog", "payment_dialog"]
+__all__ = ["ContractsPage", "CatalogPage", "contract_dialog", "partner_dialog", "payment_dialog"]

@@ -16,11 +16,11 @@ pytest.importorskip("PySide6.QtWidgets")
 @pytest.fixture
 def ctx(tmp_path, vendor):
     from qlhd.context import AppContext
-    from qlhd.ui.style import WIN7_QSS
+    from qlhd.ui.style import apply_theme
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
-    app.setStyleSheet(WIN7_QSS)
+    apply_theme(app, "sang")
     priv, pub = vendor
     c = AppContext(tmp_path / "data", vendor_pub=pub)
     key = lic.issue_director_key(priv, c.acc.activation_request(), "Công ty ABC", "0101234567", 5)
@@ -200,3 +200,59 @@ def test_change_username(ctx):
     with pytest.raises(AuthError):
         ctx.acc.login("giamdoc", "matkhau123")
     assert FinanceStore.unlock(ctx.db, ctx.finance_path, ctx.user, "khoa-thu-chi-1") is not None
+
+
+def test_new_layout_home_theme_and_account(qtbot, ctx):
+    from datetime import date, timedelta
+
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    from qlhd.ui import style
+    from qlhd.ui.auth_dialogs import MyAccountDialog, WipeDataDialog
+    from qlhd.ui.home_page import reminder_text
+    from qlhd.ui.main_window import PAGE_ROLE, MainWindow
+
+    hd = ctx.cs.contracts("Đầu ra")[0]
+    end = (date.today() + timedelta(days=5)).isoformat()
+    ctx.db.execute("UPDATE HopDong SET NgayKetThucDuKien = ?, TinhTrangHopDong = 'Đang thực hiện' WHERE Ma = ?",
+                   (end, hd["Ma"]))
+    win = MainWindow(ctx)
+    qtbot.addWidget(win)
+    win.show()
+    heads = [win.nav.item(i).text() for i in range(win.nav.count()) if win.nav.item(i).data(PAGE_ROLE) is None]
+    assert heads == ["CÔNG VIỆC", "TÀI CHÍNH", "DỮ LIỆU"]
+    assert win.top_title.text() == "Tổng quan"
+    texts = " ".join(lbl.text() for lbl in win.findChildren(QLabel))
+    assert "NHÀ PHÁT TRIỂN" in texts and "0988095867" in texts and "Sắp hết hạn" in texts
+    assert win.bell_badge.isVisibleTo(win) and int(win.bell_badge.text()) >= 1
+    assert "còn 5 ngày" in reminder_text(ctx, date.today().isoformat())
+    win._daily_reminder()
+    assert ctx.db.setting("nhac_hd_ngay:giamdoc") == date.today().isoformat()
+    # mở hợp đồng từ Tổng quan
+    win.show_contract(hd["Ma"])
+    assert not win.grab().isNull()          # vẽ thật cả bảng (cột % thanh toán, huy hiệu, thẻ)
+    assert win.top_title.text() == "Hợp đồng" and win.contracts_page.current_id() == hd["Ma"]
+    # sáng / tối, nhớ lựa chọn
+    win.toggle_theme()
+    win.go_to("Tổng quan")
+    win.grab()
+    assert style.current() == "toi" and ctx.db.setting("giao_dien") == "toi"
+    assert "#0f141c" in QApplication.instance().styleSheet()
+    win.toggle_theme()
+    assert style.current() == "sang"
+    # tài khoản của tôi
+    dlg = MyAccountDialog(ctx, win)
+    qtbot.addWidget(dlg)
+    dlg.new_name.setText("dung.bt")
+    dlg.name_pw.setText("matkhau123")
+    from unittest import mock
+
+    with mock.patch("qlhd.ui.auth_dialogs.info"):
+        dlg._rename()
+    assert ctx.user["TenDangNhap"] == "dung.bt" and ctx.db.setting("dang_nhap_cuoi") == "dung.bt"
+    w = WipeDataDialog(ctx, win)
+    qtbot.addWidget(w)
+    assert not w.ok.isEnabled()
+    w.confirm.setText("xoa sach")
+    assert w.ok.isEnabled()
+    win.close()
