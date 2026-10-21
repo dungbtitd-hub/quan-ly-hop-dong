@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import platform
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from . import licensing as lic
@@ -20,6 +21,7 @@ LOCK_MINUTES = 15
 WARN_DAYS = 30          # báo trước khi bản quyền hết hạn
 CLOCK_TOLERANCE_DAYS = 1
 PBKDF2_ITER = 200_000
+USERNAME_RE = re.compile(r"[A-Za-z0-9._-]{3,32}")
 
 
 class AuthError(Exception):
@@ -330,6 +332,28 @@ class AccountService:
         _check_password_rule(new)
         self.db.execute("UPDATE NguoiDung SET MatKhauBam = ?, BatBuocDoiMK = 0 WHERE MaNguoiDung = ?",
                         (hash_password(new), user_id))
+
+    def change_username(self, user_id: int, password: str, new_name: str) -> None:
+        """Đổi tên đăng nhập; chuyển theo Khóa thu chi và trạng thái khóa của tài khoản."""
+        u = self.db.one("SELECT * FROM NguoiDung WHERE MaNguoiDung = ?", (user_id,))
+        if not verify_password(password, u["MatKhauBam"]):
+            raise AuthError("Mật khẩu hiện tại không đúng.")
+        new_name = new_name.strip()
+        if not USERNAME_RE.fullmatch(new_name):
+            raise AuthError("Tên đăng nhập dài 3–32 ký tự, chỉ gồm chữ không dấu, số và dấu . _ -")
+        if new_name == u["TenDangNhap"]:
+            return
+        if new_name.startswith("__") or self.db.one(
+                "SELECT 1 FROM NguoiDung WHERE lower(TenDangNhap) = lower(?) AND MaNguoiDung != ?", (new_name, user_id)):
+            raise AuthError(f"Tên đăng nhập \"{new_name}\" đã có người dùng.")
+        old = u["TenDangNhap"]
+        c = self.db.conn
+        c.execute("UPDATE NguoiDung SET TenDangNhap = ? WHERE MaNguoiDung = ?", (new_name, user_id))
+        c.execute("UPDATE KhoaThuChi SET TenDangNhap = ? WHERE TenDangNhap = ?", (new_name, old))
+        c.execute("UPDATE CaiDat SET Khoa = ? WHERE Khoa = ?", ("tc_sai:" + new_name, "tc_sai:" + old))
+        c.execute("UPDATE CaiDat SET GiaTri = ? WHERE Khoa = 'dang_nhap_cuoi' AND GiaTri = ?", (new_name, old))
+        c.commit()
+        self.db.log(new_name, "Đổi tên đăng nhập", f"{old} → {new_name}")
 
     def permissions(self, user) -> dict:
         rows = self.db.query("SELECT * FROM PhanQuyen WHERE MaNguoiDung = ?", (user["MaNguoiDung"],))

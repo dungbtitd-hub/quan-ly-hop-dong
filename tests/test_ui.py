@@ -142,3 +142,61 @@ def test_renew_dialog_and_splash_term(qtbot, tmp_path, vendor):
     c.acc.renew(dlg.key.toPlainText())
     assert c.acc.license_status()["han"] == new_han
     c.close()
+
+
+def test_wipe_all_keep_license(tmp_path, vendor):
+    from qlhd.context import AppContext
+    from qlhd.core.auth import AuthError
+
+    priv, pub = vendor
+    c = AppContext(tmp_path / "gd", vendor_pub=pub)
+    key = lic.issue_director_key(priv, c.acc.activation_request(), "Công ty ABC", "0101234567", 5)
+    c.acc.activate_director(key, "giamdoc", "Nguyễn Văn A", "matkhau123")
+    c.user = c.acc.login("giamdoc", "matkhau123")
+    sample_data(c.db)
+    FinanceStore.initialize(c.db, c.finance_path, c.user, "khoa-thu-chi-1", iterations=1000)[0].lock()
+    c.backup_now("thu-cong")
+    secret = (c.data_dir / "QuanLyHopDong.db").read_bytes()
+    with pytest.raises(AuthError):
+        c.wipe_all("sai-mat-khau", keep_license=True)
+    n = c.wipe_all("matkhau123", keep_license=True)
+    assert n >= 4 and not c.finance_path.exists() and not (c.data_dir / "SaoLuu").exists()
+    assert c.db.one("SELECT COUNT(*) n FROM HopDong")["n"] == 0
+    assert c.db.one("SELECT COUNT(*) n FROM NhatKyHeThong")["n"] == 0
+    assert c.acc.is_activated() and c.acc.login("giamdoc", "matkhau123")
+    assert b"Thi\xe1\xba\xbft k\xe1\xba\xbf tr\xc6\xb0\xe1\xbb\x9dng h\xe1\xbb\x8dc" in secret      # có trước khi xóa
+    assert b"Thi\xe1\xba\xbft k\xe1\xba\xbf tr\xc6\xb0\xe1\xbb\x9dng h\xe1\xbb\x8dc" not in (
+        c.data_dir / "QuanLyHopDong.db").read_bytes()
+    c.close()
+
+
+def test_wipe_all_including_license(tmp_path, vendor):
+    from qlhd.context import AppContext
+
+    priv, pub = vendor
+    c = AppContext(tmp_path / "gd", vendor_pub=pub)
+    mid = c.machine_id
+    key = lic.issue_director_key(priv, c.acc.activation_request(), "Công ty ABC", "0101234567", 5)
+    c.acc.activate_director(key, "giamdoc", "Nguyễn Văn A", "matkhau123")
+    c.user = c.acc.login("giamdoc", "matkhau123")
+    c.wipe_all("matkhau123", keep_license=False)
+    assert not c.acc.is_activated() and c.acc.users() == []
+    c.close()
+    assert AppContext(tmp_path / "gd", vendor_pub=pub).machine_id == mid
+
+
+def test_change_username(ctx):
+    from qlhd.core.auth import AuthError
+
+    uid = ctx.user["MaNguoiDung"]
+    FinanceStore.initialize(ctx.db, ctx.finance_path, ctx.user, "khoa-thu-chi-1", iterations=1000)[0].lock()
+    with pytest.raises(AuthError):
+        ctx.acc.change_username(uid, "sai-mat-khau", "dung.bt")
+    with pytest.raises(AuthError):
+        ctx.acc.change_username(uid, "matkhau123", "có dấu")
+    ctx.acc.change_username(uid, "matkhau123", "dung.bt")
+    ctx.refresh_user()
+    assert ctx.acc.login("dung.bt", "matkhau123")["MaNguoiDung"] == uid
+    with pytest.raises(AuthError):
+        ctx.acc.login("giamdoc", "matkhau123")
+    assert FinanceStore.unlock(ctx.db, ctx.finance_path, ctx.user, "khoa-thu-chi-1") is not None

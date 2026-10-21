@@ -3,14 +3,18 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QDate, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
-                               QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+                               QFormLayout, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.reports import fmt_date, fmt_money
+from . import style
+from .icons import icon, icon_for_text
+
+BUTTON_ICON_COLOR = "#7b8494"
 
 EMPTY_DATE = QDate(1900, 1, 1)
 
@@ -190,6 +194,32 @@ class NumItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
+class PercentDelegate(QStyledItemDelegate):
+    """Cột % thanh toán vẽ thành thanh tiến độ kèm số."""
+
+    def paint(self, painter, option, index):
+        value = index.data(Qt.UserRole + 1)
+        if value in (None, ""):
+            return super().paint(painter, option, index)
+        self.initStyleOption(option, index)
+        option.text = ""
+        option.widget.style().drawControl(option.widget.style().CE_ItemViewItem, option, painter, option.widget)
+        r = option.rect.adjusted(8, 0, -8, 0)
+        bar = QRectF(r.left(), r.center().y() - 3, max(r.width() - 46, 20), 6)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(style.color("border")))
+        painter.drawRoundedRect(bar, 3, 3)
+        done = QRectF(bar.left(), bar.top(), bar.width() * max(0.0, min(float(value), 100.0)) / 100, bar.height())
+        painter.setBrush(QColor(style.color("success")))
+        painter.drawRoundedRect(done, 3, 3)
+        painter.setPen(QColor(style.color("text")))
+        painter.drawText(QRectF(bar.right() + 6, r.top(), 44, r.height()), Qt.AlignVCenter | Qt.AlignRight,
+                         f"{float(value):.0f}%")
+        painter.restore()
+
+
 class DataTable(QTableWidget):
     """Bảng hiển thị danh sách dict theo cột (khóa, tiêu đề, kiểu)."""
 
@@ -199,12 +229,14 @@ class DataTable(QTableWidget):
         super().__init__(parent)
         self.columns = columns or []
         self.rows: list[dict] = []
+        self.setShowGrid(False)
+        self._pct = PercentDelegate(self)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection if multi else QAbstractItemView.SingleSelection)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.verticalHeader().setVisible(False)
-        self.verticalHeader().setDefaultSectionSize(24)
+        self.verticalHeader().setDefaultSectionSize(30)
         self.horizontalHeader().setHighlightSections(False)
         self.doubleClicked.connect(lambda _: self.current() and self.activated_row.emit(self.current()))
 
@@ -217,8 +249,16 @@ class DataTable(QTableWidget):
         self.setColumnCount(len(self.columns))
         self.setHorizontalHeaderLabels([c[1] for c in self.columns])
         self.setRowCount(len(self.rows))
+        for j in range(self.columnCount()):
+            self.setItemDelegateForColumn(j, None)
+        for j, (_, _, kind) in enumerate(self.columns):
+            if kind == "pct":
+                self.setItemDelegateForColumn(j, self._pct)
         for i, row in enumerate(self.rows):
-            bold = bool(row.get("_kieu"))
+            kieu = row.get("_kieu")
+            bold = bool(kieu)
+            fill = (QBrush(QColor(style.color("group_bg"))) if kieu == "nhom"
+                    else QBrush(QColor(style.color("total_bg"))) if kieu else None)
             for j, (key, _, kind) in enumerate(self.columns):
                 v = row.get(key)
                 if kind in ("money", "int"):
@@ -226,12 +266,15 @@ class DataTable(QTableWidget):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 elif kind == "pct":
                     item = NumItem(f"{v:.1f}%" if v not in (None, "") else "", v)
+                    item.setData(Qt.UserRole + 1, v if not kieu else None)
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 elif kind == "date":
                     item = NumItem(fmt_date(v), v or "")
                 else:
                     item = QTableWidgetItem("" if v is None else str(v))
                 item.setData(Qt.UserRole, i)
+                if fill is not None:
+                    item.setBackground(fill)
                 if bold:
                     f = item.font()
                     f.setBold(True)
@@ -241,8 +284,8 @@ class DataTable(QTableWidget):
         hdr = self.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         self.resizeColumnsToContents()
-        for j in range(self.columnCount()):
-            self.setColumnWidth(j, min(max(self.columnWidth(j), 70), 360))
+        for j, (_, _, kind) in enumerate(self.columns):
+            self.setColumnWidth(j, 150 if kind == "pct" else min(max(self.columnWidth(j) + 12, 70), 360))
         hdr.setStretchLastSection(True)
 
     def _row_of(self, item) -> dict | None:
@@ -396,13 +439,44 @@ def toolbar(*buttons) -> QHBoxLayout:
     return lay
 
 
-def button(text: str, cb=None, name: str | None = None) -> QPushButton:
+def button(text: str, cb=None, name: str | None = None, icon_name: str | None = None) -> QPushButton:
     b = QPushButton(text)
     if cb:
         b.clicked.connect(lambda _=False: cb())
     if name:
         b.setObjectName(name)
+    icon_name = icon_name or icon_for_text(text)
+    if icon_name:
+        b.setIcon(icon(icon_name, "#ffffff" if name == "Primary" else BUTTON_ICON_COLOR, 16))
+        b.setIconSize(QSize(16, 16))
     return b
+
+
+def card(title: str | None = None, *header_widgets) -> tuple[QFrame, QVBoxLayout]:
+    """Khung thẻ bo góc; trả về (khung, layout nội dung). header_widgets đặt bên phải tiêu đề."""
+    frame = QFrame()
+    frame.setObjectName("Card")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(16, 12, 16, 14)
+    lay.setSpacing(10)
+    if title is not None:
+        row = QHBoxLayout()
+        t = QLabel(title)
+        t.setObjectName("CardTitle")
+        row.addWidget(t)
+        row.addStretch(1)
+        for w in header_widgets:
+            row.addWidget(w)
+        lay.addLayout(row)
+    return frame, lay
+
+
+def tagged(label: QLabel, name: str, tone: str | None = None) -> QLabel:
+    """Đặt objectName + thuộc tính tone cho QSS (VD Pill / danger)."""
+    label.setObjectName(name)
+    if tone:
+        label.setProperty("tone", tone)
+    return label
 
 
 def page_title(text: str) -> QLabel:
