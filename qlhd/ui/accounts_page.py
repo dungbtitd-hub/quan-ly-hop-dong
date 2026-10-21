@@ -10,6 +10,7 @@ from .widgets import (Combo, DataTable, DateEdit, button, confirm, copy_text, er
                       toolbar)
 
 FEATURE_LABELS = {"HopDong": "Hợp đồng", "HoaDonDauRa": "Hóa đơn đầu ra / thanh toán", "HoaDonDauVao": "Hóa đơn đầu vào",
+                  "TaiSan": "Tài sản, CCDC (phân loại hóa đơn)",
                   "BaoCao": "Báo cáo", "DanhMuc": "Danh mục", "SaoLuu": "Sao lưu", "DongBo": "Đồng bộ",
                   "ThuChi": "Thu chi (bảo mật)", "TaiKhoan": "Tài khoản"}
 ACTION_LABELS = {"Xem": "Xem", "Them": "Thêm", "Sua": "Sửa", "Xoa": "Xóa", "Xuat": "Xuất"}

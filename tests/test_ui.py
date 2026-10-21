@@ -388,3 +388,57 @@ def test_in_invoices_from_excel_bang_ke(qtbot, ctx, tmp_path, monkeypatch):
     # nhập lại cùng file: tất cả đã có
     again = page.excel_items(in_invoice_excel.read_workbook(tmp_path / "bang_ke.xlsx"))
     assert [it["status"] for it in again] == ["da_co", "da_co", "da_co", "moi", "da_co"]
+
+
+def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from qlhd.ui import assets_page
+    from qlhd.ui.assets_page import AssetsPage, ClassifyDialog
+    from qlhd.ui.profit_page import ProfitTab
+
+    page = AssetsPage(ctx)
+    qtbot.addWidget(page)
+    page.refresh()
+    assert page.pending.rowCount() == 1 and page.tabs.tabText(0) == "Cần phân loại (1)"
+    row = page.pending.rows[0]
+    dlg = ClassifyDialog([row])
+    qtbot.addWidget(dlg)
+    dlg.cls.set_value("CCDC")
+    dlg.group.set_value("TB02")
+    dlg.months.setValue(24)
+    assert dlg.values() == ("CCDC", "TB02", 24)
+    page.svc.set_line_class(row["Ma"], *dlg.values())
+    page.refresh()
+    assert page.pending.rowCount() == 0
+    shown = []
+    monkeypatch.setattr(assets_page, "info", lambda _p, text, *a: shown.append(text))
+    data = Path(__file__).parent / "data"
+    for name in ("so_tscd_gia.xlsx", "so_ccdc_gia.xlsx"):
+        monkeypatch.setattr(assets_page.QFileDialog, "getOpenFileName", lambda *a, n=name: (str(data / n), ""))
+        page.tscd.import_book()
+    assert "thêm 14" in shown[-1]
+    page.tabs.setCurrentWidget(page.ccdc)
+    page.ccdc.year.setValue(2025)
+    assert page.ccdc.table.rowCount() == 14 + 1               # 14 dòng sổ + dòng tổng
+    page.ccdc.year.setValue(2026)
+    assert any(r.get("TenTS", "").startswith("Hóa đơn 7") for r in page.ccdc.table.rows)   # món vừa phân loại
+    page.ccdc.extra.setChecked(True)
+    out = tmp_path / "so.xlsx"
+    monkeypatch.setattr(assets_page.QFileDialog, "getSaveFileName", lambda *a: (str(out), ""))
+    page.ccdc.export()
+    assert out.exists()
+    page.tabs.setCurrentIndex(1)
+    page.l_year.setValue(2026)
+    assert page.lines.rowCount() == 2
+
+    ctx.finance, _ = FinanceStore.initialize(ctx.db, ctx.finance_path, ctx.user, "khoa-thu-chi-1", iterations=1000)
+    tab = ProfitTab(ctx)
+    qtbot.addWidget(tab)
+    tab.year.setValue(2026)
+    tab.reload()
+    names = [r.get("TenDong") for r in tab.table.rows]
+    assert "Doanh thu" in names and "Tổng chi phí phải nộp" in names
+    dt = next(r for r in tab.table.rows if r.get("Nguon") == "doanh_thu")
+    assert dt["GiaTri"] == 50_000_000
+    ctx.lock_finance()

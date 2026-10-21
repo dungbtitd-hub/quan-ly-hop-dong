@@ -42,6 +42,13 @@ def _money(s: str) -> int:
         return 0
 
 
+def _number(s: str) -> float | None:
+    try:
+        return float(s.replace(",", "")) if s else None
+    except ValueError:
+        return None
+
+
 def parse_invoice(source: str | Path | bytes) -> dict:
     try:
         if isinstance(source, bytes):
@@ -66,10 +73,17 @@ def parse_invoice(source: str | Path | bytes) -> dict:
             if _local(el.tag) == "LTSuat":
                 thue_suat.append({"ThueSuat": _text(el, "TSuat"), "ThanhTien": _money(_text(el, "ThTien")),
                                   "TienThue": _money(_text(el, "TThue"))})
-    items, rates = [], []
+    items, rates, lines = [], [], []
     for el in data.iter():
         if _local(el.tag) == "HHDVu":
             ten = " ".join(_text(el, "THHDVu").split())
+            tinh_chat = _text(el, "TChat")
+            thanh_tien = _money(_text(el, "ThTien"))
+            if ten and tinh_chat != "4" and (thanh_tien or tinh_chat not in ("2",)):
+                lines.append({"TenHang": ten, "DVT": _text(el, "DVTinh"), "SoLuong": _number(_text(el, "SLuong")),
+                              "DonGia": _money(_text(el, "DGia")),
+                              "ThanhTien": -abs(thanh_tien) if tinh_chat == "3" else thanh_tien,
+                              "ThueSuat": _text(el, "TSuat")})
             if ten and ten not in items:
                 items.append(ten)
             rate = _text(el, "TSuat")
@@ -107,6 +121,7 @@ def parse_invoice(source: str | Path | bytes) -> dict:
         "ThueSuat": thue_suat,
         "MatHang": join_items(items),
         "ThueSuatHD": "; ".join(rates),
+        "Dong": lines,
     }
 
 

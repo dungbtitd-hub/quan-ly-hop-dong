@@ -51,6 +51,8 @@ FOREIGN_KEYS = {
     "HoaDonDauRa": {"MaHopDong": "HopDong"},
     "ThanhToanHopDong": {"MaHopDong": "HopDong", "MaHDDauRa": "HoaDonDauRa"},
     "HoaDonDauVao": {"MaHopDong": "HopDong"},
+    "DongHoaDonDauVao": {"MaHoaDon": "HoaDonDauVao"},
+    "TaiSan": {"MaDongHD": "DongHoaDonDauVao"},
 }
 
 TABLE_LABELS = {
@@ -58,6 +60,7 @@ TABLE_LABELS = {
     "NhomDoiTacThanhVien": "Thành viên nhóm", "HopDong": "Hợp đồng", "CongViec": "Công việc",
     "LichSuBanGiao": "Bàn giao", "LichSuNghiemThu": "Nghiệm thu", "HoaDonDauRa": "Hóa đơn đầu ra",
     "ThanhToanHopDong": "Thanh toán", "HoaDonDauVao": "Hóa đơn đầu vào",
+    "DongHoaDonDauVao": "Dòng hóa đơn đầu vào", "TaiSan": "Tài sản, CCDC",
 }
 
 
@@ -92,6 +95,10 @@ def natural_key(table: str, r: dict):
         return (r["MaHopDong"], r["NgayThanhToan"], r["SoTien"], _low(r.get("SoThamChieuSK")))
     if table == "HoaDonDauVao":
         return (r["MaThueNCC"].strip(), _low(r.get("KyHieuHD")), _low(r["SoHoaDonGoc"]))
+    if table == "DongHoaDonDauVao":
+        return (r["MaHoaDon"], r["STT"])
+    if table == "TaiSan":
+        return ("dong", r["MaDongHD"]) if r.get("MaDongHD") else (r["LoaiSo"], _low(r["MaTS"]), r["NgayGhiTang"])
     return None
 
 
@@ -117,6 +124,10 @@ def describe(table: str, r: dict) -> str:
         return f"{t} ngày {r['NgayThanhToan']}: {r['SoTien']:,}".replace(",", ".") + " đ"
     if table == "HoaDonDauVao":
         return f"{t} {r.get('KyHieuHD') or ''} số {r['SoHoaDonGoc']} – {r['TenNhaCungCap']}"
+    if table == "DongHoaDonDauVao":
+        return f"{t}: {r['TenHang']} ({r['PhanLoai']})"
+    if table == "TaiSan":
+        return f"{'Sổ TSCĐ' if r['LoaiSo'] == 'TSCĐ' else 'Sổ CCDC'}: {r['MaTS']} – {r['TenTS']}"
     return t
 
 
@@ -211,6 +222,11 @@ class SyncService:
                 hdv += q("SELECT * FROM HoaDonDauVao WHERE MaHopDong IS NULL AND NgayNhanHD BETWEEN ? AND ?",
                          (in_invoice_from or "0000-01-01", in_invoice_to or "9999-12-31"))
             tables["HoaDonDauVao"] = hdv
+            hm = [r["Ma"] for r in hdv]
+            dong = q(f"SELECT * FROM DongHoaDonDauVao WHERE MaHoaDon IN ({','.join('?' * len(hm)) or 'NULL'})", hm)
+            tables["DongHoaDonDauVao"] = dong
+            dm_ = [r["Ma"] for r in dong]
+            tables["TaiSan"] = q(f"SELECT * FROM TaiSan WHERE MaDongHD IN ({','.join('?' * len(dm_)) or 'NULL'})", dm_)
             partners = {r["MaDoiTac"] for r in tables["HopDong"] if r["MaDoiTac"]}
             tables["DoiTac"] = [dict(r) for r in self.db.query("SELECT * FROM DoiTac")
                                 if r["Ma"] in partners or r["DaXoa"] == 0]

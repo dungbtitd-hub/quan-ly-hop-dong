@@ -44,7 +44,8 @@ def self_test() -> int:
     import pypdf  # noqa: F401
 
     from .core import licensing
-    from .ui import accounts_page, contracts_page, finance_page, invoices_page, reports_page, sync_page  # noqa: F401
+    from .ui import (accounts_page, assets_page, contracts_page, finance_page, invoices_page,  # noqa: F401
+                     profit_page, reports_page, sync_page)
 
     create_app([])
     licensing.vendor_public_key()

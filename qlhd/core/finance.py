@@ -22,7 +22,7 @@ MAX_FAILED = 5
 LOCK_MINUTES = 15
 ALLOWED_ROLES = ("Giám đốc", "Người quản lý")
 
-FIN_TABLES = ["QuyTien", "KhoanMuc", "PhieuThuChi"]
+FIN_TABLES = ["QuyTien", "KhoanMuc", "PhieuThuChi", "LaiLoNam", "LaiLoDong"]
 
 FIN_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS QuyTien (
@@ -59,6 +59,30 @@ CREATE TABLE IF NOT EXISTS PhieuThuChi (
     DuongDanTep TEXT,
     NguoiTao TEXT,
     NguoiSua TEXT,{SYNC_COLS}
+);
+CREATE TABLE IF NOT EXISTS LaiLoNam (        -- bảng tổng hợp lãi lỗ: thông số từng năm
+    Ma TEXT PRIMARY KEY,
+    Nam INTEGER NOT NULL,
+    TyLeThueTNDN REAL NOT NULL DEFAULT 20,
+    ThueTNDNNhap INTEGER,                 -- ghi đè số thuế TNDN (trống = tính theo tỷ lệ)
+    TNCNConPhaiNop INTEGER NOT NULL DEFAULT 0,
+    CheDoDoanhThu TEXT NOT NULL DEFAULT 'xuat_hd' CHECK(CheDoDoanhThu IN ('xuat_hd', 'da_tt')),
+    DaChot INTEGER NOT NULL DEFAULT 0,
+    SoLieuChot TEXT,                      -- JSON bảng số liệu lúc chốt
+    GhiChu TEXT,{SYNC_COLS}
+);
+CREATE TABLE IF NOT EXISTS LaiLoDong (       -- các dòng của bảng lãi lỗ (thêm, bớt, đổi tên, sắp xếp được)
+    Ma TEXT PRIMARY KEY,
+    Nam INTEGER NOT NULL,
+    ThuTu INTEGER NOT NULL DEFAULT 0,
+    Nhom TEXT NOT NULL CHECK(Nhom IN ('Doanh thu', 'Điều chỉnh', 'Chi phí', 'Thuế')),
+    TenDong TEXT NOT NULL,
+    Dau INTEGER NOT NULL DEFAULT 1 CHECK(Dau IN (1, -1)),
+    Nguon TEXT NOT NULL DEFAULT 'nhap',   -- 'nhap' = nhập tay; còn lại phần mềm tự tính (xem profit.SOURCES)
+    GiaTriNhap INTEGER,                   -- số nhập tay / ghi đè số tự tính
+    An INTEGER NOT NULL DEFAULT 0,
+    HeThong INTEGER NOT NULL DEFAULT 0,   -- dòng mặc định: chỉ ẩn được, không xóa
+    GhiChu TEXT,{SYNC_COLS}
 );
 CREATE TABLE IF NOT EXISTS XoaVinhVien (
     Bang TEXT NOT NULL,
@@ -248,6 +272,10 @@ class FinanceStore:
             raise FinanceError("Khóa thu chi phải có ít nhất 8 ký tự.")
         _wrap(self.db, username, passphrase, self.data_key, iterations)
         self.db.log(self.username, "Đặt Khóa thu chi", username)
+
+    def check_key(self, passphrase: str) -> None:
+        """Hỏi lại Khóa thu chi trước thao tác xóa vĩnh viễn."""
+        _unwrap(self.db, self.username, passphrase)
 
     def wrappers(self) -> list[dict]:
         return [{"TenDangNhap": r["TenDangNhap"], "ChiaKhoaDaBoc": r["ChiaKhoaDaBoc"].hex(),

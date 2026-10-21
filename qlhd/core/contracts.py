@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, timedelta
 
+from .assets import AssetService
 from .db import Database
 
 CONTRACT_STATUSES = ("Chưa bắt đầu", "Đang thực hiện", "Đã nghiệm thu", "Hoàn thành", "Tạm dừng", "Hủy")
@@ -345,7 +346,9 @@ class ContractService:
         return self.db.active("HoaDonDauVao", order="NgayNhanHD DESC")
 
     def save_in_invoice(self, values: dict, ma: str | None = None) -> str:
+        """values["_Dong"]: các dòng hàng đọc từ hóa đơn điện tử (nếu có), để phân loại chi phí / CCDC / TSCĐ."""
         v = dict(values)
+        lines = v.pop("_Dong", None)
         for f, label in (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Tên người bán"),
                          ("MaThueNCC", "MST người bán"), ("NgayNhanHD", "Ngày hóa đơn")):
             if not v.get(f):
@@ -363,10 +366,13 @@ class ContractService:
             raise ValidationError("Hóa đơn đầu vào (MST + ký hiệu + số) này đã có.")
         if ma:
             self.db.update("HoaDonDauVao", ma, v)
-            return ma
-        return self.db.insert("HoaDonDauVao", v)
+        else:
+            ma = self.db.insert("HoaDonDauVao", v)
+        AssetService(self.db).ensure_lines(ma, lines)
+        return ma
 
     def delete_in_invoice(self, ma: str) -> None:
+        AssetService(self.db).delete_invoice_lines(ma)
         self.db.soft_delete("HoaDonDauVao", ma)
 
     def invoice_exists(self, kind: str, values: dict) -> bool:

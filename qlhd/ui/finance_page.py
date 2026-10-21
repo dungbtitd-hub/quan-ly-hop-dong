@@ -13,6 +13,7 @@ from ..core import finance as fin
 from ..core import finance_import
 from ..core.finance import FinanceError, FinanceStore
 from ..core.reports import FinanceReports, export_xlsx, fmt_date, fmt_money, period_range
+from .profit_page import ProfitTab
 from .widgets import (Combo, DataTable, DateEdit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
                       copy_text, error, hint, info, page_title, run_safely, toolbar)
 
@@ -368,6 +369,7 @@ class FinancePage(QWidget):
         tabs.addTab(self._tab_categories(), "Khoản mục")
         tabs.addTab(self._tab_funds(), "Quỹ tiền")
         tabs.addTab(self._tab_reports(), "Báo cáo && xuất Excel")
+        tabs.addTab(ProfitTab(self.ctx), "Lãi lỗ")
         tabs.addTab(self._tab_delete(), "Xóa dữ liệu")
         tabs.addTab(self._tab_security(), "Bảo mật")
         lay.addWidget(tabs)

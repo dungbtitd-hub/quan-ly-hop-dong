@@ -1,0 +1,269 @@
+from datetime import datetime
+from pathlib import Path
+
+import openpyxl
+import pytest
+
+from qlhd.core import asset_catalog as dm
+from qlhd.core.assets import CCDC_KEYS, TSCD_KEYS, AssetError, AssetService, register_row
+from qlhd.core.contracts import ContractService
+from qlhd.core.finance import FinanceStore
+from qlhd.core.profit import ProfitError, ProfitService
+from qlhd.core.sync import SyncService
+from qlhd.core.xml_invoice import parse_invoice
+
+DATA = Path(__file__).parent / "data"
+BOOKS = [(DATA / "so_tscd_gia.xlsx", "TSCĐ", TSCD_KEYS), (DATA / "so_ccdc_gia.xlsx", "CCDC", CCDC_KEYS)]
+
+
+def _book_rows(path):
+    ws = openpyxl.load_workbook(path).active
+    return [r for r in ws.iter_rows(min_row=4, values_only=True) if r[0] and not str(r[0]).startswith("Số dòng")]
+
+
+def _same(book_value, mine):
+    if isinstance(book_value, datetime):
+        book_value = book_value.date().isoformat()
+    return (book_value in (None, "", 0) and mine in (None, "", 0)) or book_value == mine
+
+
+@pytest.mark.parametrize("path,kind,keys", BOOKS)
+def test_import_reproduces_accountant_book(tmp_path, company, path, kind, keys):
+    db = company["gd"].db
+    s = AssetService(db)
+    res = s.import_register(path)
+    book = _book_rows(path)
+    assert res["nam"] == 2025 and res["them"] == len(book) and not res["lech"] and not res["bo_qua"]
+    reg = s.register(kind, 2025)
+    assert [r["MaTS"] for r in reg] == [b[0] for b in book]
+    for b, r in zip(book, reg):
+        for i, k in enumerate(keys):
+            if k != "LyDo":
+                assert _same(b[i], r[k]), (b[0], k, b[i], r[k])
+    # các tài sản trong sổ cũng khớp khi tính lại từ đầu (không dùng mốc của sổ)
+    for a in s.assets(kind):
+        plain = dict(a, MocNam=None)
+        assert register_row(plain, 2025)["LuyKe"] == a["MocLuyKe"]
+    # xuất lại rồi nhập lại vào máy khác: vẫn đúng từng đồng
+    out = tmp_path / "xuat.xlsx"
+    assert s.export_register(out, kind, 2025) == len(book)
+    db2 = company["kt"].db
+    res2 = AssetService(db2).import_register(out)
+    assert res2["them"] == len(book) and not res2["lech"]
+    # nhập lại lần nữa thì cập nhật, không nhân đôi
+    assert s.import_register(path)["cap_nhat"] == len(book)
+
+
+def test_continue_next_year_and_cases(company):
+    s = AssetService(company["gd"].db)
+    for p, _, _ in BOOKS:
+        s.import_register(p)
+    xe = next(r for r in s.register("TSCĐ", 2026) if r["MaTS"] == "XEDIEN01")
+    assert xe["TrongKy"] == 12 * 9_583_333 and xe["KyConLai"] == 38
+    oto1 = next(r for r in s.register("TSCĐ", 2026) if r["MaTS"] == "XE01")
+    assert oto1["KyConLai"] == 12 and oto1["ConLai"] == 207_999_988 - 12 * 8_666_667
+    assert oto1["LuyKe"] + oto1["ConLai"] == 520_000_000
+    # năm 2027 tài sản hết khấu hao, kỳ cuối nhận phần còn lại
+    oto1 = next(r for r in s.register("TSCĐ", 2027) if r["MaTS"] == "XE01")
+    assert oto1["ConLai"] == 0 and oto1["KyConLai"] == 0
+    ccdc_2025 = s.register("CCDC", 2025)
+    het = s.register("CCDC", 2025, "het_kh")
+    con = s.register("CCDC", 2025, "con_kh")
+    assert len(het) + len(con) == len(ccdc_2025)
+    assert {r["MaTS"] for r in s.register("CCDC", 2025, "tang_moi")} >= {"CC001/2025"}
+    assert all(r["LyDo"] == "Đầu kỳ" for r in s.register("CCDC", 2025, "dau_ky"))
+    tot = s.year_totals(2025)
+    assert sum(tot["TSCĐ"]) == 243_068_179 and sum(tot["CCDC"]) == 29_794_695
+    ma = next(a["Ma"] for a in s.assets("CCDC") if a["MaTS"] == "CC003/2025")
+    s.write_off(ma, "2026-03-15", "Hỏng")
+    r = next(r for r in s.register("CCDC", 2026) if r["MaTS"] == "CC003/2025")
+    assert r["ConLai"] == 0 and r["SLConLai"] == 0 and r["TrongKy"] == 1_666_666
+    assert "CC003/2025" in {x["MaTS"] for x in s.register("CCDC", 2026, "ghi_giam")}
+
+
+XML = """<?xml version="1.0" encoding="UTF-8"?>
+<HDon><DLHDon><TTChung><KHMSHDon>1</KHMSHDon><KHHDon>C25TAA</KHHDon><SHDon>{so}</SHDon><NLap>{ngay}</NLap></TTChung>
+<NDHDon><NBan><Ten>Cửa hàng ABC</Ten><MST>0109999999</MST></NBan><NMua><Ten>Công ty</Ten><MST>0101234567</MST></NMua>
+</NDHDon><DSHHDVu>{lines}</DSHHDVu>
+<TToan><TgTCThue>{tong}</TgTCThue><TgTThue>0</TgTThue><TgTTTBSo>{tong}</TgTTTBSo></TToan></DLHDon></HDon>"""
+
+
+def _line(ten, sl, gia, tchat="1"):
+    return (f"<HHDVu><TChat>{tchat}</TChat><THHDVu>{ten}</THHDVu><DVTinh>Cái</DVTinh><SLuong>{sl}</SLuong>"
+            f"<DGia>{gia}</DGia><ThTien>{sl * gia}</ThTien><TSuat>10%</TSuat></HHDVu>")
+
+
+def _xml_invoice(cs, so, ngay, lines):
+    xml = XML.format(so=so, ngay=ngay, lines="".join(_line(*x) for x in lines), tong=sum(x[1] * x[2] for x in lines))
+    d = parse_invoice(xml.encode())
+    return cs.save_in_invoice({"SoHoaDonGoc": d["SoHoaDon"], "KyHieuHD": d["KyHieuHD"],
+                               "TenNhaCungCap": d["TenNguoiBan"], "MaThueNCC": d["MSTNguoiBan"],
+                               "NgayNhanHD": d["NgayLap"], "GiaTriTruocThue": d["GiaTriTruocThue"],
+                               "MatHang": d["MatHang"], "_Dong": d["Dong"]})
+
+
+def test_invoice_lines_are_classified_and_feed_registers(company):
+    db = company["kt"].db
+    cs, s = ContractService(db), AssetService(db)
+    ma = _xml_invoice(cs, "101", "2025-02-27", [("Iphone 16 Pro Max 256GB", 1, 30_436_364),
+                                               ("Ốp lưng điện thoại", 2, 150_000), ("Phí thiết kế logo", 1, 2_000_000),
+                                               ("Xăng RON95", 10, 23_000), ("Chiết khấu", 1, 100_000, "3")])
+    lines = s.lines_of(ma)
+    assert [x["PhanLoai"] for x in lines] == ["TSCĐ", "CCDC", "Chưa phân loại", "Chi phí trong kỳ",
+                                              "Chưa phân loại"]
+    assert lines[-1]["ThanhTien"] == -100_000
+    iphone = s.assets("TSCĐ")[0]
+    assert (iphone["MaTS"], iphone["SoCTGhiTang"], iphone["SoKy"]) == ("TS001/2025", "GTTS00001", 36)
+    r = register_row(iphone, 2025)
+    assert (r["TrongKy"], r["KyConLai"], r["MucKy"]) == (8_514_940, 25, 845_455)    # như sổ kế toán
+    op = s.assets("CCDC")[0]
+    assert op["MaTS"] == "CC001/2025" and op["SoKy"] == 12 and op["NguyenGia"] == 300_000
+    pending = s.pending_lines()
+    assert {p["TenHang"] for p in pending} == {"Phí thiết kế logo", "Chiết khấu"} and s.pending_count() == 2
+    p = next(x for x in pending if x["TenHang"] == "Phí thiết kế logo")
+    with pytest.raises(AssetError):
+        s.set_line_class(p["Ma"], "Chi phí trong kỳ", "NHOM_TU_DAT", None)       # danh mục khóa
+    with pytest.raises(AssetError):
+        s.set_line_class(p["Ma"], "TSCĐ", "CP10", 36)                             # sai phân loại của nhóm
+    with pytest.raises(AssetError):
+        s.set_line_class(p["Ma"], "Chờ phân bổ", "PB02", None)                    # thiếu số tháng
+    s.set_line_class(p["Ma"], "Chờ phân bổ", "PB02", 18)
+    a = next(x for x in s.assets("CCDC") if x["TenTS"] == "Phí thiết kế logo")
+    assert a["PhanLoai"] == "Chờ phân bổ" and a["SoKy"] == 18 and a["TKKhauHao"] == "242"
+    s.set_line_class(p["Ma"], "Chi phí trong kỳ", "PB02", None)
+    assert not any(x["TenTS"] == "Phí thiết kế logo" for x in s.assets("CCDC"))
+    ck = next(x for x in s.pending_lines() if x["TenHang"] == "Chiết khấu")
+    s.set_line_class(ck["Ma"], "Chi phí trong kỳ", "CP09", None)
+    assert s.pending_count() == 0
+    exp = s.expense_lines(2025)
+    assert sum(x["ThanhTien"] for x in exp if x["DongLaiLo"] == "6") == 230_000 - 100_000
+    assert s.month_warning("TSCĐ", "TB02", 12)
+    # xóa hóa đơn thì dòng và tài sản sinh ra cũng bỏ
+    cs.delete_in_invoice(ma)
+    assert not s.assets() and not s.lines_of(ma)
+
+
+def test_manual_invoice_single_line_and_backfill(company):
+    db = company["kt"].db
+    cs, s = ContractService(db), AssetService(db)
+    ma = cs.save_in_invoice({"SoHoaDonGoc": "5", "TenNhaCungCap": "Cây xăng", "MaThueNCC": "0100000009",
+                             "NgayNhanHD": "2025-05-02", "GiaTriTruocThue": 900_000, "MatHang": "Xăng E5"})
+    (ln,) = s.lines_of(ma)
+    assert ln["PhanLoai"] == "Chi phí trong kỳ" and ln["MaNhomDM"] == "CP01"
+    cs.save_in_invoice({"SoHoaDonGoc": "5", "TenNhaCungCap": "Cây xăng", "MaThueNCC": "0100000009",
+                        "NgayNhanHD": "2025-05-02", "GiaTriTruocThue": 1_000_000, "MatHang": "Xăng E5"}, ma)
+    assert [x["ThanhTien"] for x in s.lines_of(ma)] == [1_000_000]
+    ma2 = cs.save_in_invoice({"SoHoaDonGoc": "6", "TenNhaCungCap": "Siêu thị", "MaThueNCC": "0100000008",
+                              "NgayNhanHD": "2025-05-03", "GiaTriTruocThue": 5_000_000,
+                              "MatHang": "Máy in; Giấy A4; Bút bi"})
+    assert s.lines_of(ma2)[0]["PhanLoai"] == "Chưa phân loại"        # dòng gộp nhiều mặt hàng: kế toán xem
+    db.execute("DELETE FROM DongHoaDonDauVao")
+    assert s.backfill() == 2 and len(s.lines_of(ma)) == 1
+
+
+def test_catalog_is_locked_and_matches_books():
+    assert len(dm.CATALOG) == len(dm.BY_CODE)
+    hits = 0
+    for path, kind, _ in BOOKS:
+        for r in _book_rows(path):
+            price = r[9] if kind == "TSCĐ" else r[12] / (r[9] or 1)
+            kq = dm.classify(r[1], price)
+            assert kq.nhom is not None, r[1]
+            want = {"TSCĐ"} if kind == "TSCĐ" else {"CCDC", "Chờ phân bổ"}
+            assert kq.phan_loai in want, (r[1], kq.phan_loai)
+            hits += 1
+    assert hits == 18
+    assert dm.classify("Phí thiết kế kiến trúc", 5_000_000).phan_loai == dm.CHUA_PHAN_LOAI
+    assert dm.classify("Giấy A4 Double A 1 ram", 70_000).nhom.ma == "CP04"
+
+
+KEY = "khoa-thu-chi-1"
+
+
+def _profit(m):
+    store, _ = FinanceStore.initialize(m.db, m.finance_path, m.user, KEY, iterations=1000)
+    return store, ProfitService(store)
+
+
+def test_profit_table_numbers(company):
+    gd = company["gd"]
+    cs = ContractService(gd.db)
+    cdt = cs.save_partner({"TenDoiTac": "Chủ đầu tư", "VaiTroDoiTac": "Chủ đầu tư"})
+    hd = cs.save_contract({"SoHopDong": "01/2024", "TenHopDong": "Tư vấn", "ChieuHopDong": "Đầu ra", "MaDoiTac": cdt,
+                           "GiaTriTruocThue": 3_000_000_000, "NgayKy": "2024-01-10"})
+    cs.save_contract({"SoHopDong": "09/2024", "TenHopDong": "Chưa xuất HĐ", "ChieuHopDong": "Đầu ra",
+                      "MaDoiTac": cdt, "GiaTriTruocThue": 300_000_000, "NgayKy": "2024-11-10"})
+    cs.save_out_invoice({"SoHoaDon": "1", "MaHopDong": hd, "NgayXuatHD": "2024-06-01",
+                         "GiaTriTruocThue": 3_000_000_000, "VAT": 0})
+    for i, (ngay, tien) in enumerate([("2024-02-01", 10_000_000), ("2024-05-01", 12_000_000),
+                                      ("2024-08-01", 9_000_000), ("2024-11-01", 11_500_000)]):
+        cs.save_in_invoice({"SoHoaDonGoc": str(i), "TenNhaCungCap": "Petrolimex", "MaThueNCC": "0100000001",
+                            "NgayNhanHD": ngay, "GiaTriTruocThue": tien, "MatHang": "Xăng RON 95"})
+    store, p = _profit(gd)
+    res = p.compute(2024)
+    row = {r["Nguon"] if r["Nguon"] != "nhap" else r["TenDong"]: r for r in res["rows"]}
+    assert row["doanh_thu"]["GiaTri"] == 3_000_000_000
+    assert row["dong:6"]["GiaTri"] == 42_500_000
+    assert row["dong:6"]["Quy"] == [10_000_000, 12_000_000, 9_000_000, 11_500_000]
+    assert row["do_dang_cuoi"]["GiaTri"] == -300_000_000            # gợi ý từ hợp đồng chưa xuất hóa đơn
+    assert not row["dong:6a"]["Hien"]                                # thầu phụ = 0 thì ẩn
+    vals = {"Chi phí thuế môn bài": 2_000_000, "Tiền lương người lao động": 1_800_000_000,
+            "Tiền bảo hiểm công ty đóng (21.5%)": 50_000_000}
+    for name, v in vals.items():
+        p.update_row(row[name]["Ma"], {"GiaTriNhap": v})
+    p.update_row(row["tscd"]["Ma"], {"GiaTriNhap": 120_000_000})
+    p.update_row(row["ccdc"]["Ma"], {"GiaTriNhap": 40_000_000})
+    p.update_row(row["do_dang_dau"]["Ma"], {"GiaTriNhap": 200_000_000})
+    p.set_year(2024, {"TyLeThueTNDN": 20, "TNCNConPhaiNop": 30_000_000})
+    res = p.compute(2024)
+    assert res["chi_phi"] == 1_954_500_000 and res["loi_nhuan"] == 1_045_500_000
+    assert res["thue_tndn"] == 209_100_000 and res["tong_phai_nop"] == 239_100_000
+    # dòng tự thêm, sắp xếp, xóa; dòng mặc định chỉ ẩn được
+    ma = p.add_row(2024, "Điều chỉnh", "Hoàn tiền", -1, 1_000_000)
+    assert p.compute(2024)["tong_doanh_thu"] == 2_999_000_000
+    p.move_row(ma, -1)
+    p.delete_row(ma)
+    with pytest.raises(ProfitError):
+        p.delete_row(row["tscd"]["Ma"])
+    # năm sau: chép cấu trúc, dở dang đầu kỳ gợi ý = dở dang cuối năm trước
+    res25 = p.compute(2025)
+    assert next(r for r in res25["rows"] if r["Nguon"] == "do_dang_dau")["GiaTri"] == 300_000_000
+    p.close_year(2024)
+    with pytest.raises(ProfitError):
+        p.update_row(row["tscd"]["Ma"], {"GiaTriNhap": 1})
+    assert p.compute(2024)["da_chot"]
+    p.reopen_year(gd.user, 2024)
+    path = gd.dir / "lai_lo.xlsx"
+    p.export_xlsx(path, 2024)
+    ws = openpyxl.load_workbook(path).active
+    assert any(c.value == "Tổng chi phí phải nộp" for c in ws["B"])
+    from qlhd.core.reports import export_xlsx
+    export_xlsx(p.year_report(2024), gd.dir / "dt_cp.xlsx")
+    # dữ liệu lãi lỗ nằm trong tệp mã hóa, xóa vĩnh viễn được
+    store.save()
+    assert "Tiền lương".encode() not in gd.finance_path.read_bytes()
+    assert p.delete_year(2025) > 0 and 2025 not in p.years()
+    assert p.delete_all() > 0 and not p.years()
+
+
+def test_close_year_needs_classification(company):
+    gd = company["gd"]
+    ContractService(gd.db).save_in_invoice({"SoHoaDonGoc": "1", "TenNhaCungCap": "X", "MaThueNCC": "0100000001",
+                                            "NgayNhanHD": "2025-03-01", "GiaTriTruocThue": 1_000_000,
+                                            "MatHang": "Dịch vụ lạ"})
+    _, p = _profit(gd)
+    assert p.compute(2025)["cho_phan_loai"] == 1
+    with pytest.raises(ProfitError):
+        p.close_year(2025)
+
+
+def test_lines_and_assets_sync(company, tmp_path):
+    kt, gd = company["kt"], company["gd"]
+    _xml_invoice(ContractService(kt.db), "7", "2025-08-15", [("Samsung Fold6 SM-F956B", 1, 26_283_333)])
+    s = SyncService(kt.db, kt.dir, kt.acc)
+    s.export_package(tmp_path / "g.qlhd", "dongbo-2026", user=kt.user)
+    d = SyncService(gd.db, gd.dir, gd.acc)
+    res = d.apply(d.read_package(tmp_path / "g.qlhd", "dongbo-2026"), user=gd.user)
+    assert res["loi"] == 0
+    r = AssetService(gd.db).register("CCDC", 2025)[0]
+    assert (r["MaTS"], r["SoKy"], r["TrongKy"]) == ("CC001/2025", 36, 3_650_465)

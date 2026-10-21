@@ -34,6 +34,8 @@ SYNCED_TABLES = [
     "HoaDonDauRa",
     "ThanhToanHopDong",
     "HoaDonDauVao",
+    "DongHoaDonDauVao",
+    "TaiSan",
 ]
 
 SCHEMA = f"""
@@ -158,6 +160,55 @@ CREATE TABLE IF NOT EXISTS HoaDonDauVao (
     DuongDanTep TEXT,
     GhiChuHDDV TEXT,{SYNC_COLS}
 );
+CREATE TABLE IF NOT EXISTS DongHoaDonDauVao (   -- từng dòng hàng hóa, dịch vụ của hóa đơn đầu vào
+    Ma TEXT PRIMARY KEY,
+    MaHoaDon TEXT NOT NULL,
+    STT INTEGER NOT NULL DEFAULT 1,
+    TenHang TEXT NOT NULL,
+    DVT TEXT,
+    SoLuong REAL,
+    DonGia INTEGER,
+    ThanhTien INTEGER NOT NULL DEFAULT 0, -- chưa thuế
+    ThueSuat TEXT,
+    PhanLoai TEXT NOT NULL DEFAULT 'Chưa phân loại'
+        CHECK(PhanLoai IN ('Chưa phân loại', 'Chi phí trong kỳ', 'TSCĐ', 'CCDC', 'Chờ phân bổ', 'Không tính chi phí')),
+    MaNhomDM TEXT,                        -- mã nhóm trong danh mục cài sẵn (asset_catalog)
+    TuDong INTEGER NOT NULL DEFAULT 1,    -- 1 = phần mềm tự phân loại, 0 = kế toán đã chọn
+    SoThang INTEGER,                      -- thời gian khấu hao / phân bổ
+    GhiChu TEXT,{SYNC_COLS}
+);
+CREATE TABLE IF NOT EXISTS TaiSan (               -- sổ TSCĐ và sổ theo dõi CCDC (gồm chi phí chờ phân bổ)
+    Ma TEXT PRIMARY KEY,
+    LoaiSo TEXT NOT NULL CHECK(LoaiSo IN ('TSCĐ', 'CCDC')),
+    PhanLoai TEXT NOT NULL DEFAULT 'CCDC' CHECK(PhanLoai IN ('TSCĐ', 'CCDC', 'Chờ phân bổ')),
+    MaTS TEXT NOT NULL,
+    TenTS TEXT NOT NULL,
+    LoaiTS TEXT,
+    MaNhomDM TEXT,
+    DonViSuDung TEXT,
+    NgayGhiTang TEXT NOT NULL,
+    SoCTGhiTang TEXT,
+    NgayBatDauKH TEXT,
+    SoKy INTEGER NOT NULL CHECK(SoKy > 0),
+    DVT TEXT,
+    SoLuong REAL NOT NULL DEFAULT 1,
+    NguyenGia INTEGER NOT NULL DEFAULT 0,
+    GiaTriTinhKH INTEGER NOT NULL DEFAULT 0,
+    MucKy INTEGER,                        -- giá trị khấu hao / phân bổ mỗi kỳ (trống = tự tính)
+    TKNguyenGia TEXT,
+    TKKhauHao TEXT,                       -- TSCĐ: 2141…; CCDC: TK chờ phân bổ 242
+    NgayGhiGiam TEXT,
+    LyDoGhiGiam TEXT,
+    MocNam INTEGER,                       -- số liệu đã chốt theo sổ cũ đến hết năm này (nhập từ Excel)
+    MocTrongKy INTEGER,
+    MocLuyKe INTEGER,
+    MocKyConLai INTEGER,
+    MaDongHD TEXT,                        -- dòng hóa đơn đầu vào sinh ra tài sản
+    ThuTu INTEGER NOT NULL DEFAULT 0,
+    GhiChu TEXT,{SYNC_COLS}
+);
+CREATE INDEX IF NOT EXISTS ix_dong_hoa_don ON DongHoaDonDauVao(MaHoaDon);
+CREATE INDEX IF NOT EXISTS ix_tai_san_dong ON TaiSan(MaDongHD);
 
 -- Bảng cục bộ của từng máy (không đồng bộ)
 CREATE TABLE IF NOT EXISTS ThongTinMay (
@@ -373,11 +424,11 @@ class Database(Store):
         conn = sqlite3.connect(self.path)
         super().__init__(conn, machine_id)
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.executescript(SCHEMA)
         self._upgrade()
         self.conn.commit()
 
     def _upgrade(self) -> None:
+        self.conn.executescript(SCHEMA)       # bảng mới của bản sau (kể cả khi khôi phục bản sao lưu cũ)
         for table, col, kind in ADDED_COLUMNS:
             if col not in self.columns(table):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")

@@ -15,7 +15,9 @@ from .. import APP_NAME, __version__
 from ..core.reports import fmt_date
 from ..developer import DEVELOPER
 from . import icons, style
+from ..core.assets import AssetService
 from .accounts_page import AccountsPage
+from .assets_page import AssetsPage
 from .auth_dialogs import MyAccountDialog, WipeDataDialog
 from .contracts_page import CatalogPage, ContractsPage
 from .finance_page import FinancePage
@@ -145,6 +147,7 @@ class MainWindow(QMainWindow):
                            ("Hóa đơn đầu ra", "invoice_out", lambda: InvoicesPage(ctx, "ra"), ctx.can("HoaDonDauRa")),
                            ("Hóa đơn đầu vào", "invoice_in", lambda: InvoicesPage(ctx, "vao"),
                             ctx.can("HoaDonDauVao")),
+                           ("Tài sản, CCDC", "box", lambda: AssetsPage(ctx), ctx.can("TaiSan")),
                            ("Báo cáo", "report", lambda: ReportsPage(ctx), ctx.can("BaoCao"))]),
             ("TÀI CHÍNH", [("Thu chi (đã khóa)", "lock", self.finance_page, self.finance_page is not None)]),
             ("DỮ LIỆU", [("Đồng bộ", "sync", self.sync_page, ctx.can("DongBo")),
@@ -360,15 +363,26 @@ class MainWindow(QMainWindow):
         n = len(expiring) + len(tasks)
         if "Hợp đồng" in self.items:
             self.items["Hợp đồng"].setData(BADGE_ROLE, len(expiring) or None)
+        pending = 0
+        if "Tài sản, CCDC" in self.items:
+            svc = AssetService(self.ctx.db)
+            svc.backfill()
+            pending = svc.pending_count()
+            self.items["Tài sản, CCDC"].setData(BADGE_ROLE, pending or None)
+            n += 1 if pending else 0
         self.bell_badge.setText(str(n) if n < 100 else "99")
         self.bell_badge.setVisible(n > 0)
         self.bell.setToolTip(f"{n} việc cần xử lý" if n else "Không có việc cần nhắc")
-        self._alerts = expiring, tasks
+        self._alerts = expiring, tasks, pending
 
     def _bell_menu(self):
-        expiring, tasks = getattr(self, "_alerts", ([], []))
+        expiring, tasks, pending = getattr(self, "_alerts", ([], [], 0))
         m = QMenu(self)
-        if not expiring and not tasks:
+        if pending:
+            a = m.addAction(icons.icon("alert", style.color("warn"), 16),
+                            f"{pending} dòng hóa đơn đầu vào chờ kế toán phân loại")
+            a.triggered.connect(lambda: self.go_to("Tài sản, CCDC"))
+        if not expiring and not tasks and not pending:
             m.addAction("Không có việc cần nhắc").setEnabled(False)
         for r in expiring[:10]:
             a = m.addAction(icons.icon("contract", style.color("warn" if r["ConLai"] > 0 else "danger"), 16),
@@ -387,6 +401,21 @@ class MainWindow(QMainWindow):
         if st["trang_thai"] == "sap_het":
             info(self, st["thong_bao"], "Sắp hết hạn bản quyền")
         self._daily_reminder()
+        self._pending_reminder()
+
+    def _pending_reminder(self):
+        """Báo kế toán (mỗi ngày một lần) khi còn dòng hóa đơn đầu vào phần mềm chưa tự phân loại được."""
+        if not self.ctx.can("TaiSan", "Sua") or "Tài sản, CCDC" not in self.items:
+            return
+        n = AssetService(self.ctx.db).pending_count()
+        key = f"nhac_phan_loai_ngay:{self.ctx.user['TenDangNhap']}"
+        today = date.today().isoformat()
+        if not n or self.ctx.db.setting(key) == today:
+            return
+        self.ctx.db.set_setting(key, today)
+        if confirm(self, f"Có {n} dòng hóa đơn đầu vào phần mềm chưa tự phân loại được (chi phí trong kỳ, CCDC hay "
+                         "TSCĐ). Mở màn Tài sản, CCDC để phân loại ngay?", "Cần kế toán phân loại"):
+            self.go_to("Tài sản, CCDC")
 
     def _daily_reminder(self):
         """Nhắc hợp đồng sắp hết hạn một lần mỗi ngày cho mỗi tài khoản, khi đăng nhập."""

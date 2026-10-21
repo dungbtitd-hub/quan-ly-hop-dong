@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFi
                                QLabel, QLineEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
+from ..core.assets import AssetService
 from ..core.contracts import INVOICE_KINDS, TAX_GROUPS, ValidationError, guess_tax_group, rate_from_amounts
 from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
@@ -61,7 +62,7 @@ def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[di
     if mst_cty and d["MSTNguoiMua"] and d["MSTNguoiMua"] != mst_cty:
         notes.append(f"MST người mua {d['MSTNguoiMua']} khác MST công ty {mst_cty}: hóa đơn có thể không phải của công ty.")
     return dict(common, SoHoaDonGoc=d["SoHoaDon"], TenNhaCungCap=d["TenNguoiBan"], MaThueNCC=d["MSTNguoiBan"],
-                NgayNhanHD=d["NgayLap"] or None, NhomThue=guess_tax_group(d["VAT"])), notes
+                NgayNhanHD=d["NgayLap"] or None, NhomThue=guess_tax_group(d["VAT"]), _Dong=d.get("Dong") or None), notes
 
 
 class InvoicesPage(QWidget):
@@ -226,7 +227,7 @@ class InvoicesPage(QWidget):
                          self._fields(contract_hint, must_choose, suggested), values, self, validate=_check_chosen)
         while dlg.exec() == QDialog.Accepted:
             try:
-                fn(dlg.values(), ma)
+                fn(dict(dlg.values(), _Dong=values.get("_Dong")) if self.kind == "vao" else dlg.values(), ma)
                 return True
             except ValidationError as e:
                 error(self, str(e))
@@ -237,6 +238,7 @@ class InvoicesPage(QWidget):
             return info(self, "Chưa có hợp đồng đầu ra nào. Hãy thêm hợp đồng trước.")
         if self._save({"TinhChatHD": "Gốc"}):
             self.refresh()
+            self.notify_pending()
 
     def add_from_files(self):
         if self.kind == "ra" and not self.ctx.cs.contracts("Đầu ra"):
@@ -249,6 +251,7 @@ class InvoicesPage(QWidget):
             dlg = BatchInvoiceDialog(self, paths)
             if dlg.exec() == QDialog.Accepted:
                 self.refresh()
+                self.notify_pending()
             return
         path = paths[0]
         d = read_invoice_file(self, path)
@@ -264,6 +267,7 @@ class InvoicesPage(QWidget):
             info(self, f"{Path(path).name}\n\n" + "\n".join(notes), "Lưu ý")
         if self._save(values, contract_hint=m.note, must_choose=not m.ma, suggested=m.goi_y):
             self.refresh()
+            self.notify_pending()
 
     def save_excel_template(self):
         path, _ = QFileDialog.getSaveFileName(self, "Lưu file mẫu", "Mau_nhap_hoa_don_dau_vao.xlsx", "Excel (*.xlsx)")
@@ -292,6 +296,7 @@ class InvoicesPage(QWidget):
         dlg = BatchInvoiceDialog(self, items=self.excel_items(rows), source=Path(path).name)
         if dlg.exec() == QDialog.Accepted:
             self.refresh()
+            self.notify_pending()
 
     def excel_items(self, rows) -> list[dict]:
         """Dòng đọc từ Excel → dòng của màn hình nhập nhiều hóa đơn (kèm gắn hợp đồng)."""
@@ -313,6 +318,23 @@ class InvoicesPage(QWidget):
                           "errors": list(r.errors), "notes": r.errors + r.notes + notes, "goi_y": goi_y})
         mark_duplicates(self.ctx, "vao", items)
         return items
+
+    def notify_pending(self) -> None:
+        """Sau khi nhập hóa đơn đầu vào: báo ngay nếu có dòng hàng phần mềm chưa tự phân loại được."""
+        if self.kind != "vao":
+            return
+        n = AssetService(self.ctx.db).pending_count()
+        win = self.window()
+        if hasattr(win, "update_badges"):
+            win.update_badges()
+        if not n:
+            return
+        text = (f"Có {n} dòng hàng hóa, dịch vụ phần mềm chưa tự phân loại được (chi phí trong kỳ, CCDC hay TSCĐ).")
+        if self.ctx.can("TaiSan", "Sua") and hasattr(win, "go_to"):
+            if confirm(self, text + " Mở màn Tài sản, CCDC để phân loại ngay?", "Cần kế toán phân loại"):
+                win.go_to("Tài sản, CCDC")
+        else:
+            info(self, text + " Kế toán sẽ phân loại ở màn Tài sản, CCDC.", "Cần kế toán phân loại")
 
     def company_mst(self) -> str:
         row = self.ctx.acc.license()
