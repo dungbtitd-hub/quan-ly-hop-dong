@@ -7,11 +7,21 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QDialog, QFileDialog, QLabel, QLineEdit, QVBoxLayout, QWidget
 
-from ..core import pdf_invoice, xml_invoice
+from ..core import invoice_match, pdf_invoice, xml_invoice
 from ..core.contracts import INVOICE_KINDS, ValidationError
 from ..core.reports import fmt_money
 from .contracts_page import payment_dialog
 from .widgets import Combo, DataTable, FormDialog, button, confirm, error, info, page_title, run_safely, toolbar
+
+
+CHOOSE = "__chon_hop_dong__"
+CHOOSE_LABEL = "— Chọn hợp đồng —"
+
+
+def _check_chosen(values: dict) -> None:
+    if values.get("MaHopDong") == CHOOSE:
+        raise ValidationError("Chưa chọn hợp đồng cho hóa đơn. Hãy chọn đúng hợp đồng"
+                              " (hóa đơn đầu vào không theo hợp đồng thì chọn \"Không có – mua hàng trực tiếp\").")
 
 
 def read_invoice_file(parent, path: str) -> dict | None:
@@ -104,7 +114,20 @@ class InvoicesPage(QWidget):
         self.total.setText(f"{len(rows)} hóa đơn · Tổng sau thuế {fmt_money(sum(r['GiaTriSauThue'] for r in rows))} đ")
 
     # ---- biểu mẫu
-    def _fields(self):
+    def _fields(self, contract_hint: str = "", must_choose: bool = False, suggested=()):
+        """must_choose: chưa xác định được hợp đồng, buộc người nhập tự chọn (không điền sẵn)."""
+        fields = self._base_fields()
+        f = next(f for f in fields if f["key"] == "MaHopDong")
+        if must_choose or self.kind == "ra":
+            ids = [h["Ma"] for h in suggested]
+            top = [(f"★ Gợi ý: {h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"]) for h in suggested]
+            rest = [o for o in f["options"] if o[1] not in ids]
+            f["options"] = [(CHOOSE_LABEL, CHOOSE)] + top + rest
+        if contract_hint:
+            f["hint"] = contract_hint
+        return fields
+
+    def _base_fields(self):
         if self.kind == "ra":
             contracts = [(f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
                          for h in self.ctx.cs.contracts("Đầu ra")]
@@ -135,9 +158,14 @@ class InvoicesPage(QWidget):
                 {"key": "DuongDanTep", "label": "Tệp gốc (XML/PDF)"},
                 {"key": "GhiChuHDDV", "label": "Ghi chú"}]
 
-    def _save(self, values: dict, ma: str | None = None) -> bool:
+    def _save(self, values: dict, ma: str | None = None, contract_hint: str = "", must_choose: bool = False,
+              suggested=()) -> bool:
         fn = self.ctx.cs.save_out_invoice if self.kind == "ra" else self.ctx.cs.save_in_invoice
-        dlg = FormDialog("Hóa đơn đầu ra" if self.kind == "ra" else "Hóa đơn đầu vào", self._fields(), values, self)
+        values = dict(values)
+        if must_choose or (self.kind == "ra" and not values.get("MaHopDong")):
+            values["MaHopDong"] = CHOOSE
+        dlg = FormDialog("Hóa đơn đầu ra" if self.kind == "ra" else "Hóa đơn đầu vào",
+                         self._fields(contract_hint, must_choose, suggested), values, self, validate=_check_chosen)
         while dlg.exec() == QDialog.Accepted:
             try:
                 fn(dlg.values(), ma)
@@ -172,10 +200,6 @@ class InvoicesPage(QWidget):
                           "NgayXuatHD": d["NgayLap"] or None, "TenNguoiMua": d["TenNguoiMua"],
                           "MSTNguoiMua": d["MSTNguoiMua"], "GiaTriTruocThue": d["GiaTriTruocThue"], "VAT": d["VAT"],
                           "GiaTriSauThue": d["GiaTriSauThue"], "TinhChatHD": "Gốc", "DuongDanTep": path}
-                match = [h for h in self.ctx.cs.contracts("Đầu ra")
-                         if d["MSTNguoiMua"] and h["MaThueDoiTac"] == d["MSTNguoiMua"]]
-                if match:
-                    values["MaHopDong"] = match[0]["Ma"]
             else:
                 if mst_cty and d["MSTNguoiMua"] and d["MSTNguoiMua"] != mst_cty:
                     notes.append(f"MST người mua {d['MSTNguoiMua']} khác MST công ty {mst_cty}: hóa đơn có thể không phải của công ty.")
@@ -183,9 +207,12 @@ class InvoicesPage(QWidget):
                           "TenNhaCungCap": d["TenNguoiBan"], "MaThueNCC": d["MSTNguoiBan"],
                           "NgayNhanHD": d["NgayLap"] or None, "GiaTriTruocThue": d["GiaTriTruocThue"], "VAT": d["VAT"],
                           "GiaTriSauThue": d["GiaTriSauThue"], "DuongDanTep": path}
+            m = invoice_match.match_contract(self.ctx.db, self.kind, d)
+            if m.ma:
+                values["MaHopDong"] = m.ma
             if notes:
                 info(self, f"{Path(path).name}\n\n" + "\n".join(notes), "Lưu ý")
-            if self._save(values):
+            if self._save(values, contract_hint=m.note, must_choose=not m.ma, suggested=m.goi_y):
                 saved += 1
         if saved:
             self.refresh()

@@ -54,7 +54,7 @@ def parse_text(text: str) -> dict:
     flat = re.sub(r"[ \t]+", " ", t)
     out: dict = {"KyHieuMauSo": "", "KyHieuHD": "", "SoHoaDon": "", "NgayLap": "", "TenNguoiBan": "",
                  "MSTNguoiBan": "", "TenNguoiMua": "", "MSTNguoiMua": "", "GiaTriTruocThue": 0, "VAT": 0,
-                 "GiaTriSauThue": 0, "DonViTienTe": "VND", "ThueSuat": []}
+                 "GiaTriSauThue": 0, "DonViTienTe": "VND", "ThueSuat": [], "SoHopDong": "", "VanBan": t}
 
     m = _first([r"K[ýy] hi[ệe]u(?:\s*\((?:Serial|Series)[^)]*\))?\s*[:：]?\s*([0-9]?[A-Z][0-9]{2}[A-Z]{2,4})\b"], flat)
     if m:
@@ -104,6 +104,9 @@ def parse_text(text: str) -> dict:
         out["GiaTriSauThue"] = out["GiaTriTruocThue"] + out["VAT"]
     if not out["GiaTriTruocThue"] and out["GiaTriSauThue"]:
         out["GiaTriTruocThue"] = out["GiaTriSauThue"] - out["VAT"]
+    m = _first([r"(?:S[ốo] h[ợo]p đ[ồo]ng|H[ợo]p đ[ồo]ng s[ốo])(?:\s*\([^)]*\))?\s*[:：]\s*([^\s,;]+)"], flat)
+    if m:
+        out["SoHopDong"] = m.group(1).strip(".")
     labels = {"SoHoaDon": "Số hóa đơn", "NgayLap": "Ngày lập", "KyHieuHD": "Ký hiệu",
               "MSTNguoiBan": "MST người bán", "GiaTriSauThue": "Tổng thanh toán"}
     out["ThieuTruong"] = [label for k, label in labels.items() if not out[k]]

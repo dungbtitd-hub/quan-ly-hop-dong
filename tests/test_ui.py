@@ -96,3 +96,22 @@ def test_accountant_has_no_finance_menu(qtbot, tmp_path, vendor, ctx):
     assert not any(t.startswith("Thu chi") for t in titles) and "Tài khoản" not in titles
     win.close()
     kt.close()
+
+
+def test_invoice_unmatched_requires_choice(qtbot, ctx):
+    from qlhd.core.contracts import ValidationError
+    from qlhd.ui.invoices_page import CHOOSE, InvoicesPage, _check_chosen
+    from qlhd.ui.widgets import FormDialog
+
+    page = InvoicesPage(ctx, "vao")
+    qtbot.addWidget(page)
+    hd = ctx.cs.contracts("Đầu vào")[0]
+    fields = page._fields("Chưa xác định được hợp đồng, hãy chọn.", True, [hd])
+    dlg = FormDialog("Hóa đơn đầu vào", fields, {"MaHopDong": CHOOSE}, validate=_check_chosen)
+    qtbot.addWidget(dlg)
+    combo = dlg.widgets["MaHopDong"]
+    assert combo.value() == CHOOSE and combo.itemText(1).startswith("★ Gợi ý: 05/2026/MB")
+    with pytest.raises(ValidationError):
+        _check_chosen(dlg.values())
+    combo.set_value(hd["Ma"])
+    _check_chosen(dlg.values())

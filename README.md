@@ -39,6 +39,8 @@ Trên Windows, nếu SmartScreen cảnh báo: **More info** → **Run anyway**.
 - Hợp đồng đầu ra / đầu vào, công việc, bàn giao, nghiệm thu, danh mục loại hợp đồng, đối tác, nhóm chủ đầu tư.
 - Nhập hàng loạt hợp đồng, hóa đơn đầu ra, thanh toán từ **Excel mẫu** (nút *Tải file Excel mẫu*).
 - Hóa đơn đầu ra và đầu vào đọc từ **XML** hoặc **PDF** hóa đơn điện tử (PDF có lớp chữ; bản scan nhập tay).
+  Phần mềm tự gắn hóa đơn với hợp đồng đầu ra / đầu vào theo số hợp đồng ghi trên hóa đơn (kèm kiểm tra MST đối tác);
+  không nhận ra được thì bắt người nhập tự chọn hợp đồng (có gợi ý), không điền sẵn để tránh gắn nhầm.
 - Thanh toán nhiều lần cho mỗi hợp đồng / hóa đơn; tình trạng thu tiền tự tính.
 - Báo cáo Excel theo **9 ngữ cảnh** (loại HĐ, chủ đầu tư, nhóm chủ đầu tư, hợp đồng, hóa đơn đã xuất, hợp đồng đã
   thanh toán, nhà cung cấp, hóa đơn đầu vào, thời gian) với **10 bộ lọc**, trong kỳ hoặc lũy kế, lưu mẫu báo cáo.

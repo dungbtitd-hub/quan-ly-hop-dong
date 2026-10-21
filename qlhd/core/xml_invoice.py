@@ -66,7 +66,19 @@ def parse_invoice(source: str | Path | bytes) -> dict:
             if _local(el.tag) == "LTSuat":
                 thue_suat.append({"ThueSuat": _text(el, "TSuat"), "ThanhTien": _money(_text(el, "ThTien")),
                                   "TienThue": _money(_text(el, "TThue"))})
+    so_hd = []
+    for el in data.iter():
+        if _local(el.tag) == "TTin":
+            ten = _text(el, "TTruong").lower()
+            if "hợp đồng" in ten or "hop dong" in ten or "hopdong" in ten or ten in ("shdong", "sohopdong", "hđ"):
+                gia_tri = _text(el, "DLieu")
+                if gia_tri:
+                    so_hd.append(gia_tri)
+    van_ban = "\n".join(" ".join((el.text or "").split()) for el in data.iter()
+                        if el.text and el.text.strip() and _local(el.tag) not in ("DSCKS", "Signature"))
     return {
+        "SoHopDong": "; ".join(so_hd),
+        "VanBan": van_ban,
         "KyHieuMauSo": _text(data, "TTChung", "KHMSHDon"),
         "KyHieuHD": _text(data, "TTChung", "KHHDon"),
         "SoHoaDon": so,
