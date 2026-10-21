@@ -27,7 +27,8 @@ def test_template_roundtrip_and_duplicates(company, tmp_path):
     store = _store(gd)
     tpl = fi.write_template(tmp_path / "mau.xlsx", store)
     lists = load_workbook(tpl)[fi.LIST_SHEET]
-    assert lists["D2"].value == "01/2026/HĐTV"
+    assert lists["D2"].value == "01/2026/HĐTV | Thiết kế trường học"
+    assert load_workbook(tpl)[fi.SHEET]["D3"].value == lists["D2"].value
     rows = fi.read_workbook(tpl, store)
     assert [r.status for r in rows] == ["Hợp lệ"] * 3, [r.errors for r in rows]
     project_row = rows[1].values
@@ -85,3 +86,24 @@ def test_password_protected_file_and_requires_unlock(company, tmp_path):
     assert len(fi.read_workbook(enc, store, "mk-file-123")) == 3
     with pytest.raises(FinanceError):
         fi.read_workbook(plain, None)
+
+
+def test_contract_picker_disambiguates_same_number(company, tmp_path):
+    gd = company["gd"]
+    data = sample_data(gd.db)
+    cs = data["cs"]
+    other = cs.save_partner({"TenDoiTac": "UBND xã B", "MaSoThue": "0100000009", "VaiTroDoiTac": "Chủ đầu tư"})
+    cs.save_contract({"SoHopDong": "01/2026/HĐTV", "TenHopDong": "Thiết kế nhà văn hóa", "ChieuHopDong": "Đầu ra",
+                      "MaDoiTac": other, "GiaTriTruocThue": 50_000_000, "NgayKy": "2026-05-01"})
+    store = _store(gd)
+    path = fi.write_template(tmp_path / "mau.xlsx", store)
+    labels = [c.value for c in load_workbook(path)[fi.LIST_SHEET]["D"][1:] if c.value]
+    assert "01/2026/HĐTV | Thiết kế nhà văn hóa" in labels and len(labels) == 2
+    _fill(path, [
+        ["01/05/2026", "Chi", "Dự án", "01/2026/HĐTV | Thiết kế nhà văn hóa", "", "Lương", "", 1_000, "Chọn từ danh sách"],
+        ["02/05/2026", "Chi", "Dự án", "01/2026/HĐTV", "", "Lương", "", 1_000, "Gõ số trùng"],
+    ])
+    rows = fi.read_workbook(path, store)
+    assert rows[0].ok and rows[0].values["TenDuAn"] == "Thiết kế nhà văn hóa"
+    assert rows[0].values["SoHopDong"] == "01/2026/HĐTV"
+    assert rows[1].status == "Lỗi" and "chọn từ danh sách" in rows[1].errors[0]

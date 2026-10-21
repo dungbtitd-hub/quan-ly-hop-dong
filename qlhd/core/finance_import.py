@@ -51,7 +51,9 @@ GUIDE = [
     " (nhập bằng file mẫu hợp đồng, sheet Thanh toán).",
     "4. Phiếu chi chọn Phân loại 'Dự án' hoặc 'Văn phòng'. Bỏ trống thì phần mềm tự chọn: có số hợp đồng"
     " hoặc tên dự án là Dự án, còn lại là Văn phòng.",
-    "5. Chi dự án: ghi Số hợp đồng đầu ra (phải có trong phần mềm), hoặc ghi Tên dự án nếu chưa có hợp đồng.",
+    "5. Chi dự án: ở cột Số hợp đồng dự án bấm mũi tên để chọn trong danh sách hợp đồng đầu ra đang có trong"
+    " phần mềm (dạng 'Số HĐ | Tên hợp đồng'), hoặc gõ đúng Số hợp đồng. Chưa có hợp đồng thì ghi Tên dự án.",
+    "   Danh sách hợp đồng lấy tại thời điểm tải file mẫu: có hợp đồng mới thì tải lại file mẫu trong phần mềm.",
     "6. Khoản mục ghi đầy đủ theo cấp, ngăn cách bằng dấu >, VD 'Nhân sự > Lương'. Ghi tên mục cuối cũng được"
     " nếu tên đó không bị trùng. Khoản mục chưa có sẽ được tự thêm.",
     "7. Quỹ ghi đúng tên quỹ trong phần mềm (xem sheet Danh mục). Bỏ trống thì dùng quỹ ngân hàng mặc định.",
@@ -98,21 +100,23 @@ def write_template(path: str | Path, store: FinanceStore | None = None) -> Path:
 
     paths = _category_paths(store)
     funds = [f["TenQuy"] for f in store.funds()] if store else ["Tiền mặt", "Tài khoản ngân hàng"]
-    projects = [(p["SoHopDong"], p["TenHopDong"]) for p in store.projects()] if store else []
+    projects = [(project_label(p), p["SoHopDong"], p["TenHopDong"], p["TenDoiTac"] or "")
+                for p in store.projects()] if store else []
     lists = wb.create_sheet(LIST_SHEET)
-    heads = ["Khoản mục chi", "Khoản mục thu", "Quỹ", "Số hợp đồng dự án", "Tên dự án"]
+    heads = ["Khoản mục chi", "Khoản mục thu", "Quỹ", "Hợp đồng dự án (để chọn)", "Số hợp đồng", "Tên hợp đồng",
+             "Chủ đầu tư"]
     for c, h in enumerate(heads, start=1):
         lists.cell(1, c, h).font = Font(bold=True)
-        lists.column_dimensions[lists.cell(1, c).column_letter].width = 40 if c in (1, 2, 5) else 22
+        lists.column_dimensions[lists.cell(1, c).column_letter].width = {3: 22, 4: 55, 5: 18}.get(c, 40)
     for r, v in enumerate(paths["Chi"], start=2):
         lists.cell(r, 1, v)
     for r, v in enumerate(paths["Thu"], start=2):
         lists.cell(r, 2, v)
     for r, v in enumerate(funds, start=2):
         lists.cell(r, 3, v)
-    for r, (so, ten) in enumerate(projects, start=2):
-        lists.cell(r, 4, so)
-        lists.cell(r, 5, ten)
+    for r, row in enumerate(projects, start=2):
+        for c, v in enumerate(row, start=4):
+            lists.cell(r, c, v)
 
     ws = wb.create_sheet(SHEET, 1)
     req_fill = PatternFill("solid", fgColor="FCE4D6")
@@ -123,11 +127,15 @@ def write_template(path: str | Path, store: FinanceStore | None = None) -> Path:
         cell.fill = req_fill if required else opt_fill
         cell.alignment = Alignment(wrap_text=True, vertical="center")
         ws.column_dimensions[cell.column_letter].width = {"date": 13, "money": 16, "loai": 11}.get(kind, 26)
+    ws.column_dimensions["D"].width = 40
     ws.column_dimensions["F"].width = 36
     ws.column_dimensions["I"].width = 36
     ws.row_dimensions[1].height = 34
     ws.freeze_panes = "A2"
-    for r, values in enumerate(EXAMPLES, start=2):
+    examples = [list(e) for e in EXAMPLES]
+    if projects:
+        examples[1][3] = projects[0][0]
+    for r, values in enumerate(examples, start=2):
         for c, v in enumerate(values, start=1):
             ws.cell(r, c, v)
     for r in range(2, 2001):
@@ -197,6 +205,11 @@ def read_workbook(path: str | Path, store: FinanceStore, password: str | None = 
     return rows
 
 
+def project_label(p) -> str:
+    """Nhãn hợp đồng trong danh sách chọn của file mẫu: 'Số HĐ | Tên hợp đồng'."""
+    return f"{p['SoHopDong']} | {p['TenHopDong']}"
+
+
 def _key(s: str) -> str:
     return _norm(s).lower()
 
@@ -213,8 +226,16 @@ class _Lookup:
                 self.leaves.setdefault((loai, parts[-1]), []).append(c["Ma"])
         self.funds = {_key(f["TenQuy"]): f["Ma"] for f in store.funds(include_hidden=True)}
         self.projects: dict[str, list] = {}
+        self.labels: dict[str, object] = {}
         for p in store.projects():
             self.projects.setdefault(_key(p["SoHopDong"]), []).append(p)
+            self.labels[_key(project_label(p))] = p
+
+    def project(self, text: str) -> list:
+        """Tìm hợp đồng đầu ra theo nhãn 'Số HĐ | Tên' (chọn từ danh sách) hoặc theo Số hợp đồng."""
+        if _key(text) in self.labels:
+            return [self.labels[_key(text)]]
+        return self.projects.get(_key(text.split("|")[0]), [])
 
     def category(self, loai: str, text: str) -> tuple[str | None, list[str]]:
         """Trả về (Mã khoản mục hoặc None nếu sẽ thêm mới, các phần của đường dẫn)."""
@@ -279,11 +300,12 @@ def check(rows: list[ImportRow], store: FinanceStore) -> None:
         v["MaDuAn"] = None
         if v["PhanLoaiChi"] == "Dự án":
             if v["SoHopDong"]:
-                hits = lk.projects.get(_key(v["SoHopDong"]), [])
+                hits = lk.project(v["SoHopDong"])
                 if len(hits) == 1:
                     v["MaDuAn"], v["TenDuAn"] = hits[0]["Ma"], hits[0]["TenHopDong"]
+                    v["SoHopDong"] = hits[0]["SoHopDong"]
                 elif hits:
-                    errors.append(f"Có nhiều hợp đồng đầu ra số {v['SoHopDong']}")
+                    errors.append(f"Có nhiều hợp đồng đầu ra số {v['SoHopDong']}, chọn từ danh sách (Số HĐ | Tên)")
                 else:
                     errors.append(f"Không tìm thấy hợp đồng đầu ra số {v['SoHopDong']}")
             elif not v["TenDuAn"]:
