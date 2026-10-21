@@ -53,6 +53,9 @@ Tạo trang Release: tab **Actions** → *Kiểm thử và đóng gói* → **Ru
 - **Tài khoản của tôi** (bấm vào tên ở góc trên phải): đổi tên đăng nhập, đổi mật khẩu.
 - **Xóa sạch dữ liệu** (chỉ Giám đốc): ghi đè ngẫu nhiên rồi xóa toàn bộ dữ liệu, sao lưu, nhật ký; tùy chọn giữ
   bản quyền và tài khoản.
+- **Giám đốc xóa dữ liệu máy nhân viên**: máy Giám đốc chính vào *Tài khoản → Lệnh xóa dữ liệu máy khác*, chọn máy,
+  tạo lệnh (`QLHD-XOA:…`, có chữ ký, gắn Mã máy, có hạn, dùng một lần). Thực hiện bằng nút *Giám đốc can thiệp* ở màn
+  hình đăng nhập máy đó (không cần mật khẩu nhân viên), hoặc lệnh tự đi kèm gói đồng bộ: máy đó mở gói là bị xóa.
 
 - Hợp đồng đầu ra / đầu vào, công việc, bàn giao, nghiệm thu, danh mục loại hợp đồng, đối tác, nhóm chủ đầu tư.
 - Nhập hàng loạt hợp đồng, hóa đơn đầu ra, thanh toán từ **Excel mẫu** (nút *Tải file Excel mẫu*).

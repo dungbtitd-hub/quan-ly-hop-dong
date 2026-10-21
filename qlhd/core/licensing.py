@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -182,3 +182,28 @@ def read_revocations(token: str, company_pub_b64: str) -> list[str]:
     if payload.get("loai") != "thu_hoi":
         raise LicenseError("Danh sách thu hồi không hợp lệ.")
     return list(payload["ids"])
+
+
+# ---- Lệnh xóa sạch dữ liệu một máy (do Giám đốc ký, dán ở máy đó hoặc đi kèm gói đồng bộ)
+WIPE_PREFIX = "QLHD-XOA:"
+
+
+def sign_wipe_order(company_priv: Ed25519PrivateKey, *, machine_id: str, keep_license: bool,
+                    valid_days: int = 7, today: date | None = None) -> tuple[str, dict]:
+    today = today or date.today()
+    payload = {"loai": "xoa_sach", "id": str(uuid.uuid4()), "may": machine_id.strip(),
+               "giu_ban_quyen": bool(keep_license), "ngay": today.isoformat(),
+               "han": (today + timedelta(days=max(int(valid_days), 1))).isoformat()}
+    return WIPE_PREFIX + _sign(company_priv, payload), payload
+
+
+def read_wipe_order(token: str, company_pub_b64: str, machine_id: str | None = None,
+                    today: date | None = None) -> dict:
+    payload = _open(_strip_prefix(token, WIPE_PREFIX), public_from_b64(company_pub_b64))
+    if payload.get("loai") != "xoa_sach":
+        raise LicenseError("Mã không phải lệnh xóa dữ liệu.")
+    if machine_id is not None and payload["may"] != machine_id:
+        raise LicenseError("Lệnh xóa này dành cho máy khác.")
+    if (today or date.today()).isoformat() > payload["han"]:
+        raise LicenseError("Lệnh xóa đã hết hạn, Giám đốc cần cấp lệnh mới.")
+    return payload

@@ -240,6 +240,9 @@ class SyncService:
             lic_row = self.accounts.license()
             if lic_row and lic_row["KhoaBiMatCongTy"]:
                 body["key_giam_doc"] = lic_row["KeyGiamDoc"]   # để máy nhận tự cập nhật khi Giám đốc gia hạn
+                orders = self.accounts.pending_wipe_orders()
+                if orders:
+                    body["lenh_xoa"] = [o["token"] for o in orders]
         loai = "thuong"
         if finance is not None:
             if user["VaiTro"] != "Giám đốc":
@@ -473,6 +476,18 @@ class SyncService:
         result["sao_luu"] = str(backup)
         result["tom_tat"] = summary
         return result
+
+    def wipe_order_for_me(self, pkg) -> str | None:
+        """Lệnh xóa sạch hợp lệ dành cho máy này trong gói (nếu có)."""
+        if self.accounts is None or not self.accounts.is_activated():
+            return None
+        for tok in pkg.body.get("lenh_xoa", []):
+            try:
+                self.accounts.check_wipe_order(tok)
+                return tok
+            except Exception:  # noqa: BLE001 - lệnh cho máy khác / hết hạn / đã làm
+                continue
+        return None
 
     def can_undo(self) -> bool:
         p = self.db.setting("dong_bo_hoan_tac")

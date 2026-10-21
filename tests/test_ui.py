@@ -256,3 +256,61 @@ def test_new_layout_home_theme_and_account(qtbot, ctx):
     w.confirm.setText("xoa sach")
     assert w.ok.isEnabled()
     win.close()
+
+
+def test_director_wipes_accountant_machine(qtbot, tmp_path, vendor, ctx, monkeypatch):
+    from datetime import date, timedelta
+
+    from qlhd.context import AppContext
+    from qlhd.core import licensing
+    from qlhd.core.auth import AuthError
+    from qlhd.ui.auth_dialogs import DirectorWipeDialog, LoginDialog
+
+    priv, pub = vendor
+    monkeypatch.setattr("qlhd.context.machine_id", lambda d: "QLHD-" + d.name.upper())
+
+    def member(name):
+        m = AppContext(tmp_path / name, vendor_pub=pub)
+        code = ctx.acc.issue_code(ten_dang_nhap=name, ho_ten="Kế toán", vai_tro="Kế toán viên",
+                                  machine_id=m.machine_id)
+        m.acc.activate_member(code, "matkhau123")
+        sample_data(m.db)
+        return m
+
+    kt = member("ketoan")
+    with pytest.raises(AuthError):
+        ctx.acc.issue_wipe_order(ctx.machine_id)                    # không tự xóa máy Giám đốc bằng lệnh
+    tok, order = ctx.acc.issue_wipe_order(kt.machine_id, valid_days=3)
+    with pytest.raises(AuthError):
+        ctx.acc.check_wipe_order(tok)                               # lệnh dành cho máy khác
+    with pytest.raises(licensing.LicenseError):
+        licensing.read_wipe_order(tok, ctx.acc.director_payload()["pub"], kt.machine_id,
+                                  today=date.today() + timedelta(days=4))       # quá hạn
+    # nút Giám đốc can thiệp ở màn hình đăng nhập máy kế toán
+    login = LoginDialog(kt)
+    qtbot.addWidget(login)
+    from PySide6.QtWidgets import QPushButton
+
+    assert any(b.text().startswith("Giám đốc can thiệp") for b in login.findChildren(QPushButton))
+    dlg = DirectorWipeDialog(kt)
+    qtbot.addWidget(dlg)
+    # gói đồng bộ từ máy Giám đốc mang theo lệnh
+    p = tmp_path / "goi.qlhd"
+    ctx.sync.export_package(p, "dongbo123", user=ctx.user)
+    pkg = kt.sync.read_package(p, "dongbo123")
+    assert kt.sync.wipe_order_for_me(pkg) == tok
+    assert kt.db.one("SELECT COUNT(*) n FROM HopDong")["n"] > 0
+    kt.wipe_by_order(tok)
+    assert kt.db.one("SELECT COUNT(*) n FROM HopDong")["n"] == 0 and not kt.acc.is_activated()
+    kt.close()
+    # giữ bản quyền: dùng lại được máy, nhưng gói cũ gửi lại không xóa lần nữa
+    kt2 = member("ketoan2")
+    tok2, _ = ctx.acc.issue_wipe_order(kt2.machine_id, keep_license=True)
+    kt2.wipe_by_order(tok2)
+    assert kt2.acc.is_activated() and kt2.acc.login("ketoan2", "matkhau123")
+    with pytest.raises(AuthError):
+        kt2.wipe_by_order(tok2)
+    assert len(ctx.acc.pending_wipe_orders()) == 2
+    ctx.acc.cancel_wipe_orders()
+    assert ctx.acc.pending_wipe_orders() == []
+    kt2.close()

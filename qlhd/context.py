@@ -1,13 +1,14 @@
 """Ngữ cảnh chạy phần mềm trên một máy: thư mục dữ liệu, CSDL, tài khoản đăng nhập, kho thu chi."""
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
 from datetime import datetime
 from pathlib import Path
 
-from .core.auth import AccountService, AuthError, verify_password
+from .core.auth import WIPE_USED, AccountService, AuthError, verify_password
 from .core.contracts import ContractService
 from .core.db import Database
 from .core.machine import machine_id
@@ -116,13 +117,22 @@ class AppContext:
             raise AuthError("Chỉ Giám đốc mới xóa được toàn bộ dữ liệu.")
         if not verify_password(password, u["MatKhauBam"]):
             raise AuthError("Mật khẩu không đúng.")
+        return self._wipe(keep_license)
+
+    def wipe_by_order(self, token: str) -> int:
+        """Thực hiện lệnh xóa sạch do Giám đốc ký cho máy này (không cần mật khẩu của người dùng máy này)."""
+        order = self.acc.check_wipe_order(token)
+        return self._wipe(order["giu_ban_quyen"], order_id=order["id"])
+
+    def _wipe(self, keep_license: bool, order_id: str | None = None) -> int:
         kept: dict[str, list[dict]] = {}
         if keep_license:
             for t in LICENSE_TABLES:
                 kept[t] = [dict(r) for r in self.db.query(f"SELECT * FROM {t}")]
-            marks = ",".join("?" * len(LICENSE_SETTINGS))
-            kept["CaiDat"] = [dict(r) for r in self.db.query(f"SELECT * FROM CaiDat WHERE Khoa IN ({marks})",
-                                                             LICENSE_SETTINGS)]
+        keys = (*LICENSE_SETTINGS, WIPE_USED) if keep_license else (WIPE_USED,)
+        marks = ",".join("?" * len(keys))
+        kept["CaiDat"] = [dict(r) for r in self.db.query(f"SELECT * FROM CaiDat WHERE Khoa IN ({marks})", keys)]
+        used = self.acc.used_wipe_orders() + ([order_id] if order_id else [])
         self.lock_finance()
         self.db.close()
         files = [f for f in sorted(self.data_dir.rglob("*"), reverse=True)
@@ -141,6 +151,8 @@ class AppContext:
                 self.db.conn.execute(f"INSERT OR REPLACE INTO {table} ({', '.join(r)}) VALUES "
                                      f"({', '.join('?' * len(r))})", list(r.values()))
         self.db.conn.commit()
+        if used:   # nhớ lệnh đã làm để gói đồng bộ cũ gửi lại không xóa lần nữa
+            self.db.set_setting(WIPE_USED, json.dumps(used))
         self.acc = AccountService(self.db, self.machine_id, self.acc.vendor_pub)
         self.cs = ContractService(self.db)
         self.sync = SyncService(self.db, self.data_dir, self.acc)

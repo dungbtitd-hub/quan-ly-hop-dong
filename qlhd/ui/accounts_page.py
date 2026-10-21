@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
-                               QGroupBox, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget)
+                               QGroupBox, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QVBoxLayout, QWidget)
 
 from ..core.auth import ACTIONS, FEATURES, ROLES, AuthError, default_permissions
 from .widgets import (Combo, DataTable, DateEdit, button, confirm, copy_text, error, hint, info, page_title,
@@ -93,12 +93,12 @@ class IssueCodeDialog(QDialog):
 
 
 class CodeResultDialog(QDialog):
-    def __init__(self, code: str, who: str, parent=None):
+    def __init__(self, code: str, who: str, parent=None, title: str = "Mã kích hoạt", note: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Mã kích hoạt")
+        self.setWindowTitle(title)
         self.setMinimumWidth(560)
         lay = QVBoxLayout(self)
-        lay.addWidget(hint(f"Gửi mã này cho {who}. Mã chỉ dùng được trên đúng máy đã nhập Mã máy."))
+        lay.addWidget(hint(f"Gửi mã này cho {who}. Mã chỉ dùng được trên đúng máy đã nhập Mã máy. {note}".strip()))
         box = QPlainTextEdit(code)
         box.setReadOnly(True)
         lay.addWidget(box)
@@ -113,6 +113,66 @@ class CodeResultDialog(QDialog):
                 f.write(code + "\n")
 
 
+class WipeOrderDialog(QDialog):
+    """Giám đốc cấp lệnh xóa sạch dữ liệu cho một máy nhân viên (VD máy kế toán nghỉ việc)."""
+
+    def __init__(self, ctx, machine: str = "", parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.token = None
+        self.setWindowTitle("Lệnh xóa dữ liệu máy khác")
+        self.setMinimumWidth(600)
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint("Lệnh có chữ ký của Giám đốc, chỉ dùng được cho đúng Mã máy đã nhập, trong số ngày hiệu lực, "
+                           "và chỉ một lần. Thực hiện bằng một trong hai cách: dán lệnh ở màn hình đăng nhập của máy "
+                           "đó (nút \"Giám đốc can thiệp\", không cần mật khẩu của nhân viên), hoặc để lệnh tự đi kèm "
+                           "các gói đồng bộ gửi từ máy này: máy đó mở gói là dữ liệu bị xóa ngay."))
+        form = QFormLayout()
+        opts = [("(Nhập Mã máy bên dưới)", "")] + [
+            (f"{r['HoTen']} ({r['TenDangNhap']}, {r['VaiTro']}) – {r['MaMay']}", r["MaMay"])
+            for r in ctx.db.query("SELECT * FROM MaDaCap ORDER BY NgayCap DESC") if r["MaMay"]]
+        self.pick = Combo(opts, machine if any(m == machine for _, m in opts) else "")
+        self.machine = QLineEdit(machine)
+        self.machine.setPlaceholderText("QLHD-XXXX-XXXX-XXXX-XXXX-XXXX")
+        self.pick.currentIndexChanged.connect(lambda _: self.pick.value() and self.machine.setText(self.pick.value()))
+        self.days = QSpinBox()
+        self.days.setRange(1, 90)
+        self.days.setValue(7)
+        self.days.setSuffix(" ngày")
+        self.keep = QCheckBox("Giữ bản quyền và tài khoản trên máy đó (chỉ xóa dữ liệu)")
+        self.with_sync = QCheckBox("Gửi kèm lệnh trong các gói đồng bộ xuất từ máy này cho đến khi hết hạn")
+        self.with_sync.setChecked(True)
+        form.addRow("Máy đã cấp mã", self.pick)
+        form.addRow("Mã máy cần xóa *", self.machine)
+        form.addRow("Hiệu lực", self.days)
+        lay.addLayout(form)
+        lay.addWidget(self.keep)
+        lay.addWidget(hint("Không giữ thì máy đó trở về chưa kích hoạt; nên thu hồi luôn mã của nhân viên đó."))
+        lay.addWidget(self.with_sync)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Tạo lệnh xóa")
+        bb.button(QDialogButtonBox.Ok).setObjectName("Danger")
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self._issue)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _issue(self):
+        m = self.machine.text().strip()
+        if not m:
+            return error(self, "Chọn máy hoặc nhập Mã máy cần xóa dữ liệu.")
+        if not confirm(self, f"Tạo lệnh xóa sạch toàn bộ dữ liệu trên máy {m}? Dữ liệu trên máy đó sẽ không "
+                             "khôi phục được."):
+            return
+        try:
+            self.token, self.order = self.ctx.acc.issue_wipe_order(
+                m, keep_license=self.keep.isChecked(), valid_days=self.days.value(),
+                send_with_sync=self.with_sync.isChecked())
+        except AuthError as e:
+            return error(self, str(e))
+        self.accept()
+
+
 class AccountsPage(QWidget):
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
@@ -124,15 +184,19 @@ class AccountsPage(QWidget):
         b_revoke = button("Thu hồi mã đã chọn", self.revoke, "Danger")
         b_renew = button("Gia hạn bản quyền…", self.renew)
         b_copy_key = button("Sao chép Key cho máy nhân viên", self.copy_key)
-        b_issue.setEnabled(primary)
-        b_revoke.setEnabled(primary)
-        b_copy_key.setEnabled(primary)
-        lay.addLayout(toolbar(b_issue, b_revoke, "stretch", b_renew, b_copy_key))
+        b_wipe = button("Lệnh xóa dữ liệu máy khác…", self.wipe_order, "Danger", "trash")
+        for b in (b_issue, b_revoke, b_copy_key, b_wipe):
+            b.setEnabled(primary)
+        lay.addLayout(toolbar(b_issue, b_revoke, b_wipe, "stretch", b_renew, b_copy_key))
         if not primary:
             lay.addWidget(hint("Máy này là máy Giám đốc thứ hai: chỉ xem danh sách; việc cấp và thu hồi mã làm trên "
                                "máy Giám đốc chính."))
         self.quota = hint("")
         lay.addWidget(self.quota)
+        self.b_cancel_wipe = button("Hủy các lệnh xóa chờ gửi", self.cancel_wipe, "Link")
+        self.wipe_note = hint("", "Warn")
+        self.wipe_note.setWordWrap(False)
+        lay.addLayout(toolbar(self.wipe_note, self.b_cancel_wipe, "stretch"))
         lay.addWidget(QLabel("Mã đã cấp"))
         self.codes = DataTable([("TenDangNhap", "Tên đăng nhập", "text"), ("HoTen", "Họ tên", "text"),
                                 ("VaiTro", "Vai trò", "text"), ("MaMay", "Mã máy", "text"), ("NgayCap", "Ngày cấp", "text"),
@@ -156,6 +220,11 @@ class AccountsPage(QWidget):
         st = self.ctx.acc.license_status()
         han = ("vĩnh viễn" if not st["han"] else
                f"đến {st['han'][8:10]}/{st['han'][5:7]}/{st['han'][:4]} (còn {st['con_lai']} ngày)")
+        orders = self.ctx.acc.pending_wipe_orders()
+        self.wipe_note.setText("Lệnh xóa đang chờ gửi kèm gói đồng bộ: " + ", ".join(
+            f"máy {o['may']} (đến {o['han'][8:10]}/{o['han'][5:7]})" for o in orders) if orders else "")
+        self.wipe_note.setVisible(bool(orders))
+        self.b_cancel_wipe.setVisible(bool(orders))
         self.quota.setText(f"Đã dùng {used}/{lic['SoTaiKhoanToiDa']} tài khoản theo Key của {lic['TenCongTy']}. "
                            f"Thời hạn bản quyền: {han}.")
 
@@ -174,6 +243,22 @@ class AccountsPage(QWidget):
         dlg = IssueCodeDialog(self.ctx, self)
         if dlg.exec() == QDialog.Accepted and dlg.code:
             CodeResultDialog(dlg.code, dlg.fullname.text(), self).exec()
+            self.refresh()
+
+    def wipe_order(self):
+        r = self.codes.current()
+        dlg = WipeOrderDialog(self.ctx, r["MaMay"] if r else "", self)
+        if dlg.exec() == QDialog.Accepted and dlg.token:
+            CodeResultDialog(dlg.token, "người đang ở máy cần xóa (hoặc tự dán ở màn hình đăng nhập máy đó)", self,
+                             title="Lệnh xóa dữ liệu",
+                             note=f"Lệnh dùng được cho máy {dlg.order['may']} đến hết ngày "
+                                  f"{dlg.order['han'][8:10]}/{dlg.order['han'][5:7]}/{dlg.order['han'][:4]}.").exec()
+            self.refresh()
+
+    def cancel_wipe(self):
+        if confirm(self, "Hủy các lệnh xóa đang chờ gửi kèm gói đồng bộ? Lệnh đã sao chép ra ngoài vẫn dùng được "
+                         "đến khi hết hạn."):
+            self.ctx.acc.cancel_wipe_orders()
             self.refresh()
 
     def revoke(self):

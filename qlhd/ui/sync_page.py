@@ -176,6 +176,14 @@ class SyncPage(QWidget):
             self.pkg = self.ctx.sync.read_package(path, pw)
         except SyncError as e:
             return error(self, str(e))
+        order = self.ctx.sync.wipe_order_for_me(self.pkg)
+        if order:
+            from .auth_dialogs import run_wipe_order
+
+            self.pkg = None
+            if run_wipe_order(self, self.ctx, order):
+                self.window().close()
+            return
         if self.pkg.is_director and self.ctx.user["VaiTro"] not in fin.ALLOWED_ROLES:
             self.pkg.body.pop("finance", None)
         self.items = self.ctx.sync.compare(self.pkg)

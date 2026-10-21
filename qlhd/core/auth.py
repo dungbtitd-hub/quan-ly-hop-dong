@@ -16,6 +16,8 @@ ROLES = ("Giám đốc", "Người quản lý", "Kế toán viên")
 FEATURES = ("HopDong", "HoaDonDauRa", "HoaDonDauVao", "BaoCao", "DanhMuc", "SaoLuu",
             "DongBo", "ThuChi", "TaiKhoan")
 ACTIONS = ("Xem", "Them", "Sua", "Xoa", "Xuat")
+WIPE_PENDING = "lenh_xoa_cho_gui"
+WIPE_USED = "lenh_xoa_da_dung"
 MAX_FAILED = 5
 LOCK_MINUTES = 15
 WARN_DAYS = 30          # báo trước khi bản quyền hết hạn
@@ -280,6 +282,58 @@ class AccountService:
             n += cur.rowcount
         self.db.conn.commit()
         return n
+
+    # ---- lệnh xóa sạch dữ liệu máy khác (máy Giám đốc chính cấp)
+    def issue_wipe_order(self, machine_id: str, *, keep_license: bool = False, valid_days: int = 7,
+                         send_with_sync: bool = True) -> tuple[str, dict]:
+        if not self.is_primary_director_machine():
+            raise AuthError("Chỉ máy Giám đốc chính mới cấp được lệnh xóa dữ liệu.")
+        machine_id = machine_id.strip()
+        if not machine_id:
+            raise AuthError("Nhập Mã máy cần xóa dữ liệu.")
+        if machine_id == self.machine_id:
+            raise AuthError("Đây là Mã máy của chính máy Giám đốc. Muốn xóa máy này thì dùng mục Xóa sạch dữ liệu.")
+        token, payload = lic.sign_wipe_order(lic.private_from_b64(self.license()["KhoaBiMatCongTy"]),
+                                             machine_id=machine_id, keep_license=keep_license,
+                                             valid_days=valid_days)
+        if send_with_sync:
+            orders = self.pending_wipe_orders()
+            orders.append({"token": token, **payload})
+            self.db.set_setting(WIPE_PENDING, json.dumps(orders))
+        self.db.log(None, "Cấp lệnh xóa dữ liệu", f"{machine_id} (hết hạn {payload['han']})")
+        return token, payload
+
+    def pending_wipe_orders(self, today: str | None = None) -> list[dict]:
+        """Lệnh xóa còn hạn, đang chờ đi kèm các gói đồng bộ gửi từ máy này."""
+        today = today or date.today().isoformat()
+        try:
+            orders = json.loads(self.db.setting(WIPE_PENDING) or "[]")
+        except ValueError:
+            orders = []
+        return [o for o in orders if o.get("han", "") >= today]
+
+    def cancel_wipe_orders(self) -> None:
+        self.db.set_setting(WIPE_PENDING, "[]")
+        self.db.log(None, "Hủy lệnh xóa dữ liệu chờ gửi")
+
+    def check_wipe_order(self, token: str) -> dict:
+        """Kiểm tra lệnh xóa dành cho máy này: chữ ký của công ty, đúng Mã máy, còn hạn, chưa dùng."""
+        director = self.director_payload()
+        if not director:
+            raise AuthError("Máy này chưa kích hoạt nên không có dữ liệu để xóa.")
+        try:
+            payload = lic.read_wipe_order(token, director["pub"], self.machine_id)
+        except lic.LicenseError as e:
+            raise AuthError(str(e)) from e
+        if payload["id"] in self.used_wipe_orders():
+            raise AuthError("Lệnh xóa này đã được thực hiện trên máy này.")
+        return payload
+
+    def used_wipe_orders(self) -> list[str]:
+        try:
+            return json.loads(self.db.setting(WIPE_USED) or "[]")
+        except ValueError:
+            return []
 
     # ---- người dùng
     def _create_user(self, username, fullname, role, password, perms, code_id) -> int:

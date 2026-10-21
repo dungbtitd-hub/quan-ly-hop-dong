@@ -175,11 +175,22 @@ class LoginDialog(QDialog):
         row.addWidget(b)
         row.addWidget(c)
         lay.addLayout(row)
+        if ctx.acc.license() and not ctx.acc.is_primary_director_machine():
+            wipe = QPushButton("Giám đốc can thiệp: xóa sạch dữ liệu máy này…")
+            wipe.setObjectName("Link")
+            wipe.clicked.connect(self._director_wipe)
+            lay.addWidget(wipe, 0, Qt.AlignLeft)
         foot = QLabel(f"Phiên bản {__version__} · {DEVELOPER['ten']}")
         foot.setObjectName("Hint")
         foot.setWordWrap(True)
         lay.addWidget(foot)
         (self.pw if self.user.text() else self.user).setFocus()
+
+    def _director_wipe(self):
+        dlg = DirectorWipeDialog(self.ctx, self)
+        if dlg.exec() == QDialog.Accepted:
+            self.wiped = True
+            self.reject()
 
     def _login(self):
         try:
@@ -281,6 +292,74 @@ class MyAccountDialog(QDialog):
 
 
 WIPE_CONFIRM = "XOA SACH"
+
+
+def run_wipe_order(parent, ctx, token: str) -> bool:
+    """Thực hiện lệnh xóa sạch của Giám đốc trên máy này rồi báo cho người dùng. Trả về True nếu đã xóa."""
+    try:
+        order = ctx.acc.check_wipe_order(token)
+        n = ctx.wipe_by_order(token)
+    except AuthError as e:
+        error(parent, str(e))
+        return False
+    tail = ("Bản quyền và tài khoản trên máy được giữ lại." if order["giu_ban_quyen"] else
+            "Máy trở về trạng thái chưa kích hoạt; muốn dùng lại cần Mã kích hoạt mới của Giám đốc.")
+    info(parent, f"Đã xóa sạch dữ liệu trên máy này theo lệnh của Giám đốc ({n} tệp được ghi đè và hủy). "
+                 f"{tail} Phần mềm sẽ đóng lại.", "Đã xóa sạch dữ liệu")
+    return True
+
+
+class DirectorWipeDialog(QDialog):
+    """Ở màn hình đăng nhập: Giám đốc can thiệp, dán lệnh xóa đã ký cho máy này (không cần mật khẩu máy này)."""
+
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.setWindowTitle("Giám đốc can thiệp: xóa sạch dữ liệu")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        t = QLabel("Xóa sạch dữ liệu máy này theo lệnh Giám đốc")
+        t.setObjectName("Danger")
+        lay.addWidget(t)
+        lay.addWidget(hint("Trên máy Giám đốc: Tài khoản → Lệnh xóa dữ liệu máy khác, nhập Mã máy dưới đây để tạo "
+                           "lệnh xóa. Dán lệnh vào ô bên dưới. Lệnh chỉ dùng được cho đúng máy này, trong thời hạn "
+                           "Giám đốc đặt, và chỉ một lần. Mọi dữ liệu trên máy bị ghi đè rồi xóa, không khôi phục được."))
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("Mã máy này:"))
+        mid = QLineEdit(ctx.machine_id)
+        mid.setReadOnly(True)
+        mid.setObjectName("Mono")
+        mrow.addWidget(mid, 1)
+        b = QPushButton("Sao chép")
+        b.clicked.connect(lambda: (copy_text(ctx.machine_id), info(self, "Đã sao chép Mã máy.")))
+        mrow.addWidget(b)
+        lay.addLayout(mrow)
+        self.code = QPlainTextEdit()
+        self.code.setPlaceholderText("QLHD-XOA:…")
+        self.code.setFixedHeight(80)
+        lay.addWidget(self.code)
+        form = QFormLayout()
+        self.confirm = QLineEdit()
+        self.confirm.setPlaceholderText(WIPE_CONFIRM)
+        form.addRow(f"Gõ \"{WIPE_CONFIRM}\" để xác nhận", self.confirm)
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.ok = QPushButton("Xóa sạch dữ liệu")
+        self.ok.setObjectName("Danger")
+        self.ok.setEnabled(False)
+        self.ok.clicked.connect(self._wipe)
+        cancel = QPushButton("Hủy")
+        cancel.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        row.addWidget(self.ok)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+        self.confirm.textChanged.connect(lambda s: self.ok.setEnabled(s.strip().upper() == WIPE_CONFIRM))
+
+    def _wipe(self):
+        if run_wipe_order(self, self.ctx, self.code.toPlainText()):
+            self.accept()
 
 
 class WipeDataDialog(QDialog):
