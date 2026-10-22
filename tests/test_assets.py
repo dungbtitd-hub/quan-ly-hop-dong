@@ -267,3 +267,49 @@ def test_lines_and_assets_sync(company, tmp_path):
     assert res["loi"] == 0
     r = AssetService(gd.db).register("CCDC", 2025)[0]
     assert (r["MaTS"], r["SoKy"], r["TrongKy"]) == ("CC001/2025", 36, 3_650_465)
+
+
+def test_import_flags_duplicates(tmp_path, company):
+    from qlhd.core.assets import A_ADD, A_SKIP, ST_IN_FILE, ST_MAYBE, ST_NEW, ST_SAME_CODE
+
+    s = AssetService(company["gd"].db)
+    # đã theo dõi trên phần mềm (nhập tay, mã khác) đúng món có trong sổ Excel: cùng ngày, cùng tên khác hoa thường/dấu
+    s.save_asset({"LoaiSo": "CCDC", "TenTS": "ONG KINH MAY ANH 18-50mm", "NgayGhiTang": "2025-05-16", "SoKy": 24,
+                  "NguyenGia": 11_000_000, "MaTS": "TAY01"})
+    # sổ Excel có một dòng bị nhập hai lần
+    wb = openpyxl.load_workbook(DATA / "so_ccdc_gia.xlsx")
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    total = next(i for i, r in enumerate(rows) if r[0] and str(r[0]).startswith("Số dòng"))
+    ws.insert_rows(total + 1)
+    for c, val in enumerate(rows[total - 1], start=1):
+        ws.cell(total + 1, c, val)
+    ws.cell(total + 1, 1, "CC009/2025")                       # cùng ngày, cùng tên, mã khác
+    path = tmp_path / "so_trung.xlsx"
+    wb.save(path)
+
+    data = s.read_register(path)
+    st = {it["values"]["MaTS"]: it for it in data["rows"]}
+    assert st["CC001/2025"]["status"] == ST_MAYBE and st["CC001/2025"]["action"] == A_SKIP
+    assert "TAY01" in st["CC001/2025"]["trung_voi"]
+    assert st["CC009/2025"]["status"] == ST_IN_FILE and st["CC009/2025"]["action"] == A_SKIP
+    assert sum(it["status"] == ST_NEW for it in data["rows"]) == 13
+    res = s.apply_register(data)
+    assert (res["them"], res["cap_nhat"], res["bo_qua"]) == (13, 0, 2)
+    assert len(s.assets("CCDC")) == 14 and not s.duplicate_warnings("CCDC")
+
+    # nhập lại: các dòng đã có cùng mã và ngày thì cập nhật, không nhân đôi
+    again = s.read_register(path)
+    assert sum(it["status"] == ST_SAME_CODE for it in again["rows"]) == 13
+    # người dùng cố ý thêm dòng nghi trùng: sổ hiện cảnh báo ở cả hai tài sản
+    dong = next(it["dong"] for it in again["rows"] if it["values"]["MaTS"] == "CC001/2025")
+    res = s.apply_register(again, {dong: A_ADD})
+    assert res["them"] == 1 and res["cap_nhat"] == 13 and len(s.assets("CCDC")) == 15
+    warn = s.duplicate_warnings("CCDC")
+    assert len(warn) == 2 and any("TAY01" in w for w in warn.values())
+    # sổ có mã đã dùng cho tài sản khác ngày ghi tăng: cũng báo nghi trùng
+    s2 = AssetService(company["kt"].db)
+    s2.save_asset({"LoaiSo": "CCDC", "TenTS": "Máy khác", "NgayGhiTang": "2025-01-02", "SoKy": 12,
+                   "NguyenGia": 1_000_000, "MaTS": "CC003/2025"})
+    it = next(it for it in s2.read_register(DATA / "so_ccdc_gia.xlsx")["rows"] if it["values"]["MaTS"] == "CC003/2025")
+    assert it["status"] == ST_MAYBE

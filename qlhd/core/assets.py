@@ -42,8 +42,27 @@ EXTRA_COLS = [("PhanLoai", "Phân loại"), ("NhomDM", "Nhóm danh mục"), ("Ly
               ("HoaDon", "Hóa đơn đầu vào"), ("GhiChu", "Ghi chú")]
 
 
+# Nhập sổ từ Excel: tình trạng từng dòng và cách xử lý
+ST_NEW, ST_SAME_CODE, ST_MAYBE, ST_IN_FILE = "Mới", "Đã có (trùng mã)", "Có thể trùng", "Trùng trong file"
+A_ADD, A_UPDATE, A_SKIP = "them", "cap_nhat", "bo_qua"
+ACTION_LABELS = {A_ADD: "Thêm mới", A_UPDATE: "Cập nhật bản đã có", A_SKIP: "Bỏ qua"}
+
+
 class AssetError(Exception):
     pass
+
+
+def _same_asset(a: dict, b: dict) -> bool:
+    """Cùng ngày ghi tăng và (cùng tên sau khi bỏ dấu, hoa thường, hoặc cùng giá trị)."""
+    if str(a["NgayGhiTang"])[:10] != str(b["NgayGhiTang"])[:10]:
+        return False
+    if dm.normalize(a["TenTS"]) == dm.normalize(b["TenTS"]):
+        return True
+    return int(a.get("NguyenGia") or 0) > 0 and int(a.get("NguyenGia") or 0) == int(b.get("NguyenGia") or 0)
+
+
+def _dmy(iso: str) -> str:
+    return "/".join(reversed(str(iso)[:10].split("-")))
 
 
 # ------------------------------------------------------------------ tính toán
@@ -488,7 +507,8 @@ class AssetService:
         return sum(1 for r in self.pending_lines() if r["NgayNhanHD"][:4] == str(year))
 
     # ---- nhập sổ cũ từ Excel
-    def import_register(self, path: str | Path, year: int | None = None) -> dict:
+    def read_register(self, path: str | Path, year: int | None = None) -> dict:
+        """Đọc sổ TSCĐ / CCDC từ Excel và xếp từng dòng: mới, trùng mã (cập nhật), có thể trùng, trùng trong file."""
         import openpyxl
 
         wb = openpyxl.load_workbook(str(path), data_only=True)
@@ -514,8 +534,8 @@ class AssetService:
                         year = int(digits)
             if year is None:
                 raise AssetError("Không thấy năm của sổ (dòng \"Năm 2025\" phía trên tiêu đề).")
-        res = {"loai": kind, "nam": year, "them": 0, "cap_nhat": 0, "lech": [], "bo_qua": []}
-        order = (self.db.one("SELECT MAX(ThuTu) m FROM TaiSan")["m"] or 0)
+        res = {"loai": kind, "nam": year, "rows": [], "loi": []}
+        seen: list[dict] = []
         for r in range(head_row + 1, ws.max_row + 1):
             row = [ws.cell(r, c).value for c in range(1, 19)]
             if not row[0] or str(row[0]).startswith("Số dòng"):
@@ -523,27 +543,85 @@ class AssetService:
             try:
                 v = self._from_book_row(kind, row, year)
             except (TypeError, ValueError) as e:
-                res["bo_qua"].append(f"Dòng {r} ({row[0]}): {e}")
+                res["loi"].append(f"Dòng {r} ({row[0]}): {e}")
                 continue
-            order += 1
-            v["ThuTu"] = order
+            it = {"dong": r, "values": v, "trung_voi": "", "ma_cu": None}
+            twin = next((s for s in seen if s["values"]["MaTS"] == v["MaTS"] or _same_asset(s["values"], v)), None)
+            old = self.db.one("SELECT * FROM TaiSan WHERE DaXoa = 0 AND LoaiSo = ? AND MaTS = ? AND NgayGhiTang = ?",
+                              (kind, v["MaTS"], v["NgayGhiTang"]))
+            if twin is not None:
+                it.update(status=ST_IN_FILE, action=A_SKIP, trung_voi=f"Dòng {twin['dong']} trong file: "
+                          f"{twin['values']['MaTS']} – {twin['values']['TenTS']}")
+            elif old is not None:
+                it.update(status=ST_SAME_CODE, action=A_UPDATE, ma_cu=old["Ma"],
+                          trung_voi=f"{old['MaTS']} – {old['TenTS']} (đã có, cùng mã và ngày ghi tăng)")
+            else:
+                dups = self.find_duplicates(v) or self.db.active("TaiSan", "LoaiSo = ? AND MaTS = ?",
+                                                                 (kind, v["MaTS"]))
+                if dups:
+                    d = dups[0]
+                    it.update(status=ST_MAYBE, action=A_SKIP, ma_cu=d["Ma"],
+                              trung_voi=f"{d['MaTS']} – {d['TenTS']}; ghi tăng {_dmy(d['NgayGhiTang'])}; "
+                                        f"giá trị {d['NguyenGia']:,} đ".replace(",", "."))
+                else:
+                    it.update(status=ST_NEW, action=A_ADD)
+            seen.append(it)
+            res["rows"].append(it)
+        return res
+
+    def apply_register(self, data: dict, actions: dict[int, str] | None = None) -> dict:
+        """Ghi các dòng đã đọc theo cách xử lý từng dòng (mặc định: mới thì thêm, trùng mã thì cập nhật,
+        có thể trùng / trùng trong file thì bỏ qua). actions: {số dòng Excel: 'them' / 'cap_nhat' / 'bo_qua'}."""
+        kind, year = data["loai"], data["nam"]
+        res = {"loai": kind, "nam": year, "them": 0, "cap_nhat": 0, "bo_qua": 0, "lech": [], "loi": list(data["loi"])}
+        order = (self.db.one("SELECT MAX(ThuTu) m FROM TaiSan")["m"] or 0)
+        for it in data["rows"]:
+            act = (actions or {}).get(it["dong"], it["action"])
+            v = dict(it["values"])
+            if act == A_SKIP or (act == A_UPDATE and not it["ma_cu"]):
+                res["bo_qua"] += 1
+                continue
             plain = dict(v, MocNam=None, NgayGhiGiam=None)
             pr = register_row(plain, year)
             if (pr["TrongKy"], pr["LuyKe"], pr["KyConLai"]) != (v["MocTrongKy"], v["MocLuyKe"], v["MocKyConLai"]):
                 res["lech"].append(f"{v['MaTS']}: sổ ghi trong kỳ {v['MocTrongKy']:,}, lũy kế {v['MocLuyKe']:,}; "
                                    f"cách tính chuẩn ra {pr['TrongKy']:,}, {pr['LuyKe']:,}. Giữ theo sổ."
                                    .replace(",", "."))
-            old = self.db.one("SELECT Ma FROM TaiSan WHERE DaXoa = 0 AND LoaiSo = ? AND MaTS = ? AND NgayGhiTang = ?",
-                              (kind, v["MaTS"], v["NgayGhiTang"]))
-            if old:
-                v.pop("ThuTu")
-                self.db.update("TaiSan", old["Ma"], v, commit=False)
+            if act == A_UPDATE:
+                self.db.update("TaiSan", it["ma_cu"], v, commit=False)
                 res["cap_nhat"] += 1
             else:
+                order += 1
+                v["ThuTu"] = order
                 self.db.insert("TaiSan", v, commit=False)
                 res["them"] += 1
         self.db.conn.commit()
         return res
+
+    def import_register(self, path: str | Path, year: int | None = None) -> dict:
+        """Đọc và ghi luôn theo cách xử lý mặc định."""
+        return self.apply_register(self.read_register(path, year))
+
+    def find_duplicates(self, v: dict, exclude: str | None = None) -> list:
+        """Tài sản đã có trong sổ có thể là cùng một món: cùng ngày ghi tăng và cùng tên (bỏ dấu, hoa thường)
+        hoặc cùng giá trị."""
+        rows = self.db.active("TaiSan", "LoaiSo = ? AND NgayGhiTang = ? AND Ma != ?",
+                              (v.get("LoaiSo") or "CCDC", str(v["NgayGhiTang"])[:10], exclude or ""))
+        return [r for r in rows if _same_asset(dict(r), v)]
+
+    def duplicate_warnings(self, loai_so: str) -> dict[str, str]:
+        """{mã bản ghi: "Có thể trùng với …"} cho các tài sản trong sổ nghi trùng nhau."""
+        out: dict[str, str] = {}
+        groups: dict[str, list] = {}
+        for a in self.assets(loai_so):
+            groups.setdefault(a["NgayGhiTang"], []).append(a)
+        for same_day in groups.values():
+            for i, a in enumerate(same_day):
+                for b in same_day[i + 1:]:
+                    if _same_asset(dict(a), dict(b)):
+                        out.setdefault(a["Ma"], f"Có thể trùng với {b['MaTS']} – {b['TenTS']}")
+                        out.setdefault(b["Ma"], f"Có thể trùng với {a['MaTS']} – {a['TenTS']}")
+        return out
 
     @staticmethod
     def _from_book_row(kind: str, row: list, year: int) -> dict:

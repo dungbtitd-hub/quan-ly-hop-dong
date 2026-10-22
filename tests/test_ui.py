@@ -393,6 +393,8 @@ def test_in_invoices_from_excel_bang_ke(qtbot, ctx, tmp_path, monkeypatch):
 def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
     from pathlib import Path
 
+    from PySide6.QtWidgets import QDialog
+
     from qlhd.ui import assets_page
     from qlhd.ui.assets_page import AssetsPage, ClassifyDialog
     from qlhd.ui.profit_page import ProfitTab
@@ -414,13 +416,23 @@ def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
     shown = []
     monkeypatch.setattr(assets_page, "info", lambda _p, text, *a: shown.append(text))
     data = Path(__file__).parent / "data"
+    previews = []
+
+    def accept_preview(dlg):
+        previews.append(dlg.table.rowCount())
+        return QDialog.Accepted
+    monkeypatch.setattr(assets_page.ImportPreviewDialog, "exec", accept_preview)
     for name in ("so_tscd_gia.xlsx", "so_ccdc_gia.xlsx"):
         monkeypatch.setattr(assets_page.QFileDialog, "getOpenFileName", lambda *a, n=name: (str(data / n), ""))
         page.tscd.import_book()
-    assert "thêm 14" in shown[-1]
+    assert previews == [4, 14] and "thêm 14" in shown[-1]
     page.tabs.setCurrentWidget(page.ccdc)
     page.ccdc.year.setValue(2025)
     assert page.ccdc.table.rowCount() == 14 + 1               # 14 dòng sổ + dòng tổng
+    page.svc.save_asset({"LoaiSo": "CCDC", "TenTS": "Ổ cứng ngoài 1TB", "NgayGhiTang": "2025-11-25", "SoKy": 12,
+                         "NguyenGia": 2_000_000})
+    page.ccdc.reload()
+    assert sum(1 for r in page.ccdc.table.rows if r.get("CanhBao")) == 2 and "nghi trùng" in page.ccdc.total.text()
     page.ccdc.year.setValue(2026)
     assert any(r.get("TenTS", "").startswith("Hóa đơn 7") for r in page.ccdc.table.rows)   # món vừa phân loại
     page.ccdc.extra.setChecked(True)

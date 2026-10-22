@@ -3,12 +3,16 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QLabel, QSpinBox,
-                               QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+                               QHeaderView, QLabel, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from ..core import asset_catalog as dm
-from ..core.assets import CASES, CCDC_COLS, CCDC_KEYS, EXTRA_COLS, TSCD_COLS, TSCD_KEYS, AssetError, AssetService
-from ..core.reports import fmt_money
+from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_COLS, CCDC_KEYS, EXTRA_COLS, ST_IN_FILE,
+                           ST_NEW, ST_SAME_CODE, TSCD_COLS, TSCD_KEYS, AssetError, AssetService)
+from ..core.reports import fmt_date, fmt_money
+from . import style
 from .widgets import (Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title,
                       run_safely, toolbar)
 
@@ -117,6 +121,68 @@ class ClassifyDialog(QDialog):
         return self.cls.value(), self.group.value(), (self.months.value() or None)
 
 
+class ImportPreviewDialog(QDialog):
+    """Xem trước sổ nhập từ Excel: từng dòng là mới, trùng mã, có thể trùng hay trùng trong file; chọn cách xử lý."""
+
+    COLS = [("Dòng", "dong"), ("Mã", "MaTS"), ("Tên", "TenTS"), ("Ngày ghi tăng", "NgayGhiTang"),
+            ("Giá trị", "NguyenGia"), ("Tình trạng", "status"), ("Trùng với", "trung_voi"), ("Xử lý", None)]
+
+    def __init__(self, data: dict, parent=None):
+        super().__init__(parent)
+        self.data = data
+        self.setWindowTitle(f"Xem trước sổ {data['loai']} năm {data['nam']}")
+        self.resize(1100, 560)
+        lay = QVBoxLayout(self)
+        rows = data["rows"]
+        warn = [it for it in rows if it["status"] != ST_NEW]
+        text = f"{len(rows)} dòng trong file, {len(rows) - len(warn)} dòng mới."
+        if warn:
+            text += (f" Có {len(warn)} dòng trùng hoặc nghi trùng với tài sản đã theo dõi (tô màu): mặc định trùng mã "
+                     "và ngày thì cập nhật, nghi trùng (cùng ngày ghi tăng, cùng tên hoặc cùng giá trị) thì bỏ qua. "
+                     "Kiểm tra cột \"Trùng với\" rồi đổi cách xử lý nếu cần.")
+        lay.addWidget(hint(text, "Warn" if warn else "Hint"))
+        if data["loi"]:
+            lay.addWidget(hint("Không đọc được: " + "; ".join(data["loi"][:5]), "Danger"))
+        self.table = QTableWidget(len(rows), len(self.COLS))
+        self.table.setHorizontalHeaderLabels([c[0] for c in self.COLS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.combos: dict[int, Combo] = {}
+        fill = QBrush(QColor(style.color("warn_soft")))
+        for i, it in enumerate(rows):
+            v = it["values"]
+            for j, (_, key) in enumerate(self.COLS[:-1]):
+                val = it.get(key) if key in it else v.get(key)
+                if key == "NguyenGia":
+                    val = fmt_money(val)
+                elif key == "NgayGhiTang":
+                    val = fmt_date(val)
+                item = QTableWidgetItem("" if val is None else str(val))
+                item.setToolTip(item.text())
+                if it["status"] != ST_NEW:
+                    item.setBackground(fill)
+                self.table.setItem(i, j, item)
+            choices = [A_ADD, A_SKIP] if it["status"] in (ST_NEW, ST_IN_FILE) else \
+                [A_UPDATE, A_ADD, A_SKIP] if it["status"] == ST_SAME_CODE else [A_SKIP, A_UPDATE, A_ADD]
+            combo = Combo([(ACTION_LABELS[a], a) for a in choices], it["action"])
+            self.combos[it["dong"]] = combo
+            self.table.setCellWidget(i, len(self.COLS) - 1, combo)
+        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(2, min(self.table.columnWidth(2), 280))
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.table.setColumnWidth(7, 170)
+        lay.addWidget(self.table, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Nhập vào sổ")
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def actions(self) -> dict[int, str]:
+        return {dong: c.value() for dong, c in self.combos.items()}
+
+
 class RegisterTab(QWidget):
     def __init__(self, page, loai_so: str):
         super().__init__()
@@ -171,13 +237,22 @@ class RegisterTab(QWidget):
         rows = self.svc.register(self.loai_so, self.year.value(), self.case.value())
         for r in rows:
             r["SoLuong"] = _quantity(r["SoLuong"])
+        warn = self.svc.duplicate_warnings(self.loai_so)
+        for r in rows:
+            if r.get("Ma") in warn:
+                r["CanhBao"], r["_canh_bao"] = warn[r["Ma"]], True
         tot = {k: sum(r[k] or 0 for r in rows) for k in ("NguyenGia", "TrongKy", "LuyKe", "ConLai")}
         shown = rows + ([{"MaTS": f"Số dòng = {len(rows)}", "_kieu": "tong", **tot}] if rows else [])
-        self.table.set_rows(shown, self._columns())
+        cols = self._columns()
+        n_warn = sum(1 for r in rows if r.get("_canh_bao"))
+        if n_warn:
+            cols.append(("CanhBao", "Cảnh báo trùng", "text"))
+        self.table.set_rows(shown, cols)
         word = "khấu hao" if self.loai_so == "TSCĐ" else "phân bổ"
         self.total.setText(f"{len(rows)} tài sản · Nguyên giá {fmt_money(tot['NguyenGia'])} đ · {word} trong năm "
                            f"{fmt_money(tot['TrongKy'])} đ · lũy kế {fmt_money(tot['LuyKe'])} đ · còn lại "
-                           f"{fmt_money(tot['ConLai'])} đ")
+                           f"{fmt_money(tot['ConLai'])} đ"
+                           + (f" · ⚠ {n_warn} tài sản nghi trùng (tô màu), kiểm tra rồi xóa bản thừa" if n_warn else ""))
 
     def _current(self):
         r = self.table.current()
@@ -231,6 +306,13 @@ class RegisterTab(QWidget):
             for k in ("MucKy", "GiaTriTinhKH"):
                 if k in v and not v[k]:
                     v[k] = None
+            dups = self.svc.find_duplicates({**(dict(self.ctx.db.get("TaiSan", ma)) if ma else {}), **v}, ma) \
+                if v.get("NgayGhiTang") else []
+            if dups and not confirm(self, "Có thể trùng với tài sản đã có trong sổ (cùng ngày ghi tăng, cùng tên "
+                                          "hoặc cùng giá trị):\n" + "\n".join(
+                                              f"{d['MaTS']} – {d['TenTS']}, {fmt_money(d['NguyenGia'])} đ"
+                                              for d in dups[:5]) + "\n\nVẫn lưu?"):
+                continue
             try:
                 self.svc.save_asset(v, ma)
                 self.ctx.db.log(self.ctx.user["TenDangNhap"], "Sửa sổ tài sản" if ma else "Thêm tài sản", v["TenTS"])
@@ -284,16 +366,25 @@ class RegisterTab(QWidget):
                                               "Excel (*.xlsx *.xlsm)")
         if not path:
             return
-        res = run_safely(self, self.svc.import_register, path)
+        data = run_safely(self, self.svc.read_register, path)
+        if data is None:
+            return
+        if not data["rows"]:
+            error(self, "Không có dòng tài sản nào đọc được trong file.\n" + "\n".join(data["loi"][:10]))
+            return
+        dlg = ImportPreviewDialog(data, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        res = run_safely(self, self.svc.apply_register, data, dlg.actions())
         if res is None:
             return
         self.ctx.db.log(self.ctx.user["TenDangNhap"], f"Nhập sổ {res['loai']} năm {res['nam']}", path)
-        msg = (f"Đã nhập sổ {res['loai']} năm {res['nam']}: thêm {res['them']}, cập nhật {res['cap_nhat']} tài sản. "
-               "Số liệu đến hết năm giữ đúng theo sổ, các năm sau phần mềm tính tiếp.")
+        msg = (f"Đã nhập sổ {res['loai']} năm {res['nam']}: thêm {res['them']}, cập nhật {res['cap_nhat']}, "
+               f"bỏ qua {res['bo_qua']} tài sản. Số liệu đến hết năm giữ đúng theo sổ, các năm sau phần mềm tính tiếp.")
         if res["lech"]:
             msg += "\n\nKhác cách tính chuẩn (đã giữ theo sổ):\n" + "\n".join(res["lech"][:10])
-        if res["bo_qua"]:
-            msg += "\n\nBỏ qua:\n" + "\n".join(res["bo_qua"][:10])
+        if res["loi"]:
+            msg += "\n\nKhông đọc được:\n" + "\n".join(res["loi"][:10])
         info(self, msg)
         self.year.setValue(res["nam"])
         self.page.select_book(res["loai"])

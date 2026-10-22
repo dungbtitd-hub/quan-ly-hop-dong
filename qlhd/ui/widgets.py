@@ -258,7 +258,8 @@ class DataTable(QTableWidget):
             kieu = row.get("_kieu")
             bold = bool(kieu)
             fill = (QBrush(QColor(style.color("group_bg"))) if kieu == "nhom"
-                    else QBrush(QColor(style.color("total_bg"))) if kieu else None)
+                    else QBrush(QColor(style.color("total_bg"))) if kieu
+                    else QBrush(QColor(style.color("warn_soft"))) if row.get("_canh_bao") else None)
             for j, (key, _, kind) in enumerate(self.columns):
                 v = row.get(key)
                 if kind in ("money", "int"):
