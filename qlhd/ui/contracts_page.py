@@ -11,8 +11,8 @@ from ..core import excel_import
 from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, TASK_STATUSES, ValidationError,
                               duration_text, end_date)
 from ..core.reports import fmt_date, fmt_money
-from .widgets import (Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title, require,
-                      run_safely, toolbar)
+from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title,
+                      rate_field, require, run_safely, toolbar)
 
 
 CONTRACT_COLS = [("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp đồng", "text"),
@@ -36,7 +36,9 @@ def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
         {"key": "MaDoiTac", "label": "Đối tác", "kind": "combo", "options": partners,
          "hint": "Chủ đầu tư (đầu ra) hoặc Nhà cung cấp (đầu vào). Chưa có thì bấm \"Thêm đối tác\"."},
         {"key": "GiaTriTruocThue", "label": "Giá trị trước thuế", "kind": "money"},
+        rate_field(),
         {"key": "VAT", "label": "Tiền thuế VAT", "kind": "money"},
+        {"key": "GiaTriTongSauThue", "label": "Giá trị sau thuế", "kind": "money", "hint": VAT_HINT},
         {"key": "NgayKy", "label": "Ngày ký", "kind": "date"},
         {"key": "NgayBatDauDuKien", "label": "Ngày bắt đầu thực hiện", "kind": "date", "optional": True,
          "hint": "Để trống thì tính từ ngày ký."},
@@ -364,6 +366,8 @@ class ImportPreviewDialog(QDialog):
         lay.addWidget(self.summary)
         table = DataTable([("sheet", "Sheet", "text"), ("line", "Dòng", "int"), ("status", "Kết quả", "text"),
                            ("SoHopDong", "Số HĐ", "text"), ("noi_dung", "Nội dung", "text"),
+                           ("GiaTriTruocThue", "Trước thuế", "money"), ("ThueSuat", "Thuế suất", "text"),
+                           ("VAT", "VAT", "money"), ("SauThue", "Sau thuế", "money"),
                            ("errors", "Ghi chú", "text")])
         data = []
         for r in rows:
@@ -371,7 +375,9 @@ class ImportPreviewDialog(QDialog):
             noi_dung = v.get("TenHopDong") or (f"Hóa đơn {v.get('SoHoaDon')}" if r.sheet == "Hóa đơn đầu ra"
                                                 else f"{fmt_money(v.get('SoTien'))} đ ngày {fmt_date(v.get('NgayThanhToan'))}")
             data.append({"sheet": r.sheet, "line": r.line, "status": r.status, "SoHopDong": v.get("SoHopDong"),
-                         "noi_dung": noi_dung, "errors": "; ".join(r.errors)})
+                         "noi_dung": noi_dung, "errors": "; ".join(r.errors),
+                         "GiaTriTruocThue": v.get("GiaTriTruocThue"), "ThueSuat": v.get("ThueSuat"),
+                         "VAT": v.get("VAT"), "SauThue": v.get("GiaTriTongSauThue", v.get("GiaTriSauThue"))})
         table.set_rows(data)
         lay.addWidget(table)
         self.unsure = [r for r in rows if r.status == "Nghi trùng"]

@@ -1,4 +1,4 @@
 """Phần mềm Quản lý Hợp đồng."""
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 APP_NAME = "Quản lý Hợp đồng"

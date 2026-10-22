@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, timedelta
 
+from . import vat
 from .assets import AssetService
 from .db import Database
 
@@ -71,6 +72,56 @@ def rate_from_amounts(before_tax, vat) -> str:
         return ""
     r = vat * 100 / before_tax
     return next((f"{std}%" for std in (10, 8, 5) if abs(r - std) < 0.2), "")
+
+
+def _fill_vat(v: dict, after_key: str) -> None:
+    """Đủ hai dữ kiện (trước thuế, thuế suất, VAT, sau thuế) thì tự tính phần còn lại; số mâu thuẫn thì báo lỗi."""
+    try:
+        vat.fill(v, after_key)
+    except ValueError as e:
+        raise ValidationError(str(e)) from None
+
+
+VAT_TABLES = (("HopDong", "GiaTriTongSauThue"), ("HoaDonDauRa", "GiaTriSauThue"), ("HoaDonDauVao", "GiaTriSauThue"))
+
+
+def backfill_vat(db) -> int:
+    """Dữ liệu nhập ở bản cũ đã đủ dữ kiện mà chưa tính (VD có thuế suất nhưng VAT = 0, sau thuế = trước thuế,
+    hoặc thiếu sau thuế): tính bổ sung. Trả về số bản ghi đã cập nhật."""
+    n = 0
+    for table, after_key in VAT_TABLES:
+        cols = db.columns(table)
+        for r in db.active(table):
+            old = {k: r[k] for k in ("GiaTriTruocThue", "VAT", after_key, "ThueSuat") if k in cols}
+            v = dict(old)
+            b, t, a = v["GiaTriTruocThue"] or 0, v["VAT"] or 0, v[after_key] or 0
+            try:
+                rate = vat.parse_rate(v.get("ThueSuat"))
+            except ValueError:
+                continue
+            r_val = vat.rate_value(rate)
+            if t == 0 and r_val and (b == 0 or a in (0, b)):
+                # bản cũ chỉ cộng trước thuế + VAT: có thuế suất mà VAT = 0 nghĩa là chưa tính
+                res = vat.complete(b or None, None, None if b else (a or None), rate)
+            elif b and not a:
+                res = vat.complete(b, t, None, rate)
+            elif a and t and not b:
+                res = vat.complete(None, t, a, rate)
+            elif a and b and not t and a != b:
+                res = vat.complete(b, None, a, rate)
+            else:
+                continue
+            if res.error:
+                continue
+            v.update(GiaTriTruocThue=res.before, VAT=res.vat, **{after_key: res.after})
+            if "ThueSuat" in cols:
+                v["ThueSuat"] = res.rate
+            if v != old:
+                db.update(table, r["Ma"], {k: v[k] for k in v if v[k] != old[k]}, commit=False)
+                n += 1
+    if n:
+        db.conn.commit()
+    return n
 
 
 def invoicing_status(value: int, invoiced: int) -> str:
@@ -196,9 +247,7 @@ class ContractService:
             v["MaThueDoiTac"] = p["MaSoThue"]
         if not v.get("TenDoiTac"):
             raise ValidationError("Chưa chọn đối tác (chủ đầu tư / nhà cung cấp).")
-        v["GiaTriTruocThue"] = int(v.get("GiaTriTruocThue") or 0)
-        v["VAT"] = int(v.get("VAT") or 0)
-        v["GiaTriTongSauThue"] = v["GiaTriTruocThue"] + v["VAT"]
+        _fill_vat(v, "GiaTriTongSauThue")
         if "ThoiGianThucHien" in v:
             v["ThoiGianThucHien"] = int(v.get("ThoiGianThucHien") or 0) or None
             if v.get("DonViThoiGian") not in DURATION_UNITS:
@@ -297,9 +346,7 @@ class ContractService:
         hd = self.db.get("HopDong", v["MaHopDong"])
         if hd["ChieuHopDong"] != "Đầu ra":
             raise ValidationError("Hóa đơn đầu ra phải gắn với hợp đồng đầu ra.")
-        v["GiaTriTruocThue"] = int(v.get("GiaTriTruocThue") or 0)
-        v["VAT"] = int(v.get("VAT") or 0)
-        v["GiaTriSauThue"] = int(v.get("GiaTriSauThue") or (v["GiaTriTruocThue"] + v["VAT"]))
+        _fill_vat(v, "GiaTriSauThue")
         dup = self.db.one("SELECT 1 FROM HoaDonDauRa WHERE DaXoa = 0 AND COALESCE(KyHieuHD,'') = ? AND SoHoaDon = ?"
                           " AND Ma != ?", (v.get("KyHieuHD") or "", v["SoHoaDon"], ma or ""))
         if dup:
@@ -353,9 +400,7 @@ class ContractService:
                          ("MaThueNCC", "MST người bán"), ("NgayNhanHD", "Ngày hóa đơn")):
             if not v.get(f):
                 raise ValidationError(f"Chưa nhập {label}.")
-        v["GiaTriTruocThue"] = int(v.get("GiaTriTruocThue") or 0)
-        v["VAT"] = int(v.get("VAT") or 0)
-        v["GiaTriSauThue"] = int(v.get("GiaTriSauThue") or (v["GiaTriTruocThue"] + v["VAT"]))
+        _fill_vat(v, "GiaTriSauThue")
         v["MaHopDong"] = v.get("MaHopDong") or None
         if v.get("NhomThue") not in TAX_GROUPS:
             v["NhomThue"] = guess_tax_group(v["VAT"])

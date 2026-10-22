@@ -15,7 +15,7 @@ from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import payment_dialog
 from . import style
-from .widgets import (Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, error, hint, info,
+from .widgets import (VAT_HINT, Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, error, hint, info, rate_field,
                       page_title, run_safely, toolbar)
 
 
@@ -179,12 +179,11 @@ class InvoicesPage(QWidget):
                     {"key": "SoHoaDon", "label": "Số hóa đơn", "required": True},
                     {"key": "NgayXuatHD", "label": "Ngày xuất", "kind": "date"},
                     {"key": "TenNguoiMua", "label": "Tên người mua"}, {"key": "MSTNguoiMua", "label": "MST người mua"},
-                    {"key": "MatHang", "label": "Mặt hàng"}, {"key": "ThueSuat", "label": "Thuế suất",
-                                                               "hint": "VD 10%, 8%, 0%, KCT."},
+                    {"key": "MatHang", "label": "Mặt hàng"}, rate_field(),
                     {"key": "GiaTriTruocThue", "label": "Trước thuế", "kind": "money"},
                     {"key": "VAT", "label": "VAT", "kind": "money"},
                     {"key": "GiaTriSauThue", "label": "Sau thuế", "kind": "money",
-                     "hint": "Để 0 thì phần mềm tự tính = trước thuế + VAT."},
+                     "hint": VAT_HINT},
                     {"key": "TinhChatHD", "label": "Tính chất", "kind": "combo", "options": list(INVOICE_KINDS)},
                     {"key": "DuongDanTep", "label": "Tệp gốc (XML/PDF)"},
                     {"key": "GhiChuHDDR", "label": "Ghi chú"}]
@@ -197,10 +196,10 @@ class InvoicesPage(QWidget):
                 {"key": "NgayNhanHD", "label": "Ngày hóa đơn", "kind": "date"},
                 {"key": "MatHang", "label": "Mặt hàng"},
                 {"key": "GiaTriTruocThue", "label": "Trước thuế", "kind": "money"},
-                {"key": "ThueSuat", "label": "Thuế suất", "hint": "VD 10%, 8%, 0%, KCT."},
+                rate_field(),
                 {"key": "VAT", "label": "VAT", "kind": "money"},
                 {"key": "GiaTriSauThue", "label": "Sau thuế", "kind": "money",
-                 "hint": "Để 0 thì phần mềm tự tính = trước thuế + VAT."},
+                 "hint": VAT_HINT},
                 {"key": "NhomThue", "label": "Nhóm thuế GTGT", "kind": "combo", "options": TAX_GROUP_OPTIONS,
                  "hint": "Dùng để tách nhóm khi xuất bảng kê hóa đơn mua vào."},
                 {"key": "NguoiMuaHang", "label": "Người mua hàng", "kind": "combo_edit", "options": self.buyers(),

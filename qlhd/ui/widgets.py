@@ -310,6 +310,13 @@ class DataTable(QTableWidget):
 
 
 # ---------------------------------------------------------------- biểu mẫu
+VAT_HINT = ("Nhập 2 trong 4 ô Trước thuế / Thuế suất / VAT / Sau thuế, phần mềm tự tính các ô còn lại.")
+
+
+def rate_field() -> dict:
+    return {"key": "ThueSuat", "label": "Thuế suất VAT", "kind": "combo_edit",
+            "options": ["10%", "8%", "5%", "0%", "KCT", "KKKNT"], "hint": "Chọn hoặc gõ, VD 10%, 8%, KCT."}
+
 class FormDialog(QDialog):
     """fields: list of dict(key, label, kind, options, required, hint, optional)."""
 
@@ -342,6 +349,7 @@ class FormDialog(QDialog):
             else:
                 form.addRow(label, w)
         lay.addLayout(form)
+        self._bind_vat()
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Lưu")
         bb.button(QDialogButtonBox.Cancel).setText("Hủy")
@@ -385,6 +393,54 @@ class FormDialog(QDialog):
 
     def widget(self, key):
         return self.widgets[key]
+
+    def _bind_vat(self) -> None:
+        """Biểu mẫu có Trước thuế, VAT, Sau thuế (và Thuế suất): sửa ô nào thì tự tính các ô còn lại."""
+        w = self.widgets
+        after = next((k for k in ("GiaTriSauThue", "GiaTriTongSauThue") if k in w), None)
+        if not after or "GiaTriTruocThue" not in w or "VAT" not in w:
+            return
+        from ..core.vat import complete, parse_rate
+
+        def rate() -> str:
+            if "ThueSuat" not in w:
+                return ""
+            try:
+                return parse_rate(self.values()["ThueSuat"])
+            except ValueError:
+                return ""
+
+        anchor = ["GiaTriTruocThue" if self.values()["GiaTriTruocThue"] or not self.values()[after] else after]
+
+        def update(changed: str) -> None:
+            v = self.values()
+            b, t, a, r = v["GiaTriTruocThue"] or None, v["VAT"] or None, v[after] or None, rate()
+            if changed in ("GiaTriTruocThue", after):
+                anchor[0] = changed          # số tiền người dùng gõ sau cùng làm gốc khi đổi thuế suất
+            # giữ ô vừa sửa và dữ kiện đi cùng, tính lại các ô phụ thuộc
+            if changed == "GiaTriTruocThue":
+                res = complete(b, None, None, r) if r else complete(b, t, None)
+            elif changed == "ThueSuat":
+                if not r:
+                    return
+                res = complete(None, None, a, r) if anchor[0] == after and a else \
+                    complete(b, None, None, r) if b else complete(None, None, a, r)
+            elif changed == "VAT":
+                res = complete(b, t, None) if b else complete(None, t, a)
+            else:
+                res = complete(None, None, a, r) if r else complete(b, None, a) if b else complete(None, t, a)
+            if res.error:
+                return
+            for key, val in (("GiaTriTruocThue", res.before), ("VAT", res.vat), (after, res.after)):
+                if key != changed:
+                    w[key].set_value(val)
+
+        for key in ("GiaTriTruocThue", "VAT", after):
+            w[key].textEdited.connect(lambda _t, k=key: update(k))
+        if "ThueSuat" in w:
+            box = w["ThueSuat"]
+            sig = box.currentTextChanged if isinstance(box, QComboBox) else box.textEdited
+            sig.connect(lambda _t: update("ThueSuat"))
 
     def set_value(self, key, v) -> None:
         w = self.widgets[key]

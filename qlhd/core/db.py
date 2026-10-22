@@ -308,6 +308,7 @@ ADDED_COLUMNS = [
     ("HopDong", "ThoiGianThucHien", "INTEGER"),
     ("HopDong", "DonViThoiGian", "TEXT"),
     ("HopDong", "NhacTruocNgay", "INTEGER"),
+    ("HopDong", "ThueSuat", "TEXT"),
     ("HoaDonDauRa", "MatHang", "TEXT"),
     ("HoaDonDauRa", "ThueSuat", "TEXT"),
     ("HoaDonDauVao", "MatHang", "TEXT"),

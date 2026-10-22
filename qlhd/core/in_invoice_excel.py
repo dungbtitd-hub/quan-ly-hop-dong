@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from .contracts import TAX_GROUP_TITLES, TAX_GROUPS, ValidationError, guess_tax_group, rate_from_amounts
+from . import vat
+from .contracts import TAX_GROUP_TITLES, TAX_GROUPS, ValidationError, guess_tax_group
 from .invoice_match import fold
 
 # (khóa, tiêu đề trong file mẫu, bắt buộc, kiểu, các cụm từ nhận diện tiêu đề — đã bỏ dấu, chữ thường)
@@ -108,6 +109,7 @@ class ExcelInvoice:
     notes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     so_hop_dong: str = ""
+    blank: set = field(default_factory=set)     # các ô để trống trong file
 
 
 def _column_key(header) -> str | None:
@@ -186,14 +188,10 @@ def _money(v) -> int:
 def _rate(v) -> str:
     if v in (None, ""):
         return ""
-    if isinstance(v, (int, float)):
-        n = v * 100 if 0 < v < 1 else v
-        return f"{n:g}%"
-    s = fold(v).replace(" ", "").upper()
-    if s in ("KCT", "KKKNT", "KHAC"):
-        return s
-    m = re.fullmatch(r"(\d+(?:[.,]\d+)?)%?", s)
-    return f"{m.group(1).replace(',', '.')}%" if m else str(v).strip()
+    try:
+        return vat.parse_rate(v)
+    except ValueError:
+        return str(v).strip()
 
 
 def _group(v) -> str | None:
@@ -251,10 +249,12 @@ def read_rows(rows: list[tuple], sheet: str) -> list[ExcelInvoice]:
             continue
         if _is_total(row) and not (_text(so) and _text(so)[0].isdigit()):
             continue
-        values, errors = {}, []
+        values, errors, blank = {}, [], set(kinds) - set(cols.values())
         for j, key in cols.items():
             v = row[j] if j < len(row) else None
             kind = kinds[key]
+            if v in (None, ""):
+                blank.add(key)
             try:
                 values[key] = {"date": _date, "money": _money, "mst": _mst, "rate": _rate, "group": _group,
                                "invoice_no": _invoice_no}.get(kind, _text)(v)
@@ -262,20 +262,27 @@ def read_rows(rows: list[tuple], sheet: str) -> list[ExcelInvoice]:
                 errors.append(f"{LABELS[key]}: {e}")
         if not values.get("SoHoaDonGoc") and not values.get("TenNhaCungCap"):
             continue
-        out.append(_finish(ExcelInvoice(sheet, i + 1, values, errors=errors), group))
+        out.append(_finish(ExcelInvoice(sheet, i + 1, values, errors=errors, blank=blank), group))
     return out
 
 
 def _finish(item: ExcelInvoice, group: str | None) -> ExcelInvoice:
     v = item.values
+    def given(k):
+        return None if k in item.blank else (v.get(k) or 0)
+
+    if given("GiaTriTruocThue") or given("GiaTriSauThue"):
+        res = vat.complete(given("GiaTriTruocThue") or None, given("VAT"), given("GiaTriSauThue") or None,
+                           v.get("ThueSuat") or "")
+        if res.error:
+            item.errors.append(res.error)
+        else:
+            v["GiaTriTruocThue"], v["VAT"], v["GiaTriSauThue"], v["ThueSuat"] = res.before, res.vat, res.after, res.rate
+            item.notes += res.notes
+            if res.computed and "Thuế suất" not in res.computed:
+                item.notes.append("Tự tính: " + ", ".join(res.computed) + ".")
     for key in ("GiaTriTruocThue", "VAT", "GiaTriSauThue"):
         v[key] = v.get(key) or 0
-    if not v["GiaTriSauThue"]:
-        v["GiaTriSauThue"] = v["GiaTriTruocThue"] + v["VAT"]
-    elif not v["GiaTriTruocThue"]:
-        v["GiaTriTruocThue"] = v["GiaTriSauThue"] - v["VAT"]
-    if not v.get("ThueSuat"):
-        v["ThueSuat"] = rate_from_amounts(v["GiaTriTruocThue"], v["VAT"])
     if not v.get("NhomThue"):
         if group:
             v["NhomThue"] = group

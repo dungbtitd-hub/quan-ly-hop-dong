@@ -16,6 +16,7 @@ from ..core.reports import fmt_date
 from ..developer import DEVELOPER
 from . import icons, style
 from ..core.assets import AssetService
+from ..core.contracts import backfill_vat
 from .accounts_page import AccountsPage
 from .assets_page import AssetsPage
 from .auth_dialogs import MyAccountDialog, WipeDataDialog
@@ -357,6 +358,7 @@ class MainWindow(QMainWindow):
         self.update_badges()
 
     def update_badges(self):
+        backfill_vat(self.ctx.db)          # dữ liệu cũ / nhận từ máy bản cũ đủ dữ kiện mà chưa tính VAT
         today = date.today().isoformat()
         expiring = self.ctx.cs.expiring(today)
         tasks = self.ctx.cs.overdue_tasks(today)
