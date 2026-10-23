@@ -824,3 +824,29 @@ def test_cross_links_between_screens(qtbot, ctx, monkeypatch):
     monkeypatch.setattr(assets_page, "confirm_changes", lambda *a, **k: True)
     tab.reclassify()
     assert not any(a["MaDongHD"] == line["Ma"] for a in svc.assets("CCDC"))
+
+
+def test_report_filters_follow_context(qtbot, ctx):
+    from qlhd.ui.reports_page import ReportsPage
+
+    rp = ReportsPage(ctx)
+    qtbot.addWidget(rp)
+    rp.refresh()
+    rp.context.set_value("hoa_don_ra")
+    assert rp.loai.isEnabled() and rp.tt_tt.isEnabled()
+    assert not rp.nhom_thue.isEnabled() and not rp.lien_ket.isEnabled() and not rp._labels["nhom_thue"].isEnabled()
+    rp.nhom_thue.set_value("Chịu thuế")
+    assert rp.filters().nhom_thue == "tach"                 # ô mờ không ảnh hưởng báo cáo
+    rp.context.set_value("hoa_don_vao")
+    assert rp.nhom_thue.isEnabled() and rp.lien_ket.isEnabled()
+    assert not rp.nguoi_mua.isEnabled() and not rp.loai.isEnabled() and not rp.tt_tt.isEnabled()
+    assert rp.filters().nhom_thue == "Chịu thuế"
+    rp.context.set_value("da_thanh_toan")
+    assert rp.doi_tac.isEnabled() and not rp.nguoi_mua.isEnabled() and not rp.nhom_thue.isEnabled()
+    assert not rp.chieu.isEnabled() and not rp.trong_ky.isEnabled()
+    rp.context.set_value("thoi_gian")
+    assert rp.ky.isEnabled() and not rp.tach_nam.isEnabled()
+    rp.ky_td.set_value("thang_nay")
+    assert not rp.tu.isEnabled()                             # kỳ tương đối vẫn khóa ô ngày
+    rp.context.set_value("hop_dong")
+    assert not rp.tu.isEnabled() and rp.ky_td.isEnabled() and not rp.ky.isEnabled()

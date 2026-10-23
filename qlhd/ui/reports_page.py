@@ -17,6 +17,40 @@ from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_tex
 TEMPLATE_PREFIX = "mau_bao_cao:"
 
 
+_DATE = {"ky_td", "tu", "den"}
+_CONTRACT = {"loai", "doi_tac", "nhom", "tinh_trang"}
+_SPLIT = {"chieu", "gop"}
+_VALUE = {"tinh_theo", "che_do", "tt_tt", "tt_xuat", "tach_nam"}
+_CONTRACT_REPORT = _DATE | _CONTRACT | _SPLIT | _VALUE
+_PARTNER_REPORT = _DATE | _CONTRACT | _VALUE                              # chỉ hợp đồng đầu ra
+# Ô lọc nào áp dụng cho ngữ cảnh nào; ô không có trong danh sách sẽ mờ đi và không được dùng khi lập báo cáo.
+RELEVANT = {
+    "tong_hop": _CONTRACT_REPORT,
+    "loai_hd": _CONTRACT_REPORT,
+    "hop_dong": _CONTRACT_REPORT,
+    "chu_dau_tu": _PARTNER_REPORT,
+    "nhom_cdt": _PARTNER_REPORT,
+    "hoa_don_ra": _DATE | _CONTRACT | {"tt_tt", "tach_nam"},
+    "hoa_don_ra_nguoi_mua": _DATE | _CONTRACT | {"tt_tt", "tach_nam", "nguoi_mua"},
+    "da_thanh_toan": _DATE | _CONTRACT | {"tt_xuat", "tach_nam"},
+    "nha_cung_cap": _DATE | {"loai", "doi_tac", "tinh_trang", "tinh_theo", "che_do", "tach_nam", "lien_ket"},
+    "hoa_don_vao": _DATE | {"tach_nam", "lien_ket", "nhom_thue"},
+    "hoa_don_ra_vao": _DATE | _CONTRACT | {"gop", "tt_tt", "tach_nam", "lien_ket", "nhom_thue"},
+    "thoi_gian": _DATE | _CONTRACT | _SPLIT | {"ky"},
+}
+# Ô lọc trên màn hình -> trường của ReportFilters
+FILTER_KEYS = {
+    "ky_td": ["ky_tuong_doi"], "tu": ["tu"], "den": ["den"], "tinh_theo": ["tinh_theo"], "chieu": ["chieu"],
+    "gop": ["gop_ra_vao"], "tach_nam": ["tach_nam"], "loai": ["loai_hd"], "doi_tac": ["doi_tac"], "nhom": ["nhom"],
+    "tinh_trang": ["tinh_trang"], "tt_tt": ["tt_thanh_toan"], "tt_xuat": ["tt_xuat_hd"], "lien_ket": ["co_hd_lien_ket"],
+    "nhom_thue": ["nhom_thue"], "nguoi_mua": ["nguoi_mua"], "ky": ["ky"], "che_do": ["che_do"],
+}
+
+
+def relevant(context: str | None) -> set[str]:
+    return RELEVANT.get(context, set(FILTER_KEYS))
+
+
 def preview_rows(rep) -> list[dict]:
     """Dòng để xem trước trên màn hình: nhãn nhóm hiện ở cột đầu, thêm dòng tổng."""
     first = rep.columns[0][0]
@@ -87,24 +121,29 @@ class ReportsPage(QWidget):
         for lst in (self.loai, self.doi_tac, self.nhom, self.tinh_trang, self.nguoi_mua):
             lst.setMaximumHeight(90)
         r = 0
-        for label, w in (("Kỳ báo cáo", self.ky_td), ("1. Từ ngày", self.tu), ("    Đến ngày", self.den),
-                         ("2. Tính theo", self.tinh_theo), ("3. Chiều hợp đồng", self.chieu), ("", self.gop),
-                         ("", self.tach_nam),
-                         ("4. Loại hợp đồng", self.loai), ("5. Chủ đầu tư / NCC", self.doi_tac),
-                         ("6. Nhóm chủ đầu tư", self.nhom), ("7. Tình trạng HĐ", self.tinh_trang),
-                         ("8. Thanh toán", self.tt_tt), ("9. Xuất hóa đơn", self.tt_xuat),
-                         ("10. HĐơn đầu vào", self.lien_ket), ("11. Thuế GTGT đầu vào", self.nhom_thue),
-                         ("12. Người mua (HĐơn ra)", self.nguoi_mua), ("Kỳ (ngữ cảnh thời gian)", self.ky)):
-            g.addWidget(QLabel(label), r, 0, Qt.AlignTop)
+        self._labels: dict[str, QLabel] = {}
+        for label, name in (("Kỳ báo cáo", "ky_td"), ("1. Từ ngày", "tu"), ("    Đến ngày", "den"),
+                            ("2. Tính theo", "tinh_theo"), ("3. Chiều hợp đồng", "chieu"), ("", "gop"),
+                            ("", "tach_nam"),
+                            ("4. Loại hợp đồng", "loai"), ("5. Chủ đầu tư / NCC", "doi_tac"),
+                            ("6. Nhóm chủ đầu tư", "nhom"), ("7. Tình trạng HĐ", "tinh_trang"),
+                            ("8. Thanh toán", "tt_tt"), ("9. Xuất hóa đơn", "tt_xuat"),
+                            ("10. HĐơn đầu vào", "lien_ket"), ("11. Thuế GTGT đầu vào", "nhom_thue"),
+                            ("12. Người mua (HĐơn ra)", "nguoi_mua"), ("Kỳ (ngữ cảnh thời gian)", "ky")):
+            w = getattr(self, name)
+            lab = self._labels[name] = QLabel(label)
+            g.addWidget(lab, r, 0, Qt.AlignTop)
             g.addWidget(w, r, 1)
             r += 1
         mode = QHBoxLayout()
         mode.addWidget(self.trong_ky)
         mode.addWidget(self.luy_ke)
-        g.addWidget(QLabel("Cách tính giá trị"), r, 0)
+        self._labels["che_do"] = QLabel("Cách tính giá trị")
+        g.addWidget(self._labels["che_do"], r, 0)
         g.addLayout(mode, r, 1)
         r += 1
-        g.addWidget(button("Lưu các CĐT đã tích thành nhóm…", self._save_group), r, 0, 1, 2)
+        self.b_group = button("Lưu các CĐT đã tích thành nhóm…", self._save_group)
+        g.addWidget(self.b_group, r, 0, 1, 2)
         scroll = QScrollArea()
         scroll.setWidget(filt)
         scroll.setWidgetResizable(True)
@@ -162,26 +201,43 @@ class ReportsPage(QWidget):
             "hoa_don_ra_nguoi_mua": "Tích người mua ở bộ lọc 12 (không tích = tất cả). Mỗi người mua một sheet.",
             "hoa_don_ra_vao": "Mặc định hóa đơn đầu ra và đầu vào ở hai sheet riêng; tích \"Gộp\" để chung một bảng.",
         }
-        self.note.setText(notes.get(self.context.value(), "Đầu ra và đầu vào được tách bảng riêng, trừ khi tích "
-                                                          "\"Gộp đầu ra và đầu vào\"."))
+        text = notes.get(self.context.value(), "Đầu ra và đầu vào được tách bảng riêng, trừ khi tích "
+                                               "\"Gộp đầu ra và đầu vào\".")
+        self.note.setText(text + " Ô lọc mờ không áp dụng cho ngữ cảnh này.")
+        on = relevant(self.context.value())
+        for name, lab in self._labels.items():
+            lab.setEnabled(name in on)
+            widgets = (self.trong_ky, self.luy_ke) if name == "che_do" else (getattr(self, name),)
+            for w in widgets:
+                w.setEnabled(name in on)
+        self.b_group.setEnabled("doi_tac" in on)
+        self._relative_changed()
 
     def _relative_changed(self):
         key = self.ky_td.value()
-        self.tu.setEnabled(not key)
-        self.den.setEnabled(not key)
+        self.tu.setEnabled(not key and self.ky_td.isEnabled())
+        self.den.setEnabled(not key and self.ky_td.isEnabled())
         if key:
             tu, den = relative_range(key, date.today())
             self.tu.set_value(tu)
             self.den.set_value(den)
 
     def filters(self) -> ReportFilters:
-        return ReportFilters(
+        """Ô lọc không áp dụng cho ngữ cảnh đang chọn (mờ) lấy giá trị mặc định, không ảnh hưởng kết quả."""
+        on = relevant(self.context.value())
+        values = dict(
             tu=self.tu.value(), den=self.den.value(), tinh_theo=self.tinh_theo.value(), chieu=self.chieu.value(),
             loai_hd=self.loai.values(), doi_tac=self.doi_tac.values(), nhom=self.nhom.values(),
             tinh_trang=self.tinh_trang.values(), tt_thanh_toan=self.tt_tt.value(), tt_xuat_hd=self.tt_xuat.value(),
             co_hd_lien_ket=self.lien_ket.value(), che_do="trong_ky" if self.trong_ky.isChecked() else "luy_ke",
             ky=self.ky.value(), nhom_thue=self.nhom_thue.value(), nguoi_mua=self.nguoi_mua.values(),
             gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value(), tach_nam=self.tach_nam.isChecked())
+        default = ReportFilters()
+        for widget, keys in FILTER_KEYS.items():
+            if widget not in on:
+                for k in keys:
+                    values[k] = getattr(default, k)
+        return ReportFilters(**values)
 
     def build(self):
         return self.cr.build(self.context.value(), self.filters())
