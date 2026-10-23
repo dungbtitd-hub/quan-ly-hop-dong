@@ -8,8 +8,9 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
                                QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core import excel_import
-from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, TASK_STATUSES, ValidationError,
-                              duration_text, end_date)
+from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_FILTERS, PAY_METHODS, PAY_STATE_LABELS,
+                              TASK_STATUSES, ValidationError, contract_matches, contract_pay_state, duration_text,
+                              end_date)
 from ..core.reports import fmt_date, fmt_money
 from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title,
                       rate_field, require, run_safely, toolbar)
@@ -20,7 +21,8 @@ CONTRACT_COLS = [("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp �
                  ("NgayKy", "Ngày ký", "date"), ("ThoiGianTH", "Thời gian TH", "text"),
                  ("NgayKetThucDuKien", "Ngày kết thúc", "date"), ("TinhTrangHopDong", "Tình trạng", "text"),
                  ("GiaTriHD", "Giá trị HĐ", "money"), ("PhanTramTT", "% thanh toán", "pct"), ("DaXuatHD", "Đã xuất HĐơn", "money"),
-                 ("DaThanhToan", "Đã thanh toán", "money"), ("ConPhaiThu", "Còn phải thu", "money")]
+                 ("DaThanhToan", "Đã thanh toán", "money"), ("ConPhaiThu", "Còn phải thu", "money"),
+                 ("TTThanhToan", "Thanh toán", "text")]
 
 
 def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
@@ -96,7 +98,8 @@ def partner_dialog(ctx, parent, values: dict | None = None, ma: str | None = Non
     return None
 
 
-def payment_dialog(ctx, parent, ma_hd: str, values: dict | None = None) -> dict | None:
+def payment_dialog(ctx, parent, ma_hd: str, values: dict | None = None,
+                   title: str = "Ghi nhận thanh toán") -> dict | None:
     invoices = [("(Tạm ứng / chưa có hóa đơn)", None)] + [
         (f"{i['KyHieuHD'] or ''} số {i['SoHoaDon']} – {fmt_money(i['GiaTriSauThue'])}", i["Ma"])
         for i in ctx.cs.out_invoices(ma_hd)]
@@ -106,13 +109,24 @@ def payment_dialog(ctx, parent, ma_hd: str, values: dict | None = None) -> dict 
               {"key": "MaHDDauRa", "label": "Hóa đơn liên quan", "kind": "combo", "options": invoices},
               {"key": "SoThamChieuSK", "label": "Số tham chiếu sao kê"},
               {"key": "GhiChu", "label": "Ghi chú"}]
-    dlg = FormDialog("Ghi nhận thanh toán", fields, values, parent,
+    dlg = FormDialog(title, fields, values, parent,
                      validate=lambda v: require(v["SoTien"] > 0, "Số tiền phải lớn hơn 0."))
     if dlg.exec() != QDialog.Accepted:
         return None
     v = dlg.values()
     v["MaHopDong"] = ma_hd
     return v
+
+
+def edit_payment(ctx, parent, ma_tt: str) -> bool:
+    """Sửa một lần thanh toán đã ghi (ghi nhầm số tiền, ngày, hóa đơn liên quan…)."""
+    p = dict(ctx.db.get("ThanhToanHopDong", ma_tt))
+    v = payment_dialog(ctx, parent, p["MaHopDong"], p, "Sửa lần thanh toán")
+    if v and run_safely(parent, ctx.cs.save_payment, v, ma_tt):
+        ctx.db.log(ctx.user["TenDangNhap"], "Sửa lần thanh toán",
+                   f"{fmt_money(p['SoTien'])} → {fmt_money(v['SoTien'])} đ")
+        return True
+    return False
 
 
 class ContractsPage(QWidget):
@@ -123,6 +137,11 @@ class ContractsPage(QWidget):
         lay.addWidget(page_title("Hợp đồng"))
         self.filter = Combo([("Tất cả", None), ("Đầu ra", "Đầu ra"), ("Đầu vào", "Đầu vào")])
         self.filter.currentIndexChanged.connect(self.refresh)
+        self.status = Combo([("Mọi tình trạng", None)] + [(x, x) for x in CONTRACT_STATUSES])
+        self.status.currentIndexChanged.connect(self.refresh)
+        self.paid = Combo([("Mọi tình trạng thanh toán", None)] + list(PAY_FILTERS))
+        self.paid.setToolTip("Lọc theo tiền thu về của hợp đồng đầu ra.")
+        self.paid.currentIndexChanged.connect(self.refresh)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Tìm số HĐ, tên HĐ, đối tác…")
         self.search.setMinimumWidth(260)
@@ -136,8 +155,8 @@ class ContractsPage(QWidget):
         for b, ok in ((self.b_add, can_add), (self.b_edit, ctx.can("HopDong", "Sua")),
                       (self.b_del, ctx.can("HopDong", "Xoa")), (self.b_imp, can_add)):
             b.setEnabled(ok)
-        lay.addLayout(toolbar(self.b_add, self.b_edit, self.b_del, self.b_imp, self.b_tpl, "stretch",
-                              QLabel("Chiều:"), self.filter, self.search))
+        lay.addLayout(toolbar(self.b_add, self.b_edit, self.b_del, self.b_imp, self.b_tpl, "stretch"))
+        lay.addLayout(toolbar(QLabel("Lọc:"), self.filter, self.status, self.paid, "stretch", self.search))
         split = QSplitter(Qt.Vertical)
         self.table = DataTable(CONTRACT_COLS)
         self.table.activated_row.connect(lambda _: self.edit())
@@ -159,7 +178,9 @@ class ContractsPage(QWidget):
                                                    button("Thêm lần bàn giao", self.add_handover),
                                                    button("Thêm lần nghiệm thu", self.add_acceptance)]), "Công việc")
         self.detail.addTab(self._wrap(self.invoices, []), "Hóa đơn")
-        pay_btns = [button("Ghi nhận thanh toán", self.add_payment), button("Xóa lần thanh toán", self.del_payment)]
+        pay_btns = [button("Ghi nhận thanh toán", self.add_payment), button("Sửa lần thanh toán", self.edit_payment),
+                    button("Xóa lần thanh toán", self.del_payment)]
+        self.payments.activated_row.connect(lambda _: self.edit_payment())
         for b in pay_btns:
             b.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
         self.detail.addTab(self._wrap(self.payments, pay_btns), "Thanh toán")
@@ -182,6 +203,9 @@ class ContractsPage(QWidget):
         for hd in self.ctx.cs.contracts(self.filter.value(), self.search.text().strip()):
             r = dict(hd)
             r.update(self.ctx.cs.summary(hd["Ma"]))
+            if not contract_matches(hd, r, self.status.value(), self.paid.value()):
+                continue
+            r["TTThanhToan"] = PAY_STATE_LABELS[contract_pay_state(r)] if hd["ChieuHopDong"] == "Đầu ra" else ""
             r["LoaiHD"] = types.get(hd["MaLoaiHD"], "")
             r["ThoiGianTH"] = duration_text(hd["ThoiGianThucHien"], hd["DonViThoiGian"])
             rows.append(r)
@@ -193,12 +217,13 @@ class ContractsPage(QWidget):
 
     def select_contract(self, ma: str) -> None:
         """Mở trang ở hợp đồng được chọn (từ Tổng quan)."""
-        self.filter.blockSignals(True)
-        self.search.blockSignals(True)
-        self.filter.setCurrentIndex(0)
+        for w in (self.filter, self.status, self.paid, self.search):
+            w.blockSignals(True)
+        for w in (self.filter, self.status, self.paid):
+            w.setCurrentIndex(0)
         self.search.clear()
-        self.filter.blockSignals(False)
-        self.search.blockSignals(False)
+        for w in (self.filter, self.status, self.paid, self.search):
+            w.blockSignals(False)
         self.refresh()
         for i in range(self.table.rowCount()):
             r = self.table._row_of(self.table.item(i, 0))
@@ -312,6 +337,15 @@ class ContractsPage(QWidget):
             return info(self, "Thanh toán được ghi cho hợp đồng đầu ra (tiền thu về).")
         v = payment_dialog(self.ctx, self, ma, {"HinhThuc": "Chuyển khoản"})
         if v and run_safely(self, self.ctx.cs.save_payment, v):
+            self.refresh()
+
+    def edit_payment(self):
+        p = self.payments.current()
+        if not p:
+            return info(self, "Chọn một lần thanh toán.")
+        if not self.ctx.can("HoaDonDauRa", "Sua"):
+            return
+        if edit_payment(self.ctx, self, p["Ma"]):
             self.refresh()
 
     def del_payment(self):

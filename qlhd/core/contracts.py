@@ -37,6 +37,33 @@ def payment_status(invoiced: int, paid: int) -> str:
     return "Thu một phần"
 
 
+PAY_FILTERS = (("Đã thanh toán đủ", "du"), ("Thanh toán một phần", "mot_phan"), ("Chưa thanh toán", "chua"),
+               ("Còn phải thu (đã xuất hóa đơn)", "con_thu"))
+PAY_STATE_LABELS = {"du": "Đã thanh toán đủ", "mot_phan": "Thanh toán một phần", "chua": "Chưa thanh toán"}
+
+
+def contract_pay_state(s: dict) -> str:
+    """Tình trạng thanh toán của hợp đồng đầu ra so với giá trị hợp đồng (summary): du / mot_phan / chua."""
+    paid, value = s["DaThanhToan"], s["GiaTriHD"]
+    if paid <= 0:
+        return "chua"
+    return "du" if paid >= value else "mot_phan"
+
+
+def contract_matches(hd, s: dict, tinh_trang: str | None = None, thanh_toan: str | None = None) -> bool:
+    """Lọc hợp đồng theo tình trạng thực hiện và tình trạng thanh toán (thanh toán chỉ xét hợp đồng đầu ra,
+    tức tiền thu về)."""
+    if tinh_trang and hd["TinhTrangHopDong"] != tinh_trang:
+        return False
+    if thanh_toan:
+        if hd["ChieuHopDong"] != "Đầu ra":
+            return False
+        if thanh_toan == "con_thu":
+            return s["ConPhaiThu"] > 0
+        return contract_pay_state(s) == thanh_toan
+    return True
+
+
 def add_months(d: date, months: int) -> date:
     m = d.month - 1 + months
     y, m = d.year + m // 12, m % 12 + 1
@@ -355,6 +382,9 @@ class ContractService:
             self.db.update("HoaDonDauRa", ma, v)
             return ma
         return self.db.insert("HoaDonDauRa", v)
+
+    def invoice_payments(self, ma_hddr: str) -> list[sqlite3.Row]:
+        return self.db.active("ThanhToanHopDong", "MaHDDauRa = ?", (ma_hddr,), "NgayThanhToan")
 
     def invoice_paid(self, ma_hddr: str) -> int:
         return self.db.one("SELECT COALESCE(SUM(SoTien),0) s FROM ThanhToanHopDong WHERE DaXoa = 0 AND MaHDDauRa = ?",

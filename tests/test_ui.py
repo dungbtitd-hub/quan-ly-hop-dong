@@ -454,3 +454,85 @@ def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
     dt = next(r for r in tab.table.rows if r.get("Nguon") == "doanh_thu")
     assert dt["GiaTri"] == 50_000_000
     ctx.lock_finance()
+
+
+def test_contract_filters_and_edit_payment(qtbot, ctx, monkeypatch):
+    from qlhd.ui import contracts_page
+    from qlhd.ui.contracts_page import ContractsPage
+    from qlhd.ui.invoices_page import InvoicePaymentsDialog, InvoicesPage
+
+    page = ContractsPage(ctx)
+    qtbot.addWidget(page)
+    page.refresh()
+    assert page.table.rowCount() == 2
+    page.status.set_value("Đang thực hiện")
+    assert [r["SoHopDong"] for r in page.table.rows] == ["01/2026/HĐTV"]
+    page.status.set_value(None)
+    page.paid.set_value("mot_phan")                 # thu 35 / 110 triệu
+    assert [r["TTThanhToan"] for r in page.table.rows] == ["Thanh toán một phần"]
+    page.paid.set_value("con_thu")                  # đã xuất 55, thu 35
+    assert page.table.rowCount() == 1
+    for state in ("du", "chua"):
+        page.paid.set_value(state)
+        assert page.table.rowCount() == 0           # hợp đồng đầu vào không xét thanh toán
+    page.status.set_value("Hoàn thành")
+    page.paid.set_value(None)
+    assert page.table.rowCount() == 0
+
+    # sửa lần thanh toán ghi nhầm (30 triệu → 33 triệu) từ màn Hóa đơn đầu ra
+    def fake_dialog(_ctx, _parent, ma_hd, values, title="Ghi nhận thanh toán"):
+        assert title == "Sửa lần thanh toán" and values["SoTien"] == 30_000_000
+        return {"MaHopDong": ma_hd, "NgayThanhToan": values["NgayThanhToan"], "SoTien": 33_000_000,
+                "HinhThuc": "Chuyển khoản", "MaHDDauRa": values["MaHDDauRa"], "SoThamChieuSK": "FT123", "GhiChu": ""}
+    monkeypatch.setattr(contracts_page, "payment_dialog", fake_dialog)
+    inv_page = InvoicesPage(ctx, "ra")
+    qtbot.addWidget(inv_page)
+    inv_page.refresh()
+    inv = inv_page.table.rows[0]
+    assert inv["DaThu"] == 30_000_000
+    dlg = InvoicePaymentsDialog(ctx, inv, inv_page)
+    qtbot.addWidget(dlg)
+    assert dlg.table.rowCount() == 1
+    dlg.table.selectRow(0)
+    dlg.edit()
+    assert dlg.changed and ctx.cs.invoice_paid(inv["Ma"]) == 33_000_000
+    assert len(ctx.db.active("ThanhToanHopDong")) == 2      # sửa tại chỗ, không thêm bản ghi
+    # sửa ở thẻ Thanh toán của hợp đồng cũng được
+    page.select_contract(inv["MaHopDong"])
+    page.payments.selectRow(0)
+    monkeypatch.setattr(contracts_page, "payment_dialog",
+                        lambda c, p, ma_hd, values, title="": dict(fake_dialog(c, p, ma_hd, dict(values, SoTien=30_000_000),
+                                                                               "Sửa lần thanh toán"), SoTien=31_000_000))
+    page.edit_payment()
+    assert ctx.cs.invoice_paid(inv["Ma"]) == 31_000_000
+
+
+def test_invoice_payment_details(qtbot, ctx, monkeypatch):
+    from qlhd.ui import invoices_page
+    from qlhd.ui.invoices_page import InvoicePaymentsDialog, InvoicesPage
+
+    monkeypatch.setattr(invoices_page, "info", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a[1])))
+    page = InvoicesPage(ctx, "ra")
+    qtbot.addWidget(page)
+    page.refresh()
+    r = page.table.rows[0]
+    assert (r["TTThanhToan"], r["NgayTT"], r["SoThamChieuSK"]) == ("Thu một phần", "10/03/2026", "FT123")
+    page.search.setText("ft123")
+    assert page.table.rowCount() == 1
+    opened = []
+    monkeypatch.setattr(InvoicePaymentsDialog, "exec", lambda dlg: opened.append(dlg.table.rowCount()))
+    page.table.selectRow(0)
+    page.add_payment()                       # đã có thanh toán: mở chi tiết thay vì ghi mới
+    assert opened == [1]
+    asked = []
+    monkeypatch.setattr(invoices_page, "confirm", lambda _p, text, *a: asked.append(text) or False)
+    dlg = InvoicePaymentsDialog(ctx, r, page)
+    qtbot.addWidget(dlg)
+    dlg.table.selectRow(0)
+    dlg.delete()
+    assert asked and "FT123" in asked[0] and ctx.cs.invoice_paid(r["Ma"]) == 30_000_000   # chưa xác nhận: không xóa
+    monkeypatch.setattr(invoices_page, "confirm", lambda *a: True)
+    dlg.delete()
+    assert ctx.cs.invoice_paid(r["Ma"]) == 0 and dlg.table.rowCount() == 0
+    page.search.clear()
+    assert page.table.rows[0]["TTThanhToan"] == "Chưa thu"
