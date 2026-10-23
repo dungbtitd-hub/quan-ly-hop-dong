@@ -383,6 +383,24 @@ class ContractService:
             return ma
         return self.db.insert("HoaDonDauRa", v)
 
+    def payments_missing_ref(self) -> list[dict]:
+        """Lần thu chuyển khoản đã ghi nhưng chưa có số tham chiếu sao kê (chưa đối chiếu sao kê ngân hàng)."""
+        rows = self.db.query(
+            "SELECT t.*, h.SoHopDong, h.TenDoiTac, d.KyHieuHD, d.SoHoaDon FROM ThanhToanHopDong t"
+            " JOIN HopDong h ON h.Ma = t.MaHopDong LEFT JOIN HoaDonDauRa d ON d.Ma = t.MaHDDauRa"
+            " WHERE t.DaXoa = 0 AND t.HinhThuc = 'Chuyển khoản' AND TRIM(COALESCE(t.SoThamChieuSK, '')) = ''"
+            " ORDER BY t.NgayThanhToan, h.SoHopDong")
+        return [dict(r) for r in rows]
+
+    def set_payment_ref(self, ma_tt: str, so_tham_chieu: str) -> None:
+        so = " ".join((so_tham_chieu or "").split())
+        if so:
+            dup = self.db.one("SELECT 1 FROM ThanhToanHopDong WHERE DaXoa = 0 AND SoThamChieuSK = ? AND Ma != ?",
+                              (so, ma_tt))
+            if dup:
+                raise ValidationError(f"Số tham chiếu {so} đã ghi cho một lần thanh toán khác.")
+        self.db.update("ThanhToanHopDong", ma_tt, {"SoThamChieuSK": so or None})
+
     def invoice_payments(self, ma_hddr: str) -> list[sqlite3.Row]:
         return self.db.active("ThanhToanHopDong", "MaHDDauRa = ?", (ma_hddr,), "NgayThanhToan")
 

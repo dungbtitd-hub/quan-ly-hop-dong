@@ -32,6 +32,14 @@ def confirm(parent, text: str, title: str = "Xác nhận") -> bool:
     return QMessageBox.question(parent, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
 
 
+def confirm_changes(parent, changes: list[tuple[str, str, str]], what: str = "") -> bool:
+    """Sửa dữ liệu đã có: liệt kê thay đổi (cũ → mới) và hỏi xác nhận trước khi lưu, tránh sửa nhầm."""
+    lines = [f"• {label}: {old or '(trống)'} → {new or '(trống)'}" for label, old, new in changes[:15]]
+    more = f"\n… và {len(changes) - 15} thay đổi khác." if len(changes) > 15 else ""
+    return confirm(parent, f"Lưu thay đổi{(' ' + what) if what else ''}?\n\n" + "\n".join(lines) + more,
+                   "Xác nhận sửa dữ liệu")
+
+
 def ask_secret(parent, title: str, label: str) -> str | None:
     text, ok = QInputDialog.getText(parent, title, label, QLineEdit.Password)
     return text if ok else None
@@ -321,8 +329,10 @@ class FormDialog(QDialog):
     """fields: list of dict(key, label, kind, options, required, hint, optional)."""
 
     def __init__(self, title: str, fields: list[dict], values: dict | None = None, parent=None,
-                 validate=None, extra_buttons=None):
+                 validate=None, extra_buttons=None, editing: bool | None = None):
         super().__init__(parent)
+        # sửa bản ghi đã có (values có Ma, hoặc editing=True): lưu thì phải xác nhận các thay đổi
+        self.editing = bool((values or {}).get("Ma")) if editing is None else editing
         self.setWindowTitle(title)
         self.setMinimumWidth(480)
         self.fields = fields
@@ -350,6 +360,7 @@ class FormDialog(QDialog):
                 form.addRow(label, w)
         lay.addLayout(form)
         self._bind_vat()
+        self._initial = self._display()
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Lưu")
         bb.button(QDialogButtonBox.Cancel).setText("Hủy")
@@ -493,7 +504,33 @@ class FormDialog(QDialog):
             except Exception as e:  # noqa: BLE001
                 error(self, str(e))
                 return
+        if self.editing:
+            now = self._display()
+            changes = [(f["label"], self._initial[f["key"]], now[f["key"]]) for f in self.fields
+                       if now[f["key"]] != self._initial[f["key"]] and f.get("kind") != "password"]
+            if changes and not confirm_changes(self, changes):
+                return
         self.accept()
+
+    def _display(self) -> dict:
+        """Giá trị từng ô dưới dạng chữ như người dùng thấy (để so sánh và liệt kê thay đổi)."""
+        out = {}
+        for key, w in self.widgets.items():
+            if isinstance(w, MoneyEdit):
+                out[key] = fmt_money(w.value()) if w.value() else ""
+            elif isinstance(w, DateEdit):
+                out[key] = fmt_date(w.value()) if w.value() else ""
+            elif isinstance(w, QComboBox):
+                out[key] = w.currentText().strip()
+            elif isinstance(w, QPlainTextEdit):
+                out[key] = w.toPlainText().strip()
+            elif isinstance(w, QSpinBox):
+                out[key] = str(w.value())
+            elif isinstance(w, QCheckBox):
+                out[key] = "Có" if w.isChecked() else "Không"
+            else:
+                out[key] = w.text().strip()
+        return out
 
 
 def toolbar(*buttons) -> QHBoxLayout:

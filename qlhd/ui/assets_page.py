@@ -13,7 +13,7 @@ from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_C
                            ST_NEW, ST_SAME_CODE, TSCD_COLS, TSCD_KEYS, AssetError, AssetService)
 from ..core.reports import fmt_date, fmt_money
 from . import style
-from .widgets import (Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title,
+from .widgets import (Combo, DataTable, FormDialog, button, confirm, confirm_changes, error, hint, info, page_title,
                       run_safely, toolbar)
 
 LINE_COLS = [("NgayNhanHD", "Ngày HĐ", "date"), ("SoHoaDonGoc", "Số HĐ", "text"),
@@ -495,6 +495,10 @@ class AssetsPage(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
         pl, nhom, months = dlg.values()
+        done = [r for r in rows if r.get("PhanLoai") not in (None, "", dm.CHUA_PHAN_LOAI)]
+        if done and not confirm_changes(self, [(r["TenHang"], f"{r['PhanLoai']} {r.get('NhomDM') or ''}".strip(),
+                                                f"{pl} {nhom or ''}".strip()) for r in done], "phân loại"):
+            return
         errors = []
         for r in rows:
             try:

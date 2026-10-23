@@ -536,3 +536,70 @@ def test_invoice_payment_details(qtbot, ctx, monkeypatch):
     assert ctx.cs.invoice_paid(r["Ma"]) == 0 and dlg.table.rowCount() == 0
     page.search.clear()
     assert page.table.rows[0]["TTThanhToan"] == "Chưa thu"
+
+
+def test_filter_and_fill_bank_refs(qtbot, ctx, monkeypatch):
+    from qlhd.core.contracts import ValidationError
+    from qlhd.ui import invoices_page
+    from qlhd.ui.invoices_page import BankRefDialog, InvoicesPage
+
+    cs = ctx.cs
+    inv = cs.out_invoices()[0]
+    p = cs.save_payment({"MaHopDong": inv["MaHopDong"], "MaHDDauRa": inv["Ma"], "NgayThanhToan": "2026-03-20",
+                         "SoTien": 10_000_000, "HinhThuc": "Chuyển khoản"})       # đã thu, chưa đối chiếu sao kê
+    page = InvoicesPage(ctx, "ra")
+    qtbot.addWidget(page)
+    page.only.set_value("chua_sk")
+    assert [r["Ma"] for r in page.table.rows] == [inv["Ma"]]
+    missing = cs.payments_missing_ref()
+    assert [r["Ma"] for r in missing] == [p]                 # tiền mặt và lần đã có FT123 không nằm trong danh sách
+    with pytest.raises(ValidationError):
+        cs.set_payment_ref(p, "FT123")                       # số tham chiếu đã dùng
+    dlg = BankRefDialog(ctx, missing, page)
+    qtbot.addWidget(dlg)
+    dlg.table.item(0, len(dlg.COLS) - 1).setText("FT26079999")
+    asked = []
+    monkeypatch.setattr(invoices_page, "confirm_changes", lambda _p, ch, *a: asked.append(ch) or False)
+    dlg.save()
+    assert asked[0][0][2] == "FT26079999" and not ctx.db.get("ThanhToanHopDong", p)["SoThamChieuSK"]   # chưa xác nhận
+    monkeypatch.setattr(invoices_page, "confirm_changes", lambda *a: True)
+    dlg.save()
+    assert dlg.saved == 1 and ctx.db.get("ThanhToanHopDong", p)["SoThamChieuSK"] == "FT26079999"
+    page.refresh()
+    assert page.table.rowCount() == 0 and not cs.payments_missing_ref()
+    monkeypatch.setattr(invoices_page, "info", lambda _p, text, *a: setattr(page, "_msg", text))
+    page.update_refs()
+    assert "đều đã có" in page._msg
+
+
+def test_editing_existing_data_needs_confirmation(qtbot, ctx, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from qlhd.ui import widgets
+    from qlhd.ui.widgets import FormDialog
+
+    fields = [{"key": "TenHopDong", "label": "Tên hợp đồng"},
+              {"key": "GiaTriTruocThue", "label": "Giá trị trước thuế", "kind": "money"},
+              {"key": "NgayKy", "label": "Ngày ký", "kind": "date"}]
+    asked = []
+    monkeypatch.setattr(widgets, "confirm", lambda _p, text, *a: asked.append(text) or False)
+    row = {"Ma": "x", "TenHopDong": "Cũ", "GiaTriTruocThue": 1_000_000, "NgayKy": "2026-01-15"}
+    dlg = FormDialog("Hợp đồng", fields, row)
+    qtbot.addWidget(dlg)
+    dlg._accept()                                   # không đổi gì: lưu luôn, không hỏi
+    assert not asked and dlg.result() == QDialog.Accepted
+    dlg = FormDialog("Hợp đồng", fields, row)
+    qtbot.addWidget(dlg)
+    dlg.set_value("GiaTriTruocThue", 2_000_000)
+    dlg._accept()                                   # có sửa: hỏi, chọn Không thì không lưu
+    assert "Giá trị trước thuế: 1.000.000 → 2.000.000" in asked[0] and dlg.result() != QDialog.Accepted
+    monkeypatch.setattr(widgets, "confirm", lambda *a: True)
+    dlg._accept()
+    assert dlg.result() == QDialog.Accepted
+    asked.clear()
+    new = FormDialog("Hợp đồng", fields, {"TenHopDong": "Mới"})   # thêm mới: không hỏi
+    qtbot.addWidget(new)
+    monkeypatch.setattr(widgets, "confirm", lambda _p, text, *a: asked.append(text) or False)
+    new.set_value("GiaTriTruocThue", 5)
+    new._accept()
+    assert not asked and new.result() == QDialog.Accepted

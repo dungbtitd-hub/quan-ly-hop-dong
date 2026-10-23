@@ -7,7 +7,8 @@ from PySide6.QtWidgets import QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, Q
 
 from ..core.profit import GROUPS, REVENUE_MODES, ProfitError, ProfitService
 from ..core.reports import export_xlsx, fmt_money
-from .widgets import (Combo, DataTable, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm, error, hint,
+from .widgets import (Combo, DataTable, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm, confirm_changes,
+                      error, hint,
                       info, run_safely, toolbar)
 
 COLS = [("STT", "STT", "text"), ("TenDong", "Nội dung", "text"), ("GiaTri", "Số tiền", "money"),
@@ -156,10 +157,20 @@ class ProfitTab(QWidget):
         self.reload()
 
     def save_params(self):
-        self._run(self.svc.set_year, self.year.value(), {
-            "CheDoDoanhThu": self.mode.value(), "TyLeThueTNDN": self.rate.value(),
-            "ThueTNDNNhap": self.tndn.value() if self.tndn_own.isChecked() else None,
-            "TNCNConPhaiNop": self.tncn.value()})
+        new = {"CheDoDoanhThu": self.mode.value(), "TyLeThueTNDN": self.rate.value(),
+               "ThueTNDNNhap": self.tndn.value() if self.tndn_own.isChecked() else None,
+               "TNCNConPhaiNop": self.tncn.value()}
+        cur = self.svc.year_info(self.year.value())
+        labels = {"CheDoDoanhThu": "Cách tính doanh thu", "TyLeThueTNDN": "Thuế suất TNDN (%)",
+                  "ThueTNDNNhap": "Thuế TNDN nhập tay", "TNCNConPhaiNop": "Thuế TNCN còn phải nộp"}
+
+        def show(k, x):
+            return "" if x is None else fmt_money(x) if k in ("ThueTNDNNhap", "TNCNConPhaiNop") else str(x)
+        changes = [(labels[k], show(k, cur[k]), show(k, v)) for k, v in new.items()
+                   if cur is not None and k in cur.keys() and cur[k] != v and not (cur[k] in (None, 0) and v in (None, 0))]
+        if changes and not confirm_changes(self, changes, f"thông số năm {self.year.value()}"):
+            return
+        self._run(self.svc.set_year, self.year.value(), new)
 
     def add_row(self):
         dlg = FormDialog("Thêm dòng bảng lãi lỗ", [
@@ -189,7 +200,7 @@ class ProfitTab(QWidget):
                    {"key": "GhiChu", "label": "Ghi chú"}]
         vals = {"TenDong": r["TenDong"].split("  (")[0], "Dau": r["Dau"], "GhiChu": r.get("GhiChu"),
                 "GhiDe": r["GiaTriNhap"] is not None or not auto, "GiaTriNhap": r["GiaTriNhap"] or 0}
-        dlg = FormDialog("Sửa dòng bảng lãi lỗ", fields, vals, self)
+        dlg = FormDialog("Sửa dòng bảng lãi lỗ", fields, vals, self, editing=True)
         if dlg.exec() == QDialog.Accepted:
             v = dlg.values()
             v["GiaTriNhap"] = v["GiaTriNhap"] if v.pop("GhiDe") else None

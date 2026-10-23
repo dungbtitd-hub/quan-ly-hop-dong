@@ -16,7 +16,8 @@ from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import edit_payment, payment_dialog
 from . import style
-from .widgets import (VAT_HINT, Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, error, hint, info, rate_field,
+from .widgets import (VAT_HINT, Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes,
+                      error, hint, info, rate_field,
                       page_title, run_safely, toolbar)
 
 
@@ -103,7 +104,11 @@ class InvoicesPage(QWidget):
             b_pays = button("Thanh toán đã ghi…", self.show_payments)
             b_pay.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
             btns[4:4] = [b_pay, b_pays]
-            self.only = Combo([("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du")])
+            self.only = Combo([("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du"),
+                               ("Đã thu, chưa có số tham chiếu sao kê", "chua_sk")])
+            b_ref = button("Cập nhật số sao kê…", self.update_refs)
+            b_ref.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
+            btns.insert(6, b_ref)
         else:
             self.only = Combo([("Tất cả", None), ("Có hợp đồng", "co"), ("Mua trực tiếp (không HĐ)", "khong"),
                                ("Chịu thuế GTGT", "Chịu thuế"), ("Không chịu thuế GTGT", "Không chịu thuế")])
@@ -148,6 +153,9 @@ class InvoicesPage(QWidget):
                 r["NgayTT"] = ", ".join(fmt_date(p["NgayThanhToan"]) for p in pays)
                 r["SoThamChieuSK"] = ", ".join(p["SoThamChieuSK"] for p in pays if p["SoThamChieuSK"])
                 if self.only.value() == "con" and r["ConPhaiThu"] <= 0 or self.only.value() == "du" and r["ConPhaiThu"] > 0:
+                    continue
+                if self.only.value() == "chua_sk" and not any(
+                        p["HinhThuc"] == "Chuyển khoản" and not (p["SoThamChieuSK"] or "").strip() for p in pays):
                     continue
                 if k and k not in " ".join(str(r.get(x) or "") for x in ("SoHoaDon", "KyHieuHD", "TenNguoiMua",
                                                                           "MSTNguoiMua", "SoHopDong", "MatHang",
@@ -383,6 +391,15 @@ class InvoicesPage(QWidget):
         v = payment_dialog(self.ctx, self, r["MaHopDong"], {"MaHDDauRa": r["Ma"], "SoTien": max(r["ConPhaiThu"], 0),
                                                             "HinhThuc": "Chuyển khoản"})
         if v and run_safely(self, self.ctx.cs.save_payment, v):
+            self.refresh()
+
+    def update_refs(self):
+        rows = self.ctx.cs.payments_missing_ref()
+        if not rows:
+            return info(self, "Mọi lần thu chuyển khoản đều đã có số tham chiếu sao kê.")
+        dlg = BankRefDialog(self.ctx, rows, self)
+        dlg.exec()
+        if dlg.saved:
             self.refresh()
 
     def show_payments(self):
@@ -728,3 +745,70 @@ class InvoicePaymentsDialog(QDialog):
             self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa lần thanh toán", fmt_money(p["SoTien"]))
             self.changed = True
             self.reload()
+
+
+class BankRefDialog(QDialog):
+    """Đối chiếu sao kê: các lần thu chuyển khoản chưa có số tham chiếu, gõ số tham chiếu ngay trên bảng rồi lưu."""
+
+    COLS = [("NgayThanhToan", "Ngày tiền về"), ("SoTien", "Số tiền"), ("SoHopDong", "Số HĐ"), ("TenDoiTac", "Đối tác"),
+            ("HoaDon", "Hóa đơn"), ("GhiChu", "Ghi chú"), ("SoThamChieuSK", "Số tham chiếu sao kê")]
+
+    def __init__(self, ctx, rows: list[dict], parent=None):
+        super().__init__(parent)
+        self.ctx, self.rows, self.saved = ctx, rows, 0
+        self.setWindowTitle("Cập nhật số tham chiếu sao kê")
+        self.resize(980, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint(f"{len(rows)} lần thu chuyển khoản chưa có số tham chiếu. Mở sao kê ngân hàng, tìm giao dịch"
+                           " theo ngày và số tiền rồi gõ số tham chiếu vào cột cuối; dòng để trống thì giữ nguyên."))
+        self.table = QTableWidget(len(rows), len(self.COLS))
+        self.table.setHorizontalHeaderLabels([c[1] for c in self.COLS])
+        self.table.verticalHeader().setVisible(False)
+        for i, r in enumerate(rows):
+            r["HoaDon"] = f"{r['KyHieuHD'] or ''} {r['SoHoaDon']}".strip() if r["SoHoaDon"] else "(tạm ứng)"
+            for j, (key, _) in enumerate(self.COLS):
+                val = r.get(key)
+                text = fmt_date(val) if key == "NgayThanhToan" else fmt_money(val) if key == "SoTien" else (val or "")
+                item = QTableWidgetItem(str(text))
+                if key != "SoThamChieuSK":
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if key == "SoTien":
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(i, j, item)
+        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(len(self.COLS) - 1, 220)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self.table, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Lưu số tham chiếu")
+        bb.button(QDialogButtonBox.Cancel).setText("Đóng")
+        bb.accepted.connect(self.save)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def save(self):
+        col = len(self.COLS) - 1
+        filled = [(i, self.table.item(i, col).text().strip()) for i in range(len(self.rows))]
+        filled = [(i, ref) for i, ref in filled if ref]
+        if not filled:
+            return self.reject()
+        if not confirm_changes(self, [(f"{fmt_date(self.rows[i]['NgayThanhToan'])} – "
+                                       f"{fmt_money(self.rows[i]['SoTien'])} đ", "", ref) for i, ref in filled],
+                               "số tham chiếu sao kê"):
+            return
+        errors = []
+        for i, r in enumerate(self.rows):
+            ref = self.table.item(i, col).text().strip()
+            if not ref:
+                continue
+            try:
+                self.ctx.cs.set_payment_ref(r["Ma"], ref)
+                self.saved += 1
+            except ValidationError as e:
+                errors.append(f"Dòng {i + 1}: {e}")
+        if self.saved:
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Cập nhật số tham chiếu sao kê", f"{self.saved} lần thu")
+        if errors:
+            error(self, "Chưa lưu được:\n" + "\n".join(errors[:15]))
+            return
+        self.accept()

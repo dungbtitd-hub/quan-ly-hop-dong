@@ -12,7 +12,8 @@ from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_FILTERS, PA
                               TASK_STATUSES, ValidationError, contract_matches, contract_pay_state, duration_text,
                               end_date)
 from ..core.reports import fmt_date, fmt_money
-from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm, error, hint, info, page_title,
+from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm, confirm_changes, error, hint, info,
+                      page_title,
                       rate_field, require, run_safely, toolbar)
 
 
@@ -497,6 +498,8 @@ class CatalogPage(QWidget):
         r = self.types.current()
         if r:
             name = ask_text(self, "Đổi tên", "Tên mới:", r["TenLoaiHD"])
+            if name and (name == r["TenLoaiHD"] or not confirm_changes(self, [("Loại hợp đồng", r["TenLoaiHD"], name)])):
+                return
             if name and run_safely(self, self.ctx.cs.save_contract_type, name, r["Ma"]):
                 self.refresh()
 
@@ -549,7 +552,12 @@ class CatalogPage(QWidget):
         r = self.groups.current()
         if not r:
             return
-        res = self._group_dialog(r["TenNhom"], self.ctx.cs.group_members(r["Ma"]))
+        old_members = set(self.ctx.cs.group_members(r["Ma"]))
+        res = self._group_dialog(r["TenNhom"], old_members)
+        if res and (res[0] != r["TenNhom"] or set(res[1]) != old_members) and not confirm_changes(
+                self, [("Tên nhóm", r["TenNhom"], res[0]),
+                       ("Số chủ đầu tư trong nhóm", str(len(old_members)), str(len(res[1])))], "nhóm"):
+            return
         if res and run_safely(self, self.ctx.cs.save_group, res[0], res[1], r["Ma"]):
             self.refresh()
 

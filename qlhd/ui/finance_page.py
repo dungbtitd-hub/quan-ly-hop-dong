@@ -15,6 +15,7 @@ from ..core.finance import FinanceError, FinanceStore
 from ..core.reports import FinanceReports, export_xlsx, fmt_date, fmt_money, period_range
 from .profit_page import ProfitTab
 from .widgets import (Combo, DataTable, DateEdit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
+                      confirm_changes,
                       copy_text, error, hint, info, page_title, run_safely, toolbar)
 
 ENTRY_COLS = [("Ngay", "Ngày", "date"), ("SoPhieu", "Số phiếu / Số HĐ", "text"), ("PhanLoai", "Phân loại", "text"),
@@ -53,6 +54,11 @@ class RecoveryCodeDialog(QDialog):
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("MÃ KHÔI PHỤC THU CHI – Phần mềm Quản lý Hợp đồng\n\n" + code + "\n")
+
+
+VOUCHER_LABELS = {"NgayPhatSinh": "Ngày", "SoTien": "Số tiền", "NoiDung": "Nội dung", "DoiTuong": "Đối tượng",
+                  "MaKhoanMuc": "Khoản mục", "MaQuy": "Quỹ", "MaHopDong": "Dự án", "PhanLoaiChi": "Phân loại chi",
+                  "SoChungTu": "Số chứng từ", "GhiChu": "Ghi chú", "LoaiThuChi": "Loại"}
 
 
 class VoucherDialog(QDialog):
@@ -177,6 +183,13 @@ class VoucherDialog(QDialog):
 
     def _save(self, close: bool):
         v = self.values()
+        if self.editing:
+            changes = [(k, str(self.values_in.get(k) or ""), str(v.get(k) or "")) for k in v
+                       if k in self.values_in and str(self.values_in.get(k) or "") != str(v.get(k) or "")]
+            if changes and not confirm_changes(self, [(VOUCHER_LABELS.get(k, k), fmt_money(o) if k == "SoTien" and o
+                                                       else o, fmt_money(n) if k == "SoTien" and n else n)
+                                                      for k, o, n in changes], "phiếu"):
+                return
         try:
             if self.editing:
                 self.store.update_voucher(self.editing, v)
@@ -560,8 +573,9 @@ class FinancePage(QWidget):
     def _cat_rename(self):
         sel = self._cat_selected()
         if sel and sel[0] == "cat":
-            name = ask_text(self, "Đổi tên", "Tên mới:", self.cat_tree.currentItem().text(0))
-            if name:
+            old = self.cat_tree.currentItem().text(0)
+            name = ask_text(self, "Đổi tên", "Tên mới:", old)
+            if name and name != old and confirm_changes(self, [("Tên mục", old, name)]):
                 self.ctx.finance.rename_category(sel[1], name)
                 self.reload()
 
