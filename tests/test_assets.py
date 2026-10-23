@@ -189,9 +189,9 @@ def test_profit_table_numbers(company):
     gd = company["gd"]
     cs = ContractService(gd.db)
     cdt = cs.save_partner({"TenDoiTac": "Chủ đầu tư", "VaiTroDoiTac": "Chủ đầu tư"})
-    hd = cs.save_contract({"SoHopDong": "01/2024", "TenHopDong": "Tư vấn", "ChieuHopDong": "Đầu ra", "MaDoiTac": cdt,
+    hd = cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "01/2024", "TenHopDong": "Tư vấn", "ChieuHopDong": "Đầu ra", "MaDoiTac": cdt,
                            "GiaTriTruocThue": 3_000_000_000, "NgayKy": "2024-01-10"})
-    cs.save_contract({"SoHopDong": "09/2024", "TenHopDong": "Chưa xuất HĐ", "ChieuHopDong": "Đầu ra",
+    cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "09/2024", "TenHopDong": "Chưa xuất HĐ", "ChieuHopDong": "Đầu ra",
                       "MaDoiTac": cdt, "GiaTriTruocThue": 300_000_000, "NgayKy": "2024-11-10"})
     cs.save_out_invoice({"SoHoaDon": "1", "MaHopDong": hd, "NgayXuatHD": "2024-06-01",
                          "GiaTriTruocThue": 3_000_000_000, "VAT": 0})

@@ -16,6 +16,7 @@ THEMES = {
         "success": "#15803d", "success_soft": "#e7f6ec", "group_bg": "#eef3fb", "total_bg": "#f3f4f6",
         "topbar": "#ffffff", "sidebar": "#1c2434", "sidebar_text": "#d5dbe5", "sidebar_head": "#7d8aa0",
         "sidebar_sel": "#2b3750", "sidebar_hover": "#252f43", "button": "#ffffff", "button_hover": "#f3f5f8",
+        "grid": "#e9ecf1",          # đường kẻ ô bảng: mờ
     },
     "toi": {
         "bg": "#0f141c", "card": "#171e29", "border": "#263042", "border_strong": "#334155", "text": "#e5e7eb",
@@ -25,6 +26,7 @@ THEMES = {
         "success": "#4ade80", "success_soft": "#173324", "group_bg": "#1e2838", "total_bg": "#1b2331",
         "topbar": "#131a24", "sidebar": "#0b1017", "sidebar_text": "#cbd5e1", "sidebar_head": "#64748b",
         "sidebar_sel": "#1e293b", "sidebar_hover": "#151d2a", "button": "#1b2331", "button_hover": "#222c3d",
+        "grid": "#222b39",
     },
 }
 THEME_NAMES = {"sang": "Sáng", "toi": "Tối"}
@@ -144,11 +146,11 @@ QCheckBox, QRadioButton { background: transparent; spacing: 6px; }
 /* ---- bảng, danh sách */
 QTableWidget, QTableView, QTreeWidget, QListWidget {
     background: $card; alternate-background-color: $alt_row; border: 1px solid $border; border-radius: 8px;
-    gridline-color: $border; selection-background-color: $sel; selection-color: $sel_text; outline: 0;
+    gridline-color: $grid; selection-background-color: $sel; selection-color: $sel_text; outline: 0;
 }
 QHeaderView { background: transparent; }
 QHeaderView::section {
-    background: $header_bg; border: none; border-bottom: 1px solid $border; border-right: 1px solid $border;
+    background: $header_bg; border: none; border-bottom: 1px solid $border; border-right: 1px solid $grid;
     padding: 6px 8px; color: $muted; font-weight: 600;
 }
 QTableCornerButton::section { background: $header_bg; border: none; }

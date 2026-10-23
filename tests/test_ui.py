@@ -626,3 +626,25 @@ def test_editing_existing_data_needs_confirmation(qtbot, ctx, monkeypatch):
     new.set_value("GiaTriTruocThue", 5)
     new._accept()
     assert not asked and new.result() == QDialog.Accepted
+
+
+def test_home_fits_window_with_long_contract_names(qtbot, ctx):
+    from PySide6.QtWidgets import QBoxLayout, QScrollArea
+
+    from qlhd.ui.home_page import HomePage
+
+    long_name = "Tư vấn lập báo cáo kinh tế kỹ thuật, thiết kế bản vẽ thi công và dự toán " * 4
+    ctx.db.execute("UPDATE HopDong SET TenHopDong = ?", (long_name,))
+    for w in (1300, 820):
+        page = HomePage(ctx)
+        qtbot.addWidget(page)
+        page.resize(w, 700)
+        page.show()
+        page.refresh()
+        qtbot.wait(50)
+        scroll = page.findChild(QScrollArea)
+        body = scroll.widget()
+        assert body.width() <= scroll.viewport().width()                   # không phải kéo ngang
+        assert body.minimumSizeHint().width() <= scroll.viewport().width()
+        assert page.bottom.direction() == (QBoxLayout.TopToBottom if w < page.NARROW else QBoxLayout.LeftToRight)
+        assert not page.grab().isNull()

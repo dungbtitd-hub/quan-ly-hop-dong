@@ -10,7 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import vat
-from .contracts import CONTRACT_STATUSES, PAY_METHODS, ContractService, ValidationError
+from .contracts import CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, ContractService, ValidationError
 from .db import Database
 
 RATE_OPTIONS = ("10%", "8%", "5%", "0%", "KCT", "KKKNT")
@@ -30,6 +30,8 @@ CONTRACT_COLS = [
     ("Giá trị sau thuế (đồng)", "GiaTriTongSauThue", False, "money"),
     ("Ngày ký", "NgayKy", True, "date"),
     ("Ngày bắt đầu dự kiến", "NgayBatDauDuKien", False, "date"),
+    ("Thời gian thực hiện", "ThoiGianThucHien", True, "int"),
+    ("Đơn vị thời gian", "DonViThoiGian", False, "unit"),
     ("Ngày kết thúc dự kiến", "NgayKetThucDuKien", False, "date"),
     ("Tình trạng", "TinhTrangHopDong", False, "status"),
     ("Ghi chú", "GhiChu", False, "text"),
@@ -60,10 +62,10 @@ SHEETS = [("Hợp đồng", CONTRACT_COLS), ("Hóa đơn đầu ra", INVOICE_COL
 EXAMPLES = {
     "Hợp đồng": [
         ["01/2026/HĐTV", "Tư vấn thiết kế trường THCS A", "Đầu ra", "Tư vấn thiết kế", "Ban QLDA quận Ba Đình",
-         "0101234567", 100000000, "8%", None, None, date(2026, 1, 15), date(2026, 2, 1), date(2026, 12, 31),
+         "0101234567", 100000000, "8%", None, None, date(2026, 1, 15), date(2026, 2, 1), 11, "tháng", None,
          "Đang thực hiện", "Ví dụ, xóa dòng này trước khi nhập"],
         ["05/2026/MB", "Mua vật tư văn phòng", "Đầu vào", "Mua sắm", "Công ty TNHH Vật tư B", "0309876543",
-         None, "10%", None, 22000000, date(2026, 2, 3), None, None, "Hoàn thành", "Ví dụ, xóa dòng này trước khi nhập"],
+         None, "10%", None, 22000000, date(2026, 2, 3), None, 30, "ngày", None, "Hoàn thành", "Ví dụ, xóa dòng này trước khi nhập"],
     ],
     "Hóa đơn đầu ra": [
         ["01/2026/HĐTV", "1", "C26TAA", "0000012", date(2026, 3, 1), 50000000, None, 4000000, None, "Ví dụ"],
@@ -86,6 +88,8 @@ GUIDE = [
     "   Giá trị: chỉ cần 2 trong 4 cột Trước thuế / Thuế suất VAT / Tiền thuế VAT / Sau thuế, phần mềm tự tính"
     " phần còn lại: trước thuế + thuế suất; sau thuế + thuế suất; trước thuế + tiền VAT; sau thuế + tiền VAT."
     " Thuế suất ghi 10%, 8%, 5%, 0%, KCT… Điền đủ cả ba số tiền thì phần mềm kiểm tra trước thuế + VAT = sau thuế.",
+    "   Thời gian thực hiện (bắt buộc): số ngày hoặc số tháng; Đơn vị thời gian ghi 'ngày' hoặc 'tháng' (để trống là"
+    " ngày). Phần mềm tự tính Ngày kết thúc dự kiến từ ngày bắt đầu (trống thì từ ngày ký), tính cả ngày bắt đầu.",
     "6. Loại hợp đồng, đối tác chưa có trong phần mềm sẽ được tự thêm vào danh mục.",
     "7. Phần mềm kiểm tra trùng: hợp đồng trùng Số hợp đồng + đối tác, hóa đơn trùng Ký hiệu + Số hóa đơn"
     " (cả với hóa đơn đã có lẫn các dòng khác trong file) và báo ngay khi chọn file. Dòng trùng hoặc lỗi"
@@ -131,6 +135,7 @@ def write_template(path: str | Path) -> Path:
         for c, (_, _, _, kind) in enumerate(cols, start=1):
             letter = ws.cell(1, c).column_letter
             options = {"chieu": ["Đầu ra", "Đầu vào"], "status": list(CONTRACT_STATUSES),
+                       "unit": list(DURATION_UNITS),
                        "method": list(PAY_METHODS), "rate": list(RATE_OPTIONS)}.get(kind)
             if options:
                 dv = DataValidation(type="list", formula1='"' + ",".join(options) + '"', allow_blank=True,
@@ -196,6 +201,17 @@ def _to_money(v) -> int:
     return int(s)
 
 
+def _to_int(v) -> int:
+    if v in (None, ""):
+        return 0
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    s = str(v).strip().split()[0] if str(v).strip() else ""
+    if not s.isdigit() or int(s) <= 0:
+        raise ValueError(f"cần số nguyên dương: {v}")
+    return int(s)
+
+
 def _norm(s) -> str:
     return " ".join(str(s or "").split()).strip()
 
@@ -230,6 +246,12 @@ def _read_sheet(ws, cols, sheet_name) -> list[ImportRow]:
                     values[key] = _to_date(v)
                 elif kind == "rate":
                     values[key] = vat.parse_rate(v)
+                elif kind == "int":
+                    values[key] = _to_int(v)
+                elif kind == "unit":
+                    values[key] = _norm(v).lower() or "ngày"
+                    if values[key] not in DURATION_UNITS:
+                        raise ValueError("ghi 'ngày' hoặc 'tháng'")
                 else:
                     values[key] = _norm(v) if v not in (None, "") else ""
             except ValueError as e:

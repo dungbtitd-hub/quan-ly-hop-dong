@@ -28,6 +28,7 @@ CONTRACT_COLS = [("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp �
 
 def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
     values = dict(values or {"ChieuHopDong": "Đầu ra", "TinhTrangHopDong": "Chưa bắt đầu"})
+    new = not values.get("Ma")
     types = [("(Chưa phân loại)", None)] + [(t["TenLoaiHD"], t["Ma"]) for t in ctx.cs.contract_types()]
     partners = [(f"{p['TenDoiTac']}" + (f" – {p['MaSoThue']}" if p["MaSoThue"] else ""), p["Ma"])
                 for p in ctx.cs.partners()]
@@ -45,8 +46,9 @@ def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
         {"key": "NgayKy", "label": "Ngày ký", "kind": "date"},
         {"key": "NgayBatDauDuKien", "label": "Ngày bắt đầu thực hiện", "kind": "date", "optional": True,
          "hint": "Để trống thì tính từ ngày ký."},
-        {"key": "ThoiGianThucHien", "label": "Thời gian thực hiện", "kind": "int", "max": 100_000,
-         "hint": "Số ngày hoặc số tháng (chọn đơn vị bên dưới). Có nhập thì ngày kết thúc được tự tính."},
+        {"key": "ThoiGianThucHien", "label": "Thời gian thực hiện", "kind": "int", "max": 100_000, "required": new,
+         "hint": "Số ngày hoặc số tháng (chọn đơn vị bên dưới), bắt buộc với hợp đồng mới. Ngày kết thúc được "
+                 "tự tính."},
         {"key": "DonViThoiGian", "label": "Đơn vị", "kind": "combo", "options": list(DURATION_UNITS)},
         {"key": "NgayKetThucDuKien", "label": "Ngày kết thúc dự kiến", "kind": "date", "optional": True},
         {"key": "NhacTruocNgay", "label": "Nhắc trước khi hết hạn (ngày)", "kind": "int", "max": 3650,
@@ -66,7 +68,9 @@ def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
 
     values.setdefault("DonViThoiGian", "ngày")
     dlg = FormDialog("Hợp đồng", fields, values, parent, extra_buttons=[("Thêm đối tác", add_partner)],
-                     validate=lambda v: require(v.get("MaDoiTac"), "Chọn đối tác."))
+                     validate=lambda v: (require(v.get("MaDoiTac"), "Chọn đối tác."),
+                                         require(not new or v.get("ThoiGianThucHien"),
+                                                 "Nhập thời gian thực hiện hợp đồng (số ngày hoặc số tháng).")))
 
     def recalc(*_):
         v = dlg.values()

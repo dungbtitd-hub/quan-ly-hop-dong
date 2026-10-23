@@ -4,8 +4,9 @@ from __future__ import annotations
 from datetime import date
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
-                               QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtGui import QPainter
+from PySide6.QtWidgets import (QBoxLayout, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+                               QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from ..core.reports import fmt_date, fmt_money
 from .widgets import button, card, hint, info, page_title, tagged
@@ -35,6 +36,36 @@ def _clear(layout) -> None:
             _clear(it.layout())
 
 
+class ElidedLabel(QLabel):
+    """Nhãn một dòng, chữ dài thì cắt "…" theo bề rộng còn lại (di chuột xem đủ) – không kéo giãn trang."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setToolTip(text)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+
+    def minimumSizeHint(self):
+        sz = super().minimumSizeHint()
+        sz.setWidth(40)
+        return sz
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        r = self.contentsRect()
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.drawText(r, int(self.alignment() | Qt.AlignVCenter),
+                   self.fontMetrics().elidedText(self.text(), Qt.ElideRight, r.width()))
+
+
+def _wrap(lbl: QLabel) -> QLabel:
+    """Nhãn tự xuống dòng, không đòi bề rộng tối thiểu theo cả câu."""
+    lbl.setWordWrap(True)
+    lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    lbl.setMinimumWidth(40)
+    return lbl
+
+
 class _AlertRow(QFrame):
     clicked = Signal()
 
@@ -46,11 +77,11 @@ class _AlertRow(QFrame):
         lay.setContentsMargins(12, 6, 4, 6)
         col = QVBoxLayout()
         col.setSpacing(1)
-        t = QLabel(title)
+        t = _wrap(QLabel(title))
         t.setStyleSheet("font-weight:600;")
-        t.setWordWrap(True)
+        t.setToolTip(title)
         col.addWidget(t)
-        col.addWidget(hint(sub))
+        col.addWidget(_wrap(hint(sub)))
         lay.addLayout(col, 1)
         lay.addWidget(tagged(QLabel(pill), "Pill", tone), 0, Qt.AlignTop)
 
@@ -122,6 +153,7 @@ class HomePage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)      # mọi thứ co theo bề rộng màn hình
         body = QWidget()
         body.setObjectName("Page")
         scroll.setWidget(body)
@@ -153,7 +185,7 @@ class HomePage(QWidget):
         dl.addLayout(self.days_row)
         lay.addWidget(self.days_card)
 
-        bottom = QHBoxLayout()
+        bottom = self.bottom = QBoxLayout(QBoxLayout.LeftToRight)
         bottom.setSpacing(14)
         self.todo_count = tagged(QLabel(), "Pill", "danger")
         todo, tl = card("Cần xử lý", self.todo_count)
@@ -173,13 +205,29 @@ class HomePage(QWidget):
         self.sync_info = hint("")
         lay.addWidget(self.sync_info)
 
+    NARROW = 980      # hẹp hơn thì thẻ số liệu xếp 2 × 2, "Cần xử lý" và "Công nợ" xếp chồng
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._arrange()
+
+    def _arrange(self):
+        narrow = self.width() < self.NARROW
+        self.bottom.setDirection(QBoxLayout.TopToBottom if narrow else QBoxLayout.LeftToRight)
+        frames = [self.stats.itemAt(i).widget() for i in range(self.stats.count())]
+        for i, f in enumerate(frames):
+            self.stats.addWidget(f, *((i // 2, i % 2) if narrow else (0, i)))
+        for c in range(4):
+            self.stats.setColumnStretch(c, 1 if c < (2 if narrow else 4) else 0)
+
     # ---- dựng các phần
     def _stat(self, i: int, label: str, value: str, note: str, tone: str | None) -> None:
         frame, cl = card()
         cl.setSpacing(4)
-        cl.addWidget(tagged(QLabel(label), "StatLabel"))
-        cl.addWidget(tagged(QLabel(value), "StatValue", tone))
-        cl.addWidget(hint(note))
+        cl.addWidget(_wrap(tagged(QLabel(label), "StatLabel")))
+        cl.addWidget(_wrap(tagged(QLabel(value), "StatValue", tone)))
+        cl.addWidget(_wrap(hint(note)))
+        frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.stats.addWidget(frame, 0, i)
 
     def _day(self, iso: str, events: list[str], today: date) -> QFrame:
@@ -188,11 +236,13 @@ class HomePage(QWidget):
         f.setObjectName("Day")
         f.setProperty("today", d == today)
         f.setProperty("busy", bool(events))
-        f.setMinimumWidth(52)
+        f.setMinimumWidth(30)
+        f.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         v = QVBoxLayout(f)
         v.setContentsMargins(4, 6, 4, 6)
         v.setSpacing(0)
         wd = tagged(QLabel(WEEKDAYS_SHORT[d.weekday()]), "Hint")
+        wd.setMinimumWidth(0)
         wd.setAlignment(Qt.AlignCenter)
         num = QLabel(str(d.day))
         num.setAlignment(Qt.AlignCenter)
@@ -254,8 +304,8 @@ class HomePage(QWidget):
             box = QVBoxLayout()
             box.setSpacing(3)
             top = QHBoxLayout()
-            name = QLabel(f"{r['SoHopDong']} – {r['TenHopDong']}")
-            name.setToolTip(r["TenDoiTac"])
+            name = ElidedLabel(f"{r['SoHopDong']} – {r['TenHopDong']}")
+            name.setToolTip(f"{r['SoHopDong']} – {r['TenHopDong']}\n{r['TenDoiTac']}")
             top.addWidget(name, 1)
             top.addWidget(tagged(QLabel(fmt_money(r["ConPhaiThu"]) + " đ"), "Warn"))
             box.addLayout(top)
@@ -265,12 +315,13 @@ class HomePage(QWidget):
             bar.setTextVisible(False)
             bar.setFixedHeight(8)
             box.addWidget(bar)
-            box.addWidget(hint(f"Đã thu {r['PhanTramTT']:.0f}% · {fmt_money(r['DaThanhToan'])} / "
-                               f"{fmt_money(r['GiaTriHD'])} đ"))
+            box.addWidget(_wrap(hint(f"Đã thu {r['PhanTramTT']:.0f}% · {fmt_money(r['DaThanhToan'])} / "
+                                     f"{fmt_money(r['GiaTriHD'])} đ")))
             self.debts.addLayout(box)
         if not d["cong_no"]:
             self.debts.addWidget(hint("Không còn công nợ phải thu."))
 
+        self._arrange()
         partners = self.ctx.sync.partners()
         if partners:
             p = partners[0]

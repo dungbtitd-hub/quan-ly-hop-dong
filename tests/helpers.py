@@ -6,10 +6,10 @@ def sample_data(db):
     loai = cs.save_contract_type("Tư vấn thiết kế")
     cdt = cs.save_partner({"TenDoiTac": "Ban QLDA Hà Nội", "MaSoThue": "0100000001", "VaiTroDoiTac": "Chủ đầu tư"})
     ncc = cs.save_partner({"TenDoiTac": "Công ty Vật tư X", "MaSoThue": "0200000002", "VaiTroDoiTac": "Nhà cung cấp"})
-    hd = cs.save_contract({"SoHopDong": "01/2026/HĐTV", "TenHopDong": "Thiết kế trường học", "ChieuHopDong": "Đầu ra",
+    hd = cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "01/2026/HĐTV", "TenHopDong": "Thiết kế trường học", "ChieuHopDong": "Đầu ra",
                            "MaLoaiHD": loai, "MaDoiTac": cdt, "GiaTriTruocThue": 100_000_000, "VAT": 10_000_000,
                            "NgayKy": "2026-01-15", "TinhTrangHopDong": "Đang thực hiện"})
-    hdv = cs.save_contract({"SoHopDong": "05/2026/MB", "TenHopDong": "Mua vật tư", "ChieuHopDong": "Đầu vào",
+    hdv = cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "05/2026/MB", "TenHopDong": "Mua vật tư", "ChieuHopDong": "Đầu vào",
                             "MaLoaiHD": loai, "MaDoiTac": ncc, "GiaTriTruocThue": 20_000_000, "VAT": 2_000_000,
                             "NgayKy": "2026-02-01"})
     inv = cs.save_out_invoice({"KyHieuHD": "C26TAA", "SoHoaDon": "12", "MaHopDong": hd, "NgayXuatHD": "2026-03-01",

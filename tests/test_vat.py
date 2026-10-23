@@ -77,7 +77,17 @@ def test_old_template_without_new_columns_still_reads(tmp_path, company):
     ws.append(["C1", "Cũ", "Đầu ra", None, "Ban A", None, 200_000_000, 20_000_000, "01/02/2026"])
     wb.save(tmp_path / "cu.xlsx")
     r = read_workbook(tmp_path / "cu.xlsx", company["gd"].db)[0]
+    assert r.status == "Lỗi" and "Thiếu Thời gian thực hiện" in r.errors        # hợp đồng mới bắt buộc thời gian
+    ws.cell(1, 10, "Thời gian thực hiện *")
+    ws.cell(2, 10, 3)
+    ws.cell(1, 11, "Đơn vị thời gian")
+    ws.cell(2, 11, "tháng")
+    wb.save(tmp_path / "cu.xlsx")
+    r = read_workbook(tmp_path / "cu.xlsx", company["gd"].db)[0]
     assert r.status == "Hợp lệ" and r.values["GiaTriTongSauThue"] == 220_000_000 and r.values["NgayKy"] == "2026-02-01"
+    import_rows(company["gd"].db, [r])
+    hd = company["gd"].db.one("SELECT * FROM HopDong WHERE SoHopDong = 'C1'")
+    assert (hd["ThoiGianThucHien"], hd["DonViThoiGian"], hd["NgayKetThucDuKien"]) == (3, "tháng", "2026-04-30")
 
 
 def test_in_invoice_bang_ke_auto_vat():
@@ -109,7 +119,7 @@ def test_save_and_backfill_old_data(company):
                                          GiaTriSauThue=50_000, ThueSuat="10%"))
     ok = db.insert("HoaDonDauVao", dict(base, SoHoaDonGoc="12", GiaTriTruocThue=50_000, VAT=0,
                                         GiaTriSauThue=50_000, ThueSuat="KCT"))
-    hd = cs.save_contract({"SoHopDong": "B1", "TenHopDong": "t", "ChieuHopDong": "Đầu vào", "MaDoiTac": p,
+    hd = cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "B1", "TenHopDong": "t", "ChieuHopDong": "Đầu vào", "MaDoiTac": p,
                            "NgayKy": "2026-01-01", "GiaTriTruocThue": 1_000})
     db.update("HopDong", hd, {"GiaTriTongSauThue": 0})
     assert backfill_vat(db) == 2

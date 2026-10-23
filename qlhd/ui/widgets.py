@@ -237,7 +237,7 @@ class DataTable(QTableWidget):
         super().__init__(parent)
         self.columns = columns or []
         self.rows: list[dict] = []
-        self.setShowGrid(False)
+        self.setShowGrid(True)                  # kẻ ô như Excel, đường kẻ mờ (màu grid của giao diện)
         self._pct = PercentDelegate(self)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)

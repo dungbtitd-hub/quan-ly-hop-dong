@@ -275,6 +275,8 @@ class ContractService:
         if not v.get("TenDoiTac"):
             raise ValidationError("Chưa chọn đối tác (chủ đầu tư / nhà cung cấp).")
         _fill_vat(v, "GiaTriTongSauThue")
+        if ma is None and not int(v.get("ThoiGianThucHien") or 0):
+            raise ValidationError("Chưa nhập Thời gian thực hiện hợp đồng (số ngày hoặc số tháng).")
         if "ThoiGianThucHien" in v:
             v["ThoiGianThucHien"] = int(v.get("ThoiGianThucHien") or 0) or None
             if v.get("DonViThoiGian") not in DURATION_UNITS:

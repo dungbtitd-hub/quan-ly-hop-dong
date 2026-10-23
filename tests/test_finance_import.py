@@ -93,7 +93,7 @@ def test_contract_picker_disambiguates_same_number(company, tmp_path):
     data = sample_data(gd.db)
     cs = data["cs"]
     other = cs.save_partner({"TenDoiTac": "UBND xã B", "MaSoThue": "0100000009", "VaiTroDoiTac": "Chủ đầu tư"})
-    cs.save_contract({"SoHopDong": "01/2026/HĐTV", "TenHopDong": "Thiết kế nhà văn hóa", "ChieuHopDong": "Đầu ra",
+    cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "01/2026/HĐTV", "TenHopDong": "Thiết kế nhà văn hóa", "ChieuHopDong": "Đầu ra",
                       "MaDoiTac": other, "GiaTriTruocThue": 50_000_000, "NgayKy": "2026-05-01"})
     store = _store(gd)
     path = fi.write_template(tmp_path / "mau.xlsx", store)

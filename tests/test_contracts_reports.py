@@ -23,8 +23,21 @@ def test_duplicates_rejected(company):
     with pytest.raises(ValidationError):
         cs.save_out_invoice({"KyHieuHD": "C26TAA", "SoHoaDon": "12", "MaHopDong": d["hd"], "NgayXuatHD": "2026-05-01"})
     with pytest.raises(ValidationError):
-        cs.save_contract({"SoHopDong": "01/2026/HĐTV", "TenHopDong": "x", "ChieuHopDong": "Đầu ra",
+        cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "01/2026/HĐTV", "TenHopDong": "x", "ChieuHopDong": "Đầu ra",
                           "MaDoiTac": d["cdt"], "NgayKy": "2026-01-01"})
+
+
+def test_new_contract_requires_duration(company):
+    d = sample_data(company["kt"].db)
+    cs = d["cs"]
+    v = {"SoHopDong": "07/2026", "TenHopDong": "Giám sát", "ChieuHopDong": "Đầu ra", "MaDoiTac": d["cdt"],
+         "NgayKy": "2026-03-01", "GiaTriTruocThue": 10_000_000}
+    with pytest.raises(ValidationError, match="Thời gian thực hiện"):
+        cs.save_contract(dict(v))
+    ma = cs.save_contract(dict(v, ThoiGianThucHien=45, DonViThoiGian="ngày"))
+    assert cs.db.get("HopDong", ma)["NgayKetThucDuKien"] == "2026-04-14"
+    cs.db.update("HopDong", ma, {"ThoiGianThucHien": None})          # hợp đồng cũ chưa có thời gian: sửa vẫn lưu được
+    cs.save_contract(dict(cs.db.get("HopDong", ma), GhiChu="sửa"), ma)
 
 
 def test_all_contexts_and_excel(company, tmp_path):
