@@ -33,6 +33,44 @@ def _check_chosen(values: dict) -> None:
                               " (hóa đơn đầu vào không theo hợp đồng thì chọn \"Không có – mua hàng trực tiếp\").")
 
 
+def contract_label(h) -> str:
+    return f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})"
+
+
+def open_contracts(ctx, kind: str, keep=()) -> list:
+    """Hợp đồng cùng chiều với hóa đơn. Hóa đơn đầu ra: bỏ các hợp đồng đã xuất đủ hóa đơn theo giá trị,
+    luôn giữ các hợp đồng trong `keep` (hợp đồng đang gắn với hóa đơn, hợp đồng gợi ý)."""
+    keep = {k for k in keep if k}
+    out = []
+    for h in ctx.cs.contracts("Đầu ra" if kind == "ra" else "Đầu vào"):
+        s = ctx.cs.summary(h["Ma"]) if kind == "ra" else None
+        if kind != "ra" or h["Ma"] in keep or not s["GiaTriHD"] or s["ConPhaiXuat"] > 0:
+            out.append(h)
+    return out
+
+
+def type_filter_field(ctx, contracts) -> dict:
+    """Ô lọc danh sách hợp đồng theo loại hợp đồng (chỉ để tìm nhanh, không lưu)."""
+    used = {h["MaLoaiHD"] for h in contracts}
+    types = [(t["TenLoaiHD"], t["Ma"]) for t in ctx.cs.contract_types() if t["Ma"] in used]
+    return {"key": "_LoaiHD", "label": "Loại hợp đồng", "kind": "combo", "filter": True,
+            "options": [("(Tất cả loại)", None)] + types + ([("(Chưa phân loại)", "")] if None in used else []),
+            "hint": "Chọn loại để thu gọn danh sách hợp đồng bên dưới. Hợp đồng đã xuất đủ hóa đơn không hiện."}
+
+
+def bind_type_filter(dlg, contracts, head=()) -> None:
+    """Đổi loại hợp đồng thì lọc lại ô Hợp đồng; head: các lựa chọn luôn đứng đầu (Chọn hợp đồng, Không có…)."""
+    combo, kinds = dlg.widget("MaHopDong"), dlg.widget("_LoaiHD")
+    by_ma = {h["Ma"]: h for h in contracts}
+    full = [(combo.itemText(i), combo.itemData(i)) for i in range(combo.count())]
+
+    def apply(*_):
+        loai, cur = kinds.value(), combo.value()
+        opts = [o for o in full if o[1] not in by_ma or loai is None or (by_ma[o[1]]["MaLoaiHD"] or "") == loai]
+        combo.set_options(opts, cur if any(o[1] == cur for o in opts) else (opts[0][1] if opts else None))
+    kinds.currentIndexChanged.connect(apply)
+
+
 def parse_invoice_file(path: str) -> dict:
     if path.lower().endswith(".xml"):
         return xml_invoice.parse_invoice(path)
@@ -179,9 +217,9 @@ class InvoicesPage(QWidget):
         self.total.setText(f"{len(rows)} hóa đơn · Tổng sau thuế {fmt_money(sum(r['GiaTriSauThue'] for r in rows))} đ")
 
     # ---- biểu mẫu
-    def _fields(self, contract_hint: str = "", must_choose: bool = False, suggested=()):
+    def _fields(self, contract_hint: str = "", must_choose: bool = False, suggested=(), keep=None):
         """must_choose: chưa xác định được hợp đồng, buộc người nhập tự chọn (không điền sẵn)."""
-        fields = self._base_fields()
+        fields = self._base_fields(keep=[keep] + [h["Ma"] for h in suggested])
         f = next(f for f in fields if f["key"] == "MaHopDong")
         if must_choose or self.kind == "ra":
             ids = [h["Ma"] for h in suggested]
@@ -192,11 +230,12 @@ class InvoicesPage(QWidget):
             f["hint"] = contract_hint
         return fields
 
-    def _base_fields(self):
+    def _base_fields(self, keep=()):
+        self._contracts = open_contracts(self.ctx, self.kind, keep)
+        contracts = [(contract_label(h), h["Ma"]) for h in self._contracts]
         if self.kind == "ra":
-            contracts = [(f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
-                         for h in self.ctx.cs.contracts("Đầu ra")]
-            return [{"key": "MaHopDong", "label": "Hợp đồng đầu ra", "kind": "combo", "options": contracts},
+            return [type_filter_field(self.ctx, self._contracts),
+                    {"key": "MaHopDong", "label": "Hợp đồng đầu ra", "kind": "combo", "options": contracts},
                     {"key": "KyHieuMauSo", "label": "Ký hiệu mẫu số"}, {"key": "KyHieuHD", "label": "Ký hiệu hóa đơn"},
                     {"key": "SoHoaDon", "label": "Số hóa đơn", "required": True},
                     {"key": "NgayXuatHD", "label": "Ngày xuất", "kind": "date"},
@@ -209,8 +248,7 @@ class InvoicesPage(QWidget):
                     {"key": "TinhChatHD", "label": "Tính chất", "kind": "combo", "options": list(INVOICE_KINDS)},
                     {"key": "DuongDanTep", "label": "Tệp gốc (XML/PDF)"},
                     {"key": "GhiChuHDDR", "label": "Ghi chú"}]
-        contracts = [("(Không có – mua hàng trực tiếp)", None)] + [
-            (f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"]) for h in self.ctx.cs.contracts("Đầu vào")]
+        contracts = [("(Không có – mua hàng trực tiếp)", None)] + contracts
         return [{"key": "KyHieuMauSo", "label": "Ký hiệu mẫu số"}, {"key": "KyHieuHD", "label": "Ký hiệu hóa đơn"},
                 {"key": "SoHoaDonGoc", "label": "Số hóa đơn", "required": True},
                 {"key": "TenNhaCungCap", "label": "Tên người bán", "required": True},
@@ -249,10 +287,15 @@ class InvoicesPage(QWidget):
         if must_choose or (self.kind == "ra" and not values.get("MaHopDong")):
             values["MaHopDong"] = CHOOSE
         dlg = FormDialog("Hóa đơn đầu ra" if self.kind == "ra" else "Hóa đơn đầu vào",
-                         self._fields(contract_hint, must_choose, suggested), values, self, validate=_check_chosen)
+                         self._fields(contract_hint, must_choose, suggested, keep=values.get("MaHopDong")), values,
+                         self, validate=_check_chosen)
+        if self.kind == "ra":
+            bind_type_filter(dlg, self._contracts)
         while dlg.exec() == QDialog.Accepted:
+            v = dlg.values()
+            v.pop("_LoaiHD", None)
             try:
-                fn(dict(dlg.values(), _Dong=values.get("_Dong")) if self.kind == "vao" else dlg.values(), ma)
+                fn(dict(v, _Dong=values.get("_Dong")) if self.kind == "vao" else v, ma)
                 return True
             except ValidationError as e:
                 error(self, str(e))
@@ -528,14 +571,10 @@ class BatchInvoiceDialog(QDialog):
         mark_duplicates(self.ctx, self.kind, self.items)
 
     def _contract_options(self, suggested):
-        if self.kind == "ra":
-            base = [(f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
-                    for h in self.ctx.cs.contracts("Đầu ra")]
-        else:
-            base = [("(Không có – mua hàng trực tiếp)", None)] + [
-                (f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
-                for h in self.ctx.cs.contracts("Đầu vào")]
         ids = [h["Ma"] for h in suggested]
+        base = [(contract_label(h), h["Ma"]) for h in open_contracts(self.ctx, self.kind, ids)]
+        if self.kind != "ra":
+            base = [("(Không có – mua hàng trực tiếp)", None)] + base
         top = [(f"★ Gợi ý: {h['SoHopDong']} – {h['TenHopDong']}", h["Ma"]) for h in suggested]
         return [(CHOOSE_LABEL, CHOOSE)] + top + [o for o in base if o[1] not in ids]
 
@@ -641,10 +680,14 @@ class BatchInvoiceDialog(QDialog):
         it = self.items[i]
         values = self._collect(i)
         dlg = FormDialog("Hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào"),
-                         self.page._fields(" ".join(it["notes"]), True, it["goi_y"]), values, self,
-                         validate=_check_chosen)
+                         self.page._fields(" ".join(it["notes"]), True, it["goi_y"], keep=values.get("MaHopDong")),
+                         values, self, validate=_check_chosen)
+        if self.kind == "ra":
+            bind_type_filter(dlg, self.page._contracts)
         if dlg.exec() == QDialog.Accepted:
-            it["values"].update(dlg.values())
+            v = dlg.values()
+            v.pop("_LoaiHD", None)
+            it["values"].update(v)
             if self.kind == "vao" and it.get("errors"):
                 it["errors"] = [f"Thiếu {label}" for key, label in REQUIRED_IN if not it["values"].get(key)]
                 it["notes"] = list(it["errors"])

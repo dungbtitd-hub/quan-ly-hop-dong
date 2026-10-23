@@ -507,7 +507,8 @@ class FormDialog(QDialog):
         if self.editing:
             now = self._display()
             changes = [(f["label"], self._initial[f["key"]], now[f["key"]]) for f in self.fields
-                       if now[f["key"]] != self._initial[f["key"]] and f.get("kind") != "password"]
+                       if now[f["key"]] != self._initial[f["key"]] and f.get("kind") != "password"
+                       and not f.get("filter")]            # ô chỉ để lọc danh sách, không phải dữ liệu
             if changes and not confirm_changes(self, changes):
                 return
         self.accept()

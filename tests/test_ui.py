@@ -648,3 +648,41 @@ def test_home_fits_window_with_long_contract_names(qtbot, ctx):
         assert body.minimumSizeHint().width() <= scroll.viewport().width()
         assert page.bottom.direction() == (QBoxLayout.TopToBottom if w < page.NARROW else QBoxLayout.LeftToRight)
         assert not page.grab().isNull()
+
+
+def test_out_invoice_contract_picker_filters(qtbot, ctx):
+    from qlhd.ui.invoices_page import InvoicesPage, bind_type_filter
+    from qlhd.ui.widgets import FormDialog
+
+    cs = ctx.cs
+    cdt = cs.partners()[0]["Ma"]
+    giam_sat = cs.save_contract_type("Giám sát")
+    done = cs.save_contract({"ThoiGianThucHien": 30, "SoHopDong": "02/2026/GS", "TenHopDong": "Giám sát A",
+                             "ChieuHopDong": "Đầu ra", "MaLoaiHD": giam_sat, "MaDoiTac": cdt,
+                             "GiaTriTongSauThue": 11_000_000, "ThueSuat": "10%", "NgayKy": "2026-02-01"})
+    cs.save_out_invoice({"SoHoaDon": "99", "MaHopDong": done, "NgayXuatHD": "2026-03-01",
+                         "GiaTriSauThue": 11_000_000, "ThueSuat": "10%"})       # đã xuất đủ hóa đơn
+    open_ = cs.save_contract({"ThoiGianThucHien": 30, "SoHopDong": "03/2026/GS", "TenHopDong": "Giám sát B",
+                              "ChieuHopDong": "Đầu ra", "MaLoaiHD": giam_sat, "MaDoiTac": cdt,
+                              "GiaTriTongSauThue": 5_000_000, "NgayKy": "2026-02-01"})
+    page = InvoicesPage(ctx, "ra")
+    qtbot.addWidget(page)
+
+    def ids(combo):
+        return [combo.itemData(i) for i in range(combo.count())]
+    dlg = FormDialog("Hóa đơn đầu ra", page._fields(), {}, page)
+    qtbot.addWidget(dlg)
+    bind_type_filter(dlg, page._contracts)
+    combo = dlg.widget("MaHopDong")
+    assert done not in ids(combo) and open_ in ids(combo)
+    assert all(h["ChieuHopDong"] == "Đầu ra" for h in page._contracts)
+    dlg.widget("_LoaiHD").set_value(giam_sat)
+    assert [x for x in ids(combo) if x != "__chon_hop_dong__"] == [open_]
+    # sửa hóa đơn của hợp đồng đã xuất đủ: vẫn thấy hợp đồng đang gắn
+    dlg2 = FormDialog("Hóa đơn đầu ra", page._fields(keep=done), {"MaHopDong": done}, page)
+    qtbot.addWidget(dlg2)
+    assert dlg2.widget("MaHopDong").value() == done
+    # hóa đơn đầu vào: giữ như cũ, không có ô lọc
+    page_v = InvoicesPage(ctx, "vao")
+    qtbot.addWidget(page_v)
+    assert "_LoaiHD" not in [f["key"] for f in page_v._fields()]
