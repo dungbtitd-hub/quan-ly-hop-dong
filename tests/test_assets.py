@@ -309,7 +309,85 @@ def test_import_flags_duplicates(tmp_path, company):
     assert len(warn) == 2 and any("TAY01" in w for w in warn.values())
     # sổ có mã đã dùng cho tài sản khác ngày ghi tăng: cũng báo nghi trùng
     s2 = AssetService(company["kt"].db)
-    s2.save_asset({"LoaiSo": "CCDC", "TenTS": "Máy khác", "NgayGhiTang": "2025-01-02", "SoKy": 12,
-                   "NguyenGia": 1_000_000, "MaTS": "CC003/2025"})
-    it = next(it for it in s2.read_register(DATA / "so_ccdc_gia.xlsx")["rows"] if it["values"]["MaTS"] == "CC003/2025")
+    ma2 = s2.save_asset({"LoaiSo": "CCDC", "TenTS": "Máy khác", "NgayGhiTang": "2025-01-02", "SoKy": 12,
+                         "NguyenGia": 1_000_000, "MaTS": "CC003/2025"})
+    code = s2.db.get("TaiSan", ma2)["MaTS"]                            # mã tự cấp được đánh lại: CC001/2025
+    it = next(it for it in s2.read_register(DATA / "so_ccdc_gia.xlsx")["rows"] if it["values"]["MaTS"] == code)
     assert it["status"] == ST_MAYBE
+
+
+def _ccdc(s, name, day, value=1_200_000):
+    return s.save_asset({"LoaiSo": "CCDC", "TenTS": name, "NgayGhiTang": day, "SoKy": 12, "NguyenGia": value})
+
+
+def test_ccdc_codes_renumber_after_edit_and_delete(company):
+    s = AssetService(company["gd"].db)
+    s.import_register(DATA / "so_ccdc_gia.xlsx")                      # mã sổ kế toán năm 2025 giữ nguyên
+    locked = {a["MaTS"] for a in s.assets("CCDC")}
+    a = _ccdc(s, "Ghế xoay", "2026-03-10")
+    b = _ccdc(s, "Bàn họp", "2026-05-02")
+    c = _ccdc(s, "Tủ hồ sơ", "2026-07-20")
+    code = lambda ma: s.db.get("TaiSan", ma)["MaTS"]                  # noqa: E731
+    assert [code(x) for x in (a, b, c)] == ["CC001/2026", "CC002/2026", "CC003/2026"]
+    s.save_asset({"NgayGhiTang": "2026-01-05"}, c)                    # sửa ngày: lên đầu năm
+    assert [code(x) for x in (c, a, b)] == ["CC001/2026", "CC002/2026", "CC003/2026"]
+    assert s.db.get("TaiSan", c)["SoCTGhiTang"] == "CC001/2026"
+    s.delete_asset(c)
+    assert [code(x) for x in (a, b)] == ["CC001/2026", "CC002/2026"]
+    d = _ccdc(s, "Máy hủy giấy", "2025-12-30")                        # năm 2025: nối tiếp sau mã của sổ kế toán
+    n = max(int(m[2:5]) for m in locked if m.endswith("/2025"))
+    assert code(d) == f"CC{n + 1:03d}/2025"
+    assert locked <= {x["MaTS"] for x in s.assets("CCDC")}
+
+
+def test_extra_ccdc_template_round_trip(company, tmp_path):
+    from qlhd.core import ccdc_excel
+    from qlhd.core.assets import A_ADD, A_SKIP, ST_MAYBE, ST_NEW
+
+    s = AssetService(company["gd"].db)
+    _ccdc(s, "Máy in mini", "2026-04-01", 2_000_000)
+    path = ccdc_excel.write_template(tmp_path / "mau.xlsx")
+    wb = openpyxl.load_workbook(path)
+    ws = wb[ccdc_excel.SHEET]
+    assert wb.active.title == ccdc_excel.SHEET and str(ws.cell(1, 2).value).startswith("Tên CCDC")
+    rows = [["", "Quạt cây", "", "", "Được tặng", datetime(2026, 2, 3), "", 6, "Cái", 3, 900_000, "", ""],
+            ["", "Máy in mini", "CCDC", "", "", "01/04/2026", "", 12, "Cái", 1, 2_000_000, "", ""],
+            ["", "Kệ sách", "Chờ phân bổ", "", "", "2026-08-15", "PN05", 24, "Cái", 1, 4_800_000, "", ""],
+            ["", "Thiếu giá", "", "", "", "2026-08-15", "", 12, "", 1, None, "", ""]]
+    for i, r in enumerate(rows, start=3):
+        for j, v in enumerate(r, start=1):
+            ws.cell(i, j, v)
+    wb.save(path)
+    data = s.read_extra_ccdc(path)
+    st = {it["values"]["TenTS"]: it for it in data["rows"]}
+    assert set(st) == {"Quạt cây", "Máy in mini", "Kệ sách"}                # dòng ví dụ bỏ qua, dòng lỗi báo lỗi
+    assert len(data["loi"]) == 1 and "giá trị" in data["loi"][0]
+    assert st["Quạt cây"]["status"] == ST_NEW and st["Máy in mini"]["status"] == ST_MAYBE
+    assert st["Máy in mini"]["action"] == A_SKIP and st["Kệ sách"]["values"]["PhanLoai"] == dm.CHO_PB
+    res = s.apply_extra_ccdc(data)
+    assert (res["them"], res["bo_qua"]) == (2, 1)
+    reg = {r["TenTS"]: r for r in s.register("CCDC", 2026)}
+    assert [reg[n]["MaTS"] for n in ("Quạt cây", "Máy in mini", "Kệ sách")] == ["CC001/2026", "CC002/2026",
+                                                                               "CC003/2026"]
+    assert reg["Kệ sách"]["SoCTGhiTang"] == "PN05" and reg["Quạt cây"]["SoLuong"] == 3
+    assert reg["Quạt cây"]["TrongKy"] == 900_000 and "Được tặng" in reg["Quạt cây"]["GhiChu"]
+    assert A_ADD
+
+
+def test_remove_fully_depreciated(company):
+    s = AssetService(company["gd"].db)
+    old = _ccdc(s, "Bút trình chiếu", "2024-01-10")                     # 12 tháng: hết phân bổ cuối 2024
+    mid = _ccdc(s, "Ổ cứng", "2025-06-01")                              # hết phân bổ giữa 2026
+    _ccdc(s, "Chuột", "2026-02-01")
+    profit_2024 = s.year_totals(2024)
+    assert [r["Ma"] for r in s.fully_depreciated("CCDC", 2026)] == [old]
+    with pytest.raises(AssetError):
+        s.remove_depreciated([mid], 2026)
+    assert s.remove_depreciated([old], 2026) == 1
+    names = lambda y, case="toan_bo": {r["TenTS"] for r in s.register("CCDC", y, case)}  # noqa: E731
+    assert "Bút trình chiếu" not in names(2026) and "Bút trình chiếu" not in names(2027)
+    assert "Bút trình chiếu" in names(2025) and names(2026, "da_xoa") == {"Bút trình chiếu"}
+    assert s.year_totals(2024) == profit_2024 and not s.fully_depreciated("CCDC", 2026)
+    assert [r["Ma"] for r in s.fully_depreciated("CCDC", 2027)] == [mid]
+    s.restore_to_register(old)
+    assert "Bút trình chiếu" in names(2026)

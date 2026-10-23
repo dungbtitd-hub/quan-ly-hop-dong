@@ -10,6 +10,7 @@ Cách tính giống sổ kế toán của công ty (đã đối chiếu từng �
 """
 from __future__ import annotations
 
+import re
 import calendar
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -21,7 +22,7 @@ from .db import Database
 CASES = [("toan_bo", "Tổng hợp toàn bộ (như sổ kế toán)"), ("con_kh", "Còn khấu hao / phân bổ"),
          ("het_kh", "Đã hết khấu hao / phân bổ"), ("dau_ky", "Đầu kỳ (chuyển từ các năm trước)"),
          ("tang_moi", "Tăng mới trong năm"), ("co_ps", "Có khấu hao / phân bổ trong năm"),
-         ("ghi_giam", "Đã ghi giảm")]
+         ("ghi_giam", "Đã ghi giảm"), ("da_xoa", "Đã xóa khỏi sổ (hết khấu hao / phân bổ)")]
 
 TSCD_COLS = ["Mã TSCĐ", "Tên TSCĐ", "Loại TSCĐ", "Đơn vị sử dụng", "Ngày ghi tăng", "Số CT ghi tăng",
              "Ngày bắt đầu tính KH", "Thời gian SD (tháng)", "Thời gian SD còn lại (tháng)", "Nguyên giá",
@@ -43,6 +44,7 @@ EXTRA_COLS = [("PhanLoai", "Phân loại"), ("NhomDM", "Nhóm danh mục"), ("Ly
 
 
 FEE_NOTE = "Phí ngoài VAT của hóa đơn"
+CCDC_CODE = re.compile(r"CC(\d{3,})/(\d{4})")
 
 # Nhập sổ từ Excel: tình trạng từng dòng và cách xử lý
 ST_NEW, ST_SAME_CODE, ST_MAYBE, ST_IN_FILE = "Mới", "Đã có (trùng mã)", "Có thể trùng", "Trùng trong file"
@@ -194,6 +196,9 @@ def _in_case(r: dict, a, year: int, case: str) -> bool:
     y0, y1 = f"{year}-01-01", f"{year}-12-31"
     if a["NgayGhiTang"] > y1:
         return False
+    hidden = bool(a["XoaKhoiSoNam"]) and year >= a["XoaKhoiSoNam"]
+    if case == "da_xoa" or hidden:
+        return case == "da_xoa" and hidden
     giam = a["NgayGhiGiam"]
     if case == "ghi_giam":
         return bool(giam) and giam <= y1
@@ -281,6 +286,7 @@ class AssetService:
                              "(SELECT 1 FROM DongHoaDonDauVao d WHERE d.MaHoaDon = h.Ma AND d.DaXoa = 0)")
         for r in rows:
             self.ensure_lines(r["Ma"])
+        self.renumber_ccdc()                 # kể cả tài sản nhận từ máy khác qua gói đồng bộ
         return len(rows)
 
     def _auto_class(self, inv, ten: str, thanh_tien: int, so_luong, don_gia) -> dict:
@@ -377,6 +383,7 @@ class AssetService:
                        commit=False)
         inv = self.db.get("HoaDonDauVao", line["MaHoaDon"])
         self._sync_asset(self.db.get("DongHoaDonDauVao", ma_dong), inv)
+        self.renumber_ccdc(commit=False)
         self.db.conn.commit()
 
     @staticmethod
@@ -394,10 +401,41 @@ class AssetService:
         return ""
 
     # ---- tài sản
+    def renumber_ccdc(self, commit: bool = True) -> int:
+        """Đánh lại mã CCDC phần mềm tự cấp (CC001/2026…) cho liên tục, theo thứ tự ngày ghi tăng trong từng năm.
+        Giữ nguyên mã của tài sản nhập từ sổ kế toán (có mốc sổ) và mã người dùng tự đặt khác dạng CCnnn/năm;
+        mã tự cấp nối tiếp sau số lớn nhất của sổ kế toán trong năm đó. Trả về số tài sản đổi mã."""
+        rows = [dict(r) for r in self.db.active("TaiSan", "LoaiSo = 'CCDC'")]
+        locked: dict[str, int] = {}
+        auto: dict[str, list[dict]] = {}
+        for r in rows:
+            m = CCDC_CODE.fullmatch(r["MaTS"] or "")
+            if r["MocNam"] is not None:
+                if m:
+                    locked[m.group(2)] = max(locked.get(m.group(2), 0), int(m.group(1)))
+            elif m or not r["MaTS"]:
+                auto.setdefault(str(r["NgayGhiTang"])[:4], []).append(r)
+        changed = 0
+        for year, items in auto.items():
+            def key(r):
+                m = CCDC_CODE.fullmatch(r["MaTS"] or "")
+                return (str(r["NgayGhiTang"]), int(m.group(1)) if m else 10 ** 6, r["Ma"])
+            for i, r in enumerate(sorted(items, key=key), start=locked.get(year, 0) + 1):
+                code = f"CC{i:03d}/{year}"
+                if r["MaTS"] != code:
+                    v = {"MaTS": code}
+                    if not r["SoCTGhiTang"] or r["SoCTGhiTang"] == r["MaTS"]:
+                        v["SoCTGhiTang"] = code
+                    self.db.update("TaiSan", r["Ma"], v, commit=False)
+                    changed += 1
+        if commit and changed:
+            self.db.conn.commit()
+        return changed
+
     def _next_code(self, loai_so: str, year: str) -> tuple[str, str]:
         if loai_so == "CCDC":
             n = 0
-            for r in self.db.query("SELECT MaTS, SoCTGhiTang FROM TaiSan WHERE LoaiSo = 'CCDC'"):
+            for r in self.db.query("SELECT MaTS, SoCTGhiTang FROM TaiSan WHERE LoaiSo = 'CCDC' AND DaXoa = 0"):
                 for code in (r["MaTS"], r["SoCTGhiTang"]):
                     if code and code.startswith("CC") and code.endswith("/" + year) and code[2:-5].isdigit():
                         n = max(n, int(code[2:-5]))
@@ -470,9 +508,12 @@ class AssetService:
             v["MaTS"], ct = self._next_code(loai_so, str(merged["NgayGhiTang"])[:4])
             v.setdefault("SoCTGhiTang", merged.get("SoCTGhiTang") or ct)
         if ma:
-            self.db.update("TaiSan", ma, v)
-            return ma
-        return self.db.insert("TaiSan", v)
+            self.db.update("TaiSan", ma, v, commit=False)
+        else:
+            ma = self.db.insert("TaiSan", v, commit=False)
+        self.renumber_ccdc(commit=False)
+        self.db.conn.commit()
+        return ma
 
     def write_off(self, ma: str, ngay: str, ly_do: str = "") -> None:
         """Ghi giảm (thanh lý, hỏng, mất). CCDC: giá trị còn lại phân bổ hết vào tháng ghi giảm."""
@@ -491,7 +532,35 @@ class AssetService:
         if a and a["MaDongHD"]:
             raise AssetError("Tài sản này sinh ra từ hóa đơn đầu vào. Muốn bỏ thì phân loại lại dòng hóa đơn "
                              "(ví dụ thành Chi phí trong kỳ).")
-        self.db.soft_delete("TaiSan", ma)
+        self.db.soft_delete("TaiSan", ma, commit=False)
+        self.renumber_ccdc(commit=False)
+        self.db.conn.commit()
+
+    def fully_depreciated(self, loai_so: str, year: int) -> list[dict]:
+        """Tài sản đã hết khấu hao / phân bổ từ trước năm `year` (cả năm không còn số phát sinh), còn đang hiện
+        trong sổ năm đó: có thể xóa khỏi sổ. Tài sản hết khấu hao trong năm thì sang năm sau mới xóa được,
+        để sổ năm có phát sinh vẫn đủ dòng."""
+        out = []
+        for a in self.assets(loai_so):
+            r = register_row(a, year)
+            if _in_case(r, a, year, "het_kh") and r["TrongKy"] == 0 and a["NgayGhiTang"] < f"{year}-01-01":
+                out.append(r)
+        return out
+
+    def remove_depreciated(self, mas: list[str], year: int) -> int:
+        """Xóa khỏi sổ từ năm `year` trở đi các tài sản đã hết khấu hao; sổ các năm trước và bảng lãi lỗ giữ
+        nguyên. Khôi phục được (restore_to_register)."""
+        ok = {r["Ma"] for loai in ("TSCĐ", "CCDC") for r in self.fully_depreciated(loai, year)}
+        bad = [m for m in mas if m not in ok]
+        if bad:
+            raise AssetError("Chỉ xóa được tài sản đã hết khấu hao / phân bổ từ trước năm đang xem.")
+        for m in mas:
+            self.db.update("TaiSan", m, {"XoaKhoiSoNam": year}, commit=False)
+        self.db.conn.commit()
+        return len(mas)
+
+    def restore_to_register(self, ma: str) -> None:
+        self.db.update("TaiSan", ma, {"XoaKhoiSoNam": None})
 
     # ---- sổ theo năm
     def register(self, loai_so: str, year: int, case: str = "toan_bo") -> list[dict]:
@@ -621,6 +690,66 @@ class AssetService:
                 self.db.insert("TaiSan", v, commit=False)
                 res["them"] += 1
         self.db.conn.commit()
+        return res
+
+    def read_extra_ccdc(self, path: str | Path) -> dict:
+        """Đọc file kê khai CCDC nhập thêm ngoài hóa đơn (mẫu của phần mềm), xếp dòng như khi nhập sổ cũ.
+        Khác sổ kế toán: không có mốc số liệu, phần mềm tự tính phân bổ và tự đánh mã."""
+        from . import ccdc_excel
+
+        try:
+            items, errors = ccdc_excel.read_rows(path)
+        except ValueError as e:
+            raise AssetError(str(e)) from None
+        years = sorted({v["NgayGhiTang"][:4] for _, v in items})
+        res = {"loai": "CCDC", "nam": int(years[-1]) if years else date.today().year, "rows": [], "loi": errors,
+               "ke_khai": True}
+        seen: list[dict] = []
+        for line, v in items:
+            it = {"dong": line, "values": v, "trung_voi": "", "ma_cu": None}
+            twin = next((s for s in seen if (v["MaTS"] and s["values"]["MaTS"] == v["MaTS"])
+                         or _same_asset(s["values"], v)), None)
+            old = self.db.one("SELECT * FROM TaiSan WHERE DaXoa = 0 AND LoaiSo = 'CCDC' AND MaTS = ?",
+                              (v["MaTS"],)) if v["MaTS"] else None
+            dups = self.find_duplicates(v)
+            if twin is not None:
+                it.update(status=ST_IN_FILE, action=A_SKIP, trung_voi=f"Dòng {twin['dong']} trong file: "
+                          f"{twin['values']['TenTS']}")
+            elif old is not None:
+                it.update(status=ST_SAME_CODE, action=A_UPDATE, ma_cu=old["Ma"],
+                          trung_voi=f"{old['MaTS']} – {old['TenTS']} (đã có mã này)")
+            elif dups:
+                d = dups[0]
+                it.update(status=ST_MAYBE, action=A_SKIP, ma_cu=d["Ma"],
+                          trung_voi=f"{d['MaTS']} – {d['TenTS']}; ghi tăng {_dmy(d['NgayGhiTang'])}; "
+                                    f"giá trị {d['NguyenGia']:,} đ".replace(",", "."))
+            else:
+                it.update(status=ST_NEW, action=A_ADD)
+            seen.append(it)
+            res["rows"].append(it)
+        return res
+
+    def apply_extra_ccdc(self, data: dict, actions: dict[int, str] | None = None) -> dict:
+        """Ghi các dòng kê khai đã đọc: thêm mới hoặc cập nhật bản đã có; mã CCDC tự đánh lại sau khi ghi."""
+        res = {"loai": "CCDC", "nam": data["nam"], "them": 0, "cap_nhat": 0, "bo_qua": 0, "lech": [],
+               "loi": list(data["loi"])}
+        for it in data["rows"]:
+            act = (actions or {}).get(it["dong"], it["action"])
+            v = dict(it["values"])
+            if act == A_SKIP or (act == A_UPDATE and not it["ma_cu"]):
+                res["bo_qua"] += 1
+                continue
+            try:
+                if act == A_UPDATE:
+                    if not v["MaTS"]:
+                        v.pop("MaTS")
+                    self.save_asset(v, it["ma_cu"])
+                    res["cap_nhat"] += 1
+                else:
+                    self.save_asset(v)
+                    res["them"] += 1
+            except AssetError as e:
+                res["loi"].append(f"Dòng {it['dong']} ({v['TenTS']}): {e}")
         return res
 
     def import_register(self, path: str | Path, year: int | None = None) -> dict:

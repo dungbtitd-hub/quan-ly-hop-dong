@@ -319,6 +319,7 @@ ADDED_COLUMNS = [
     ("HoaDonDauVao", "PhiKhac", "INTEGER"),            # phí ngoài VAT, VD phí bảo vệ môi trường (nước sạch)
     ("HoaDonDauVao", "TyLePhiKhac", "TEXT"),           # tỷ lệ phí trên giá trị trước thuế, VD '10%'
     ("HoaDonDauVao", "TenPhiKhac", "TEXT"),
+    ("TaiSan", "XoaKhoiSoNam", "INTEGER"),             # đã hết khấu hao, xóa khỏi sổ từ năm này (năm trước vẫn hiện)
 ]
 
 

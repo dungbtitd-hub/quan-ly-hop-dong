@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogBut
                                QWidget)
 
 from ..core import asset_catalog as dm
+from ..core import ccdc_excel
 from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_COLS, CCDC_KEYS, EXTRA_COLS, ST_IN_FILE,
                            ST_NEW, ST_SAME_CODE, TSCD_COLS, TSCD_KEYS, AssetError, AssetService)
 from ..core.reports import fmt_date, fmt_money
@@ -130,7 +131,8 @@ class ImportPreviewDialog(QDialog):
     def __init__(self, data: dict, parent=None):
         super().__init__(parent)
         self.data = data
-        self.setWindowTitle(f"Xem trước sổ {data['loai']} năm {data['nam']}")
+        self.setWindowTitle("Xem trước CCDC kê khai nhập thêm" if data.get("ke_khai")
+                            else f"Xem trước sổ {data['loai']} năm {data['nam']}")
         self.resize(1100, 560)
         lay = QVBoxLayout(self)
         rows = data["rows"]
@@ -183,6 +185,46 @@ class ImportPreviewDialog(QDialog):
         return {dong: c.value() for dong, c in self.combos.items()}
 
 
+class RemoveDepreciatedDialog(QDialog):
+    """Chọn các tài sản đã hết khấu hao / phân bổ để xóa khỏi sổ (mặc định chọn hết)."""
+
+    def __init__(self, rows: list[dict], loai_so: str, year: int, parent=None):
+        super().__init__(parent)
+        self.rows = rows
+        self.setWindowTitle(f"Xóa tài sản hết khấu hao khỏi sổ {loai_so} năm {year}")
+        self.resize(900, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint(f"{len(rows)} tài sản đã hết khấu hao / phân bổ từ trước năm {year} (còn lại 0 đ, cả năm "
+                           f"không phát sinh). Bỏ chọn tài sản muốn giữ. Tài sản xóa không hiện trong sổ từ năm {year}; "
+                           "sổ các năm trước và bảng lãi lỗ giữ nguyên. Xem lại hoặc khôi phục ở trường hợp "
+                           "\"Đã xóa khỏi sổ\"."))
+        self.table = QTableWidget(len(rows), 5)
+        self.table.setHorizontalHeaderLabels(["Xóa", "Mã", "Tên", "Ngày ghi tăng", "Nguyên giá"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.checks: list[QCheckBox] = []
+        for i, r in enumerate(rows):
+            cb = QCheckBox()
+            cb.setChecked(True)
+            self.checks.append(cb)
+            self.table.setCellWidget(i, 0, cb)
+            for j, val in enumerate((r["MaTS"], r["TenTS"], fmt_date(r["NgayGhiTang"]), fmt_money(r["NguyenGia"])),
+                                    start=1):
+                self.table.setItem(i, j, QTableWidgetItem(str(val or "")))
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        lay.addWidget(self.table, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Xóa khỏi sổ")
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def chosen(self) -> list[dict]:
+        return [r for r, cb in zip(self.rows, self.checks) if cb.isChecked()]
+
+
 class RegisterTab(QWidget):
     def __init__(self, page, loai_so: str):
         super().__init__()
@@ -205,16 +247,29 @@ class RegisterTab(QWidget):
         b_off = button("Ghi giảm…", self.write_off)
         b_undo = button("Bỏ ghi giảm", self.undo_write_off)
         b_del = button("Xóa", self.delete, "Danger")
+        b_done = button("Xóa TS hết khấu hao…" if loai_so == "TSCĐ" else "Xóa CCDC hết phân bổ…",
+                        self.remove_depreciated, "Danger")
+        b_back = button("Khôi phục vào sổ", self.restore)
+        b_back.setToolTip("Đưa tài sản đã xóa khỏi sổ (trường hợp \"Đã xóa khỏi sổ\") trở lại sổ")
         b_imp = button("Nhập sổ cũ từ Excel…", self.import_book)
         b_exp = button("Xuất Excel…", self.export, "Primary")
         b_add.setEnabled(can_add)
         b_imp.setEnabled(can_add)
         for b in (b_edit, b_off, b_undo):
             b.setEnabled(can_edit)
-        b_del.setEnabled(self.ctx.can("TaiSan", "Xoa"))
+        for b in (b_del, b_done, b_back):
+            b.setEnabled(self.ctx.can("TaiSan", "Xoa"))
         b_exp.setEnabled(self.ctx.can("TaiSan", "Xuat"))
         lay.addLayout(toolbar(QLabel("Năm"), self.year, QLabel("Trường hợp"), self.case, self.extra, "stretch"))
-        lay.addLayout(toolbar(b_add, b_edit, b_off, b_undo, b_del, "stretch", b_imp, b_exp))
+        extra = []
+        if loai_so == "CCDC":
+            b_tpl = button("Tải mẫu kê khai CCDC…", self.save_extra_template)
+            b_ext = button("Nhập CCDC kê khai từ Excel…", self.import_extra)
+            b_tpl.setToolTip("File Excel mẫu để kê khai CCDC nhập thêm ngoài hóa đơn đầu vào "
+                             "(mua lẻ không hóa đơn, được tặng, điều chuyển, kiểm kê thừa…)")
+            b_ext.setEnabled(can_add)
+            extra = [b_tpl, b_ext]
+        lay.addLayout(toolbar(b_add, b_edit, b_off, b_undo, b_del, b_done, b_back, "stretch", *extra, b_imp, b_exp))
         self.table = DataTable([])
         self.table.activated_row.connect(lambda _: self.edit())
         lay.addWidget(self.table, 1)
@@ -265,7 +320,8 @@ class RegisterTab(QWidget):
         tscd = self.loai_so == "TSCĐ"
         groups = [("(chưa chọn)", None)] + [(f"{n.ma} – {n.ten}", n.ma) for n in dm.CATALOG
                                            if n.kieu in ("GIA_TRI", "CCDC", "CHO_PB")]
-        f = [{"key": "MaTS", "label": "Mã", "hint": "Để trống thì phần mềm tự đánh mã."},
+        f = [{"key": "MaTS", "label": "Mã", "hint": "Để trống thì phần mềm tự đánh mã. Mã CCDC tự cấp (CC001/2026…) "
+                                                       "tự đánh lại theo ngày ghi tăng khi thêm, sửa, xóa."},
              {"key": "TenTS", "label": "Tên", "required": True},
              {"key": "MaNhomDM", "label": "Nhóm trong danh mục", "kind": "combo", "options": groups}]
         if tscd:
@@ -361,6 +417,42 @@ class RegisterTab(QWidget):
                 self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa tài sản", r["TenTS"])
                 self.reload()
 
+    def remove_depreciated(self):
+        y = self.year.value()
+        rows = self.svc.fully_depreciated(self.loai_so, y)
+        if not rows:
+            info(self, f"Sổ {self.loai_so} năm {y} không có tài sản nào đã hết khấu hao / phân bổ từ trước năm {y}.\n"
+                       "Tài sản hết khấu hao trong năm thì sang năm sau mới xóa được, để sổ năm đó vẫn đủ dòng.")
+            return
+        dlg = RemoveDepreciatedDialog(rows, self.loai_so, y, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        chosen = dlg.chosen()
+        if not chosen:
+            return
+        if not confirm(self, f"Xóa {len(chosen)} tài sản đã hết khấu hao khỏi sổ {self.loai_so} từ năm {y}?\n"
+                             + "\n".join(f"{r['MaTS']} – {r['TenTS']}" for r in chosen[:10])
+                             + ("\n…" if len(chosen) > 10 else "")):
+            return
+        n = run_safely(self, self.svc.remove_depreciated, [r["Ma"] for r in chosen], y)
+        if n is not None:
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], f"Xóa {n} tài sản hết khấu hao khỏi sổ {self.loai_so}",
+                            str(y))
+            self.reload()
+            info(self, f"Đã xóa {n} tài sản khỏi sổ từ năm {y}. Xem lại ở trường hợp \"Đã xóa khỏi sổ\".")
+
+    def restore(self):
+        r = self._current()
+        if r is None:
+            return
+        if not r.get("XoaKhoiSoNam"):
+            info(self, "Chọn tài sản ở trường hợp \"Đã xóa khỏi sổ\" để khôi phục.")
+            return
+        if confirm(self, f"Đưa {r['MaTS']} – {r['TenTS']} trở lại sổ?"):
+            self.svc.restore_to_register(r["Ma"])
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Khôi phục tài sản vào sổ", r["TenTS"])
+            self.reload()
+
     def import_book(self):
         path, _ = QFileDialog.getOpenFileName(self, "Chọn sổ TSCĐ / sổ CCDC (Excel xuất từ phần mềm kế toán)", "",
                                               "Excel (*.xlsx *.xlsm)")
@@ -388,6 +480,38 @@ class RegisterTab(QWidget):
         info(self, msg)
         self.year.setValue(res["nam"])
         self.page.select_book(res["loai"])
+        self.reload()
+
+    def save_extra_template(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Lưu file mẫu kê khai CCDC", "Mau_ke_khai_CCDC.xlsx",
+                                              "Excel (*.xlsx)")
+        if path and run_safely(self, ccdc_excel.write_template, path) is not None:
+            info(self, f"Đã lưu file mẫu:\n{path}\n\nĐiền mỗi dòng một CCDC (đọc sheet Hướng dẫn), rồi bấm "
+                       "\"Nhập CCDC kê khai từ Excel…\". Mã CCDC để trống thì phần mềm tự đánh.")
+
+    def import_extra(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn file kê khai CCDC", "", "Excel (*.xlsx *.xlsm)")
+        if not path:
+            return
+        data = run_safely(self, self.svc.read_extra_ccdc, path)
+        if data is None:
+            return
+        if not data["rows"]:
+            error(self, "Không có dòng CCDC nào đọc được trong file.\n" + "\n".join(data["loi"][:10]))
+            return
+        dlg = ImportPreviewDialog(data, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        res = run_safely(self, self.svc.apply_extra_ccdc, data, dlg.actions())
+        if res is None:
+            return
+        self.ctx.db.log(self.ctx.user["TenDangNhap"], "Nhập CCDC kê khai", path)
+        msg = (f"Đã nhập CCDC kê khai: thêm {res['them']}, cập nhật {res['cap_nhat']}, bỏ qua {res['bo_qua']}. "
+               "Mã CCDC đã đánh lại theo ngày ghi tăng.")
+        if res["loi"]:
+            msg += "\n\nKhông nhập được:\n" + "\n".join(res["loi"][:10])
+        info(self, msg)
+        self.year.setValue(res["nam"])
         self.reload()
 
     def export(self):

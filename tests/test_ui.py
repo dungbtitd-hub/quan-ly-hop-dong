@@ -440,6 +440,29 @@ def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
     monkeypatch.setattr(assets_page.QFileDialog, "getSaveFileName", lambda *a: (str(out), ""))
     page.ccdc.export()
     assert out.exists()
+    # mẫu kê khai CCDC nhập thêm ngoài hóa đơn: tải mẫu, điền, nhập lại
+    tpl = tmp_path / "mau_ccdc.xlsx"
+    monkeypatch.setattr(assets_page.QFileDialog, "getSaveFileName", lambda *a: (str(tpl), ""))
+    page.ccdc.save_extra_template()
+    import openpyxl
+    wb = openpyxl.load_workbook(tpl)
+    ws = wb["Kê khai CCDC"]
+    for j, v in enumerate(["", "Quạt cây", "", "", "Được tặng", "03/02/2026", "", 6, "Cái", 1, 900_000], start=1):
+        ws.cell(3, j, v)
+    wb.save(tpl)
+    monkeypatch.setattr(assets_page.QFileDialog, "getOpenFileName", lambda *a: (str(tpl), ""))
+    page.ccdc.import_extra()
+    assert previews[-1] == 1 and "thêm 1" in shown[-1]
+    assert any(r.get("TenTS") == "Quạt cây" for r in page.ccdc.table.rows)
+    # xóa tài sản hết khấu hao khỏi sổ
+    monkeypatch.setattr(assets_page, "confirm", lambda *a: True)
+    monkeypatch.setattr(assets_page.RemoveDepreciatedDialog, "exec", lambda dlg: QDialog.Accepted)
+    page.ccdc.year.setValue(2027)
+    done = page.svc.fully_depreciated("CCDC", 2027)
+    page.ccdc.remove_depreciated()
+    assert not page.svc.fully_depreciated("CCDC", 2027)
+    page.ccdc.case.set_value("da_xoa")
+    assert len([r for r in page.ccdc.table.rows if not r.get("_kieu")]) == len(done)
     page.tabs.setCurrentIndex(1)
     page.l_year.setValue(2026)
     assert page.lines.rowCount() == 2
