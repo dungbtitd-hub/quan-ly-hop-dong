@@ -509,6 +509,19 @@ class BatchInvoiceDialog(QDialog):
         lay = QVBoxLayout(self)
         self.summary = hint("")
         lay.addWidget(self.summary)
+        self.type_filter = None
+        if self.kind == "ra":
+            f = type_filter_field(self.ctx, open_contracts(self.ctx, "ra"))
+            row = QHBoxLayout()
+            row.addWidget(QLabel("Loại hợp đồng"))
+            self.type_filter = Combo(f["options"])
+            self.type_filter.setMinimumWidth(220)
+            self.type_filter.setToolTip(f["hint"])
+            self.type_filter.currentIndexChanged.connect(self._type_changed)
+            row.addWidget(self.type_filter)
+            row.addWidget(hint("Chọn loại để thu gọn danh sách hợp đồng ở cột Hợp đồng; hợp đồng đã xuất đủ hóa đơn "
+                               "không hiện."), 1)
+            lay.addLayout(row)
         if self.kind == "vao":
             row = QHBoxLayout()
             row.addWidget(QLabel("Cho các dòng đã tích:  Hợp đồng"))
@@ -570,9 +583,21 @@ class BatchInvoiceDialog(QDialog):
             self.items.append(it)
         mark_duplicates(self.ctx, self.kind, self.items)
 
-    def _contract_options(self, suggested):
+    def _type_changed(self, *_):
+        for i, it in enumerate(self.items):
+            combo = self.table.cellWidget(i, 8)
+            if combo is not None:
+                it["values"]["MaHopDong"] = combo.value()
+        self._fill()
+        self._update()
+
+    def _contract_options(self, suggested, current=None):
         ids = [h["Ma"] for h in suggested]
-        base = [(contract_label(h), h["Ma"]) for h in open_contracts(self.ctx, self.kind, ids)]
+        loai = self.type_filter.value() if self.type_filter is not None else None
+        rows = open_contracts(self.ctx, self.kind, ids + [current])
+        if loai is not None:
+            rows = [h for h in rows if h["Ma"] in ids or h["Ma"] == current or (h["MaLoaiHD"] or "") == loai]
+        base = [(contract_label(h), h["Ma"]) for h in rows]
         if self.kind != "ra":
             base = [("(Không có – mua hàng trực tiếp)", None)] + base
         top = [(f"★ Gợi ý: {h['SoHopDong']} – {h['TenHopDong']}", h["Ma"]) for h in suggested]
@@ -600,7 +625,7 @@ class BatchInvoiceDialog(QDialog):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(i, j, item)
             if it["status"] != "loi":
-                combo = Combo(self._contract_options(it["goi_y"]), v.get("MaHopDong"))
+                combo = Combo(self._contract_options(it["goi_y"], v.get("MaHopDong")), v.get("MaHopDong"))
                 combo.currentIndexChanged.connect(lambda _=0, i=i: self._contract_changed(i))
                 self.table.setCellWidget(i, 8, combo)
                 if self.kind == "vao":

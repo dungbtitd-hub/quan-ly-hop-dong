@@ -686,3 +686,14 @@ def test_out_invoice_contract_picker_filters(qtbot, ctx):
     page_v = InvoicesPage(ctx, "vao")
     qtbot.addWidget(page_v)
     assert "_LoaiHD" not in [f["key"] for f in page_v._fields()]
+    # màn hình nhập nhiều hóa đơn đầu ra: lọc cột Hợp đồng theo loại
+    from qlhd.ui.invoices_page import BatchInvoiceDialog
+    items = [{"path": "a.xml", "file": "a.xml", "status": "moi", "notes": [], "goi_y": [],
+              "values": {"SoHoaDon": "100", "NgayXuatHD": "2026-04-01", "GiaTriSauThue": 1_000_000,
+                         "MaHopDong": "__chon_hop_dong__"}}]
+    batch = BatchInvoiceDialog(page, items=items)
+    qtbot.addWidget(batch)
+    cell = batch.table.cellWidget(0, 8)
+    assert done not in ids(cell) and open_ in ids(cell) and len(ids(cell)) > 2
+    batch.type_filter.set_value(giam_sat)
+    assert [x for x in ids(batch.table.cellWidget(0, 8)) if x != "__chon_hop_dong__"] == [open_]
