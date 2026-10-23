@@ -179,7 +179,7 @@ class HomePage(QWidget):
         col = QVBoxLayout()
         col.setSpacing(2)
         col.addWidget(page_title("Tổng quan"))
-        self.sub = tagged(QLabel(), "PageSub")
+        self.sub = _wrap(tagged(QLabel(), "PageSub"))          # tự xuống dòng, không đẩy rộng trang
         col.addWidget(self.sub)
         head.addLayout(col, 1)
         self.b_remind = button("Cài đặt nhắc hạn…", self.remind_settings, icon_name="bell")
