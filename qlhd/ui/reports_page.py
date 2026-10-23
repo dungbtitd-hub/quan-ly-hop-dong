@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import date
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QCheckBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QRadioButton,
                                QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
@@ -24,7 +24,18 @@ def preview_rows(rep) -> list[dict]:
     return rows + ([dict(rep.total, _kieu="tong")] if rep.total else [])
 
 
+def row_contract(r: dict) -> str | None:
+    """Hợp đồng của một dòng báo cáo (dòng hợp đồng, hóa đơn, thanh toán) để mở nhanh; dòng tổng hợp thì không có."""
+    if r.get("_kieu"):
+        return None
+    if r.get("MaHopDong"):
+        return r["MaHopDong"]
+    return r.get("Ma") if r.get("ChieuHopDong") and r.get("SoHopDong") else None
+
+
 class ReportsPage(QWidget):
+    open_contract = Signal(str)
+
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
@@ -54,6 +65,10 @@ class ReportsPage(QWidget):
         self.chieu = Combo([("Tất cả", None), ("Đầu ra", "Đầu ra"), ("Đầu vào", "Đầu vào")])
         self.gop = QCheckBox("Gộp đầu ra, đầu vào chung bảng")
         self.gop.setToolTip("Mặc định hợp đồng / hóa đơn đầu ra và đầu vào được tách thành bảng (sheet) riêng.")
+        self.tach_nam = QCheckBox("Tách theo năm ký hợp đồng")
+        self.tach_nam.setChecked(True)
+        self.tach_nam.setToolTip("Mỗi năm một nhóm có dòng Cộng năm, cuối bảng là tổng cộng. Hóa đơn, thanh toán "
+                                 "của hợp đồng nằm trong năm ký hợp đồng đó; hóa đơn mua trực tiếp theo năm hóa đơn.")
         self.loai = CheckList()
         self.doi_tac = CheckList()
         self.nhom = CheckList()
@@ -74,6 +89,7 @@ class ReportsPage(QWidget):
         r = 0
         for label, w in (("Kỳ báo cáo", self.ky_td), ("1. Từ ngày", self.tu), ("    Đến ngày", self.den),
                          ("2. Tính theo", self.tinh_theo), ("3. Chiều hợp đồng", self.chieu), ("", self.gop),
+                         ("", self.tach_nam),
                          ("4. Loại hợp đồng", self.loai), ("5. Chủ đầu tư / NCC", self.doi_tac),
                          ("6. Nhóm chủ đầu tư", self.nhom), ("7. Tình trạng HĐ", self.tinh_trang),
                          ("8. Thanh toán", self.tt_tt), ("9. Xuất hóa đơn", self.tt_xuat),
@@ -165,7 +181,7 @@ class ReportsPage(QWidget):
             tinh_trang=self.tinh_trang.values(), tt_thanh_toan=self.tt_tt.value(), tt_xuat_hd=self.tt_xuat.value(),
             co_hd_lien_ket=self.lien_ket.value(), che_do="trong_ky" if self.trong_ky.isChecked() else "luy_ke",
             ky=self.ky.value(), nhom_thue=self.nhom_thue.value(), nguoi_mua=self.nguoi_mua.values(),
-            gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value())
+            gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value(), tach_nam=self.tach_nam.isChecked())
 
     def build(self):
         return self.cr.build(self.context.value(), self.filters())
@@ -176,6 +192,9 @@ class ReportsPage(QWidget):
         for rep in reports:
             table = DataTable([])
             table.set_rows(preview_rows(rep), rep.columns)
+            if any(row_contract(r) for r in table.rows):
+                table.setToolTip("Bấm đúp một dòng để mở hợp đồng đó (xem, sửa, thêm hóa đơn, thanh toán)")
+                table.activated_row.connect(lambda r: row_contract(r) and self.open_contract.emit(row_contract(r)))
             self.tabs.addTab(table, rep.sheet)
 
     def _export(self, reports, default_name: str):
@@ -248,6 +267,7 @@ class ReportsPage(QWidget):
         self.tinh_theo.set_value(f.tinh_theo)
         self.chieu.set_value(f.chieu)
         self.gop.setChecked(f.gop_ra_vao)
+        self.tach_nam.setChecked(f.tach_nam)
         self.loai.set_options([(t["TenLoaiHD"], t["Ma"]) for t in self.ctx.cs.contract_types()], f.loai_hd)
         self.doi_tac.set_options([(p["TenDoiTac"], p["Ma"]) for p in self.ctx.cs.partners()], f.doi_tac)
         self.nhom.set_options([(g["TenNhom"], g["Ma"]) for g in self.ctx.cs.groups()], f.nhom)

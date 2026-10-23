@@ -45,7 +45,7 @@ def test_all_contexts_and_excel(company, tmp_path):
     sample_data(db)
     cr = ContractReports(db)
     assert len(CONTEXTS) == 12
-    f = ReportFilters(tu="2026-01-01", den="2026-12-31")
+    f = ReportFilters(tach_nam=False, tu="2026-01-01", den="2026-12-31")
     for key, _ in CONTEXTS:
         reps = cr.build(key, f)
         out = export_xlsx(reps, tmp_path / f"{key}.xlsx", company="Cty", user="Kế toán")
@@ -53,11 +53,11 @@ def test_all_contexts_and_excel(company, tmp_path):
     by_type = cr.build("loai_hd", f)
     assert [r.sheet for r in by_type] == ["Báo cáo đầu ra", "Báo cáo đầu vào"]     # đầu ra, đầu vào tách bảng
     assert by_type[0].rows[0]["DaThanhToan"] == 35_000_000
-    merged = cr.build("loai_hd", ReportFilters(tu="2026-01-01", den="2026-12-31", gop_ra_vao=True))
+    merged = cr.build("loai_hd", ReportFilters(tach_nam=False, tu="2026-01-01", den="2026-12-31", gop_ra_vao=True))
     assert len(merged) == 1 and {r["Chieu"] for r in merged[0].rows} == {"Đầu ra", "Đầu vào"}
-    paid = cr.build("da_thanh_toan", ReportFilters(tu="2026-04-01", den="2026-04-30"))[0]
+    paid = cr.build("da_thanh_toan", ReportFilters(tach_nam=False, tu="2026-04-01", den="2026-04-30"))[0]
     assert paid.total["SoTien"] == 5_000_000
-    vin = cr.build("hoa_don_vao", ReportFilters(co_hd_lien_ket=False))[0]
+    vin = cr.build("hoa_don_vao", ReportFilters(tach_nam=False, co_hd_lien_ket=False))[0]
     data = [r for r in vin.rows if not r.get("_kieu")]
     assert len(data) == 1 and data[0]["SoHopDong"] == "(Mua trực tiếp)"
     group = cr.build("nhom_cdt", f)[0]
@@ -76,14 +76,14 @@ def test_input_invoice_listing_tax_groups(company, tmp_path):
                              "NgayNhanHD": "2026-02-20", "GiaTriTruocThue": 600_000, "VAT": 0, "ThueSuat": "KCT",
                              "MatHang": "Xăng E10 RON 95", "NguoiMuaHang": "Bùi Tiến Dũng"})
     cr = ContractReports(db)
-    rep = cr.build("hoa_don_vao", ReportFilters())[0]
+    rep = cr.build("hoa_don_vao", ReportFilters(tach_nam=False))[0]
     heads = [r["_nhan"] for r in rep.rows if r.get("_kieu") == "nhom"]
     assert heads[0].startswith("Nhóm HHDV mua vào : 1.") and heads[0].endswith("(2)")
     assert heads[1].startswith("Nhóm HHDV mua vào : 5.") and heads[1].endswith("(1)")
     assert rep.total["SoHoaDonGoc"] == "Số dòng = 3" and rep.total["VAT"] == 1_080_000
-    only = cr.build("hoa_don_vao", ReportFilters(nhom_thue="Không chịu thuế"))[0]
+    only = cr.build("hoa_don_vao", ReportFilters(tach_nam=False, nhom_thue="Không chịu thuế"))[0]
     assert [r["MatHang"] for r in only.rows if not r.get("_kieu")] == ["Xăng E10 RON 95"]
-    mixed = cr.build("hoa_don_vao", ReportFilters(nhom_thue="lan"))[0]
+    mixed = cr.build("hoa_don_vao", ReportFilters(tach_nam=False, nhom_thue="lan"))[0]
     assert not any(r.get("_kieu") for r in mixed.rows)
     assert [r["NgayNhanHD"] for r in mixed.rows] == sorted(r["NgayNhanHD"] for r in mixed.rows)
     path = export_xlsx(rep, tmp_path / "bang_ke.xlsx")
@@ -101,9 +101,9 @@ def test_out_invoices_one_sheet_per_buyer(company, tmp_path):
     cr = ContractReports(db)
     buyers = cr.buyers()
     assert len(buyers) == 2
-    reps = cr.build("hoa_don_ra_nguoi_mua", ReportFilters())
+    reps = cr.build("hoa_don_ra_nguoi_mua", ReportFilters(tach_nam=False))
     assert len(reps) == 2 and {len(r.rows) for r in reps} == {1}
-    one = cr.build("hoa_don_ra_nguoi_mua", ReportFilters(nguoi_mua=["mst:0109999999"]))
+    one = cr.build("hoa_don_ra_nguoi_mua", ReportFilters(tach_nam=False, nguoi_mua=["mst:0109999999"]))
     assert len(one) == 1 and one[0].sheet == "Trường THCS Lê Lợi"
     export_xlsx(reps, tmp_path / "nguoi_mua.xlsx")
 
@@ -127,3 +127,27 @@ def test_periods():
     from datetime import date
     assert period_range("quy", date(2026, 5, 9)) == ("2026-04-01", "2026-06-30")
     assert period_range("thang", date(2026, 12, 9)) == ("2026-12-01", "2026-12-31")
+
+
+def test_reports_split_by_contract_year(company):
+    db = company["kt"].db
+    d = sample_data(db)
+    cs = d["cs"]
+    old = cs.save_contract({"ThoiGianThucHien": 3, "DonViThoiGian": "tháng", "SoHopDong": "09/2025/HĐTV",
+                            "TenHopDong": "Thiết kế 2025", "ChieuHopDong": "Đầu ra", "MaDoiTac": d["cdt"],
+                            "GiaTriTongSauThue": 50_000_000, "NgayKy": "2025-06-01"})
+    cs.save_out_invoice({"SoHoaDon": "5", "MaHopDong": old, "NgayXuatHD": "2026-01-10", "GiaTriSauThue": 20_000_000})
+    cr = ContractReports(db)
+    assert cr.years(ReportFilters()) == [2025, 2026]
+    rep = next(r for r in cr.build("hop_dong", ReportFilters()) if "đầu ra" in r.title)
+    labels = [r.get("_nhan") or r.get("SoHopDong") for r in rep.rows]
+    assert labels == ["NĂM 2025", "09/2025/HĐTV", "Cộng năm 2025", "NĂM 2026", "01/2026/HĐTV", "Cộng năm 2026"]
+    assert rep.total["GiaTriHD"] == 160_000_000 and rep.total["SoHopDong"] == "TỔNG CỘNG"
+    # hóa đơn xuất năm 2026 của hợp đồng ký 2025 nằm trong nhóm năm 2025
+    inv = cr.build("hoa_don_ra", ReportFilters())[0]
+    y25 = inv.rows[:inv.rows.index(next(r for r in inv.rows if r.get("_nhan") == "NĂM 2026"))]
+    assert any(r.get("SoHoaDon") == "5" for r in y25)
+    # mọi ngữ cảnh xuất được khi tách năm
+    for key, _ in CONTEXTS:
+        assert cr.build(key, ReportFilters())
+    assert cr.build("hop_dong", ReportFilters(tach_nam=False))[0].rows[0].get("_nhan") is None

@@ -122,6 +122,35 @@ class ClassifyDialog(QDialog):
         return self.cls.value(), self.group.value(), (self.months.value() or None)
 
 
+def classify_lines(ctx, parent, rows: list[dict]) -> bool:
+    """Phân loại / phân loại lại các dòng hóa đơn đầu vào (dùng ở thẻ phân loại, sổ tài sản, trang hóa đơn đầu vào).
+    Dòng đã có phân loại thì hỏi xác nhận thay đổi."""
+    if not ctx.can("TaiSan", "Sua"):
+        info(parent, "Tài khoản không có quyền phân loại.")
+        return False
+    dlg = ClassifyDialog(rows, parent)
+    if dlg.exec() != QDialog.Accepted:
+        return False
+    pl, nhom, months = dlg.values()
+    done = [r for r in rows if r.get("PhanLoai") not in (None, "", dm.CHUA_PHAN_LOAI)]
+    if done and not confirm_changes(parent, [(r["TenHang"], f"{r['PhanLoai']} {r.get('NhomDM') or ''}".strip(),
+                                              f"{pl} {nhom or ''}".strip()) for r in done], "phân loại"):
+        return False
+    svc, errors = AssetService(ctx.db), []
+    for r in rows:
+        try:
+            svc.set_line_class(r["Ma"], pl, nhom, months)
+        except AssetError as e:
+            errors.append(f"{r['TenHang']}: {e}")
+    ctx.db.log(ctx.user["TenDangNhap"], "Phân loại dòng hóa đơn đầu vào", f"{len(rows) - len(errors)} dòng: {pl}")
+    if errors:
+        error(parent, "Không lưu được:\n" + "\n".join(errors[:15]))
+    win = parent.window()
+    if hasattr(win, "update_badges"):
+        win.update_badges()
+    return True
+
+
 class ImportPreviewDialog(QDialog):
     """Xem trước sổ nhập từ Excel: từng dòng là mới, trùng mã, có thể trùng hay trùng trong file; chọn cách xử lý."""
 
@@ -250,6 +279,9 @@ class RegisterTab(QWidget):
         b_done = button("Xóa TS hết khấu hao…" if loai_so == "TSCĐ" else "Xóa CCDC hết phân bổ…",
                         self.remove_depreciated, "Danger")
         b_back = button("Khôi phục vào sổ", self.restore)
+        b_cls = button("Phân loại lại (từ hóa đơn)…", self.reclassify)
+        b_cls.setToolTip("Tài sản sinh ra từ hóa đơn đầu vào bị xếp nhầm: đổi phân loại, nhóm, số tháng ngay tại đây")
+        b_cls.setEnabled(can_edit)
         b_back.setToolTip("Đưa tài sản đã xóa khỏi sổ (trường hợp \"Đã xóa khỏi sổ\") trở lại sổ")
         b_imp = button("Nhập sổ cũ từ Excel…", self.import_book)
         b_exp = button("Xuất Excel…", self.export, "Primary")
@@ -269,7 +301,8 @@ class RegisterTab(QWidget):
                              "(mua lẻ không hóa đơn, được tặng, điều chuyển, kiểm kê thừa…)")
             b_ext.setEnabled(can_add)
             extra = [b_tpl, b_ext]
-        lay.addLayout(toolbar(b_add, b_edit, b_off, b_undo, b_del, b_done, b_back, "stretch", *extra, b_imp, b_exp))
+        lay.addLayout(toolbar(b_add, b_edit, b_off, b_undo, b_del, b_done, b_back, b_cls, "stretch", *extra, b_imp,
+                              b_exp))
         self.table = DataTable([])
         self.table.activated_row.connect(lambda _: self.edit())
         lay.addWidget(self.table, 1)
@@ -391,6 +424,19 @@ class RegisterTab(QWidget):
             info(self, "Tài sản sinh ra từ hóa đơn đầu vào: thời gian và giá trị theo dòng hóa đơn; đổi phân loại, "
                        "số tháng thì làm ở thẻ Dòng hóa đơn đầu vào. Ở đây sửa được tên, mã, đơn vị sử dụng…")
         self._save(a, r["Ma"])
+
+    def reclassify(self):
+        r = self._current()
+        if r is None:
+            return
+        a = self.ctx.db.get("TaiSan", r["Ma"])
+        if not a["MaDongHD"]:
+            return info(self, "Tài sản này nhập tay / từ sổ cũ, không sinh từ hóa đơn: sửa bằng nút \"Sửa…\" "
+                              "hoặc xóa nếu không phải tài sản.")
+        lines = self.svc._line_rows("d.Ma = ?", (a["MaDongHD"],))
+        if lines and classify_lines(self.ctx, self, lines):
+            self.page.refresh()
+            self.reload()
 
     def write_off(self):
         r = self._current()
@@ -613,30 +659,8 @@ class AssetsPage(QWidget):
         rows = [r for r in table.selected() if not r.get("_kieu")]
         if not rows:
             return info(self, "Hãy chọn dòng cần phân loại (giữ Ctrl / Shift để chọn nhiều dòng).")
-        if not self.ctx.can("TaiSan", "Sua"):
-            return info(self, "Tài khoản không có quyền phân loại.")
-        dlg = ClassifyDialog(rows, self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        pl, nhom, months = dlg.values()
-        done = [r for r in rows if r.get("PhanLoai") not in (None, "", dm.CHUA_PHAN_LOAI)]
-        if done and not confirm_changes(self, [(r["TenHang"], f"{r['PhanLoai']} {r.get('NhomDM') or ''}".strip(),
-                                                f"{pl} {nhom or ''}".strip()) for r in done], "phân loại"):
-            return
-        errors = []
-        for r in rows:
-            try:
-                self.svc.set_line_class(r["Ma"], pl, nhom, months)
-            except AssetError as e:
-                errors.append(f"{r['TenHang']}: {e}")
-        self.ctx.db.log(self.ctx.user["TenDangNhap"], "Phân loại dòng hóa đơn đầu vào",
-                        f"{len(rows) - len(errors)} dòng: {pl}")
-        if errors:
-            error(self, "Không lưu được:\n" + "\n".join(errors[:15]))
-        self.refresh()
-        win = self.window()
-        if hasattr(win, "update_badges"):
-            win.update_badges()
+        if classify_lines(self.ctx, self, rows):
+            self.refresh()
 
     def export_lines(self):
         y = self.l_year.value()

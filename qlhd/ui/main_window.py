@@ -167,6 +167,9 @@ class MainWindow(QMainWindow):
         if self.finance_page:
             self.finance_page.unlocked.connect(self._finance_changed)
             self.finance_page.locked.connect(self._finance_changed)
+        for page in self.pages:                         # trang nào có liên kết sang hợp đồng thì mở được ngay
+            if page is not self.home and hasattr(page, "open_contract"):
+                page.open_contract.connect(self.show_contract)
         self.home.open_page.connect(self.go_to)
         self.home.open_contract.connect(self.show_contract)
         self.home.add_contract.connect(self._add_contract)

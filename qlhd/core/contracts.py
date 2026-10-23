@@ -200,7 +200,13 @@ class ContractService:
             if dup:
                 raise ValidationError(f"Mã số thuế đã có ở đối tác \"{dup['TenDoiTac']}\".")
         if ma:
-            self.db.update("DoiTac", ma, v)
+            self.db.update("DoiTac", ma, v, commit=False)
+            p = self.db.get("DoiTac", ma)          # hợp đồng lưu kèm tên, MST đối tác: cập nhật theo
+            for hd in self.db.active("HopDong", "MaDoiTac = ?", (ma,)):
+                if (hd["TenDoiTac"], hd["MaThueDoiTac"]) != (p["TenDoiTac"], p["MaSoThue"]):
+                    self.db.update("HopDong", hd["Ma"], {"TenDoiTac": p["TenDoiTac"], "MaThueDoiTac": p["MaSoThue"]},
+                                   commit=False)
+            self.db.conn.commit()
             return ma
         return self.db.insert("DoiTac", v)
 
@@ -309,6 +315,13 @@ class ContractService:
         for r in self.db.active("HoaDonDauVao", "MaHopDong = ?", (ma,)):
             self.db.update("HoaDonDauVao", r["Ma"], {"MaHopDong": None}, commit=False)
         self.db.soft_delete("HopDong", ma)
+
+    def delete_task(self, ma: str) -> None:
+        """Xóa mềm một công việc cùng các lần bàn giao, nghiệm thu của nó."""
+        for t in ("LichSuBanGiao", "LichSuNghiemThu"):
+            for r in self.db.active(t, "MaCongViec = ?", (ma,)):
+                self.db.soft_delete(t, r["Ma"], commit=False)
+        self.db.soft_delete("CongViec", ma)
 
     def summary(self, ma: str, tu: str | None = None, den: str | None = None) -> dict:
         """Giá trị HĐ, đã xuất hóa đơn, đã thanh toán, còn phải xuất, còn phải thu."""

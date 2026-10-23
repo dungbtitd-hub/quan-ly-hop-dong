@@ -66,6 +66,19 @@ def _wrap(lbl: QLabel) -> QLabel:
     return lbl
 
 
+class _ClickFrame(QFrame):
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def mouseReleaseEvent(self, ev):
+        self.clicked.emit()
+        super().mouseReleaseEvent(ev)
+
+
 class _AlertRow(QFrame):
     clicked = Signal()
 
@@ -153,7 +166,7 @@ class HomePage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)      # mọi thứ co theo bề rộng màn hình
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)      # bố cục co theo bề rộng; chỉ dự phòng
         body = QWidget()
         body.setObjectName("Page")
         scroll.setWidget(body)
@@ -301,7 +314,11 @@ class HomePage(QWidget):
 
         _clear(self.debts)
         for r in d["cong_no"][:6]:
-            box = QVBoxLayout()
+            frame = _ClickFrame()
+            frame.setToolTip("Bấm để mở hợp đồng")
+            frame.clicked.connect(lambda ma=r["Ma"]: self.open_contract.emit(ma))
+            box = QVBoxLayout(frame)
+            box.setContentsMargins(0, 0, 0, 0)
             box.setSpacing(3)
             top = QHBoxLayout()
             name = ElidedLabel(f"{r['SoHopDong']} – {r['TenHopDong']}")
@@ -317,7 +334,7 @@ class HomePage(QWidget):
             box.addWidget(bar)
             box.addWidget(_wrap(hint(f"Đã thu {r['PhanTramTT']:.0f}% · {fmt_money(r['DaThanhToan'])} / "
                                      f"{fmt_money(r['GiaTriHD'])} đ")))
-            self.debts.addLayout(box)
+            self.debts.addWidget(frame)
         if not d["cong_no"]:
             self.debts.addWidget(hint("Không còn công nợ phải thu."))
 

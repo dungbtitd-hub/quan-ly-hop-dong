@@ -160,7 +160,10 @@ class ContractsPage(QWidget):
         for b, ok in ((self.b_add, can_add), (self.b_edit, ctx.can("HopDong", "Sua")),
                       (self.b_del, ctx.can("HopDong", "Xoa")), (self.b_imp, can_add)):
             b.setEnabled(ok)
-        lay.addLayout(toolbar(self.b_add, self.b_edit, self.b_del, self.b_imp, self.b_tpl, "stretch"))
+        self.b_partner = button("Sửa đối tác…", self.edit_partner)
+        self.b_partner.setToolTip("Sửa tên, MST, vai trò của đối tác (chủ đầu tư / nhà cung cấp) của hợp đồng đang chọn")
+        self.b_partner.setEnabled(ctx.can("DanhMuc", "Sua") or ctx.can("HopDong", "Sua"))
+        lay.addLayout(toolbar(self.b_add, self.b_edit, self.b_del, self.b_partner, self.b_imp, self.b_tpl, "stretch"))
         lay.addLayout(toolbar(QLabel("Lọc:"), self.filter, self.status, self.paid, "stretch", self.search))
         split = QSplitter(Qt.Vertical)
         self.table = DataTable(CONTRACT_COLS)
@@ -174,15 +177,25 @@ class ContractsPage(QWidget):
         self.tasks.activated_row.connect(lambda _: self.edit_task())
         self.invoices = DataTable([("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"),
                                    ("NgayXuatHD", "Ngày", "date"), ("GiaTriSauThue", "Sau thuế", "money"),
-                                   ("TinhChatHD", "Tính chất", "text")])
+                                   ("TinhChatHD", "Tính chất", "text"), ("ConPhaiThu", "Còn phải thu", "money"),
+                                   ("TTThanhToan", "Tình trạng thanh toán", "text"),
+                                   ("NgayTT", "Ngày thanh toán", "text"), ("SoThamChieuSK", "Số sao kê", "text")])
+        self.invoices.activated_row.connect(lambda _: self.edit_invoice())
+        self._inv_helper = None
         self.payments = DataTable([("NgayThanhToan", "Ngày tiền về", "date"), ("SoTien", "Số tiền", "money"),
                                    ("HinhThuc", "Hình thức", "text"), ("SoThamChieuSK", "Số sao kê", "text"),
                                    ("GhiChu", "Ghi chú", "text")])
         self.detail.addTab(self._wrap(self.tasks, [button("Thêm công việc", self.add_task),
                                                    button("Sửa công việc", self.edit_task),
+                                                   button("Xóa công việc", self.delete_task, "Danger"),
                                                    button("Thêm lần bàn giao", self.add_handover),
                                                    button("Thêm lần nghiệm thu", self.add_acceptance)]), "Công việc")
-        self.detail.addTab(self._wrap(self.invoices, []), "Hóa đơn")
+        inv_btns = [button("Thêm hóa đơn đầu ra", self.add_invoice), button("Sửa hóa đơn", self.edit_invoice),
+                    button("Xóa hóa đơn", self.delete_invoice, "Danger"),
+                    button("Ghi nhận / xem thanh toán", self.invoice_payment)]
+        for b, right in zip(inv_btns, ("Them", "Sua", "Xoa", "Sua")):
+            b.setEnabled(ctx.can("HoaDonDauRa", right))
+        self.detail.addTab(self._wrap(self.invoices, inv_btns), "Hóa đơn")
         pay_btns = [button("Ghi nhận thanh toán", self.add_payment), button("Sửa lần thanh toán", self.edit_payment),
                     button("Xóa lần thanh toán", self.del_payment)]
         self.payments.activated_row.connect(lambda _: self.edit_payment())
@@ -237,6 +250,17 @@ class ContractsPage(QWidget):
                 self.table.scrollToItem(self.table.item(i, 0))
                 break
 
+    def _reload_keep(self) -> None:
+        """Làm mới mà vẫn đứng ở hợp đồng đang chọn (để nhập tiếp hóa đơn, thanh toán)."""
+        ma, tab = self.current_id(), self.detail.currentIndex()
+        self.refresh()
+        for i in range(self.table.rowCount()):
+            r = self.table._row_of(self.table.item(i, 0))
+            if r and r["Ma"] == ma:
+                self.table.selectRow(i)
+                break
+        self.detail.setCurrentIndex(tab)
+
     def current_id(self) -> str | None:
         r = self.table.current()
         return r["Ma"] if r else None
@@ -250,7 +274,8 @@ class ContractsPage(QWidget):
         hd = self.ctx.db.get("HopDong", ma)
         self.tasks.set_rows(self.ctx.cs.tasks(ma))
         if hd["ChieuHopDong"] == "Đầu ra":
-            self.invoices.set_rows(self.ctx.cs.out_invoices(ma))
+            from .invoices_page import out_invoice_row
+            self.invoices.set_rows([out_invoice_row(self.ctx, i) for i in self.ctx.cs.out_invoices(ma)])
         else:
             rows = [dict(r, SoHoaDon=r["SoHoaDonGoc"], NgayXuatHD=r["NgayNhanHD"], TinhChatHD="Đầu vào")
                     for r in self.ctx.db.active("HoaDonDauVao", "MaHopDong = ?", (ma,))]
@@ -292,7 +317,7 @@ class ContractsPage(QWidget):
         dlg = FormDialog("Công việc", self._task_fields(), {"TinhTrangCV": "Chưa làm"}, self)
         if dlg.exec() == QDialog.Accepted:
             run_safely(self, self.ctx.cs.save_task, dict(dlg.values(), MaHopDong=ma))
-            self.refresh_detail()
+            self._reload_keep()
 
     def edit_task(self):
         t = self.tasks.current()
@@ -301,7 +326,16 @@ class ContractsPage(QWidget):
         dlg = FormDialog("Công việc", self._task_fields(), t, self)
         if dlg.exec() == QDialog.Accepted:
             run_safely(self, self.ctx.cs.save_task, dlg.values(), t["Ma"])
-            self.refresh_detail()
+            self._reload_keep()
+
+    def delete_task(self):
+        t = self.tasks.current()
+        if not t:
+            return info(self, "Chọn một công việc.")
+        if confirm(self, f"Xóa công việc \"{t['TenNoiDungCV']}\" cùng các lần bàn giao, nghiệm thu của nó?"):
+            self.ctx.cs.delete_task(t["Ma"])
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa công việc", t["TenNoiDungCV"])
+            self._reload_keep()
 
     def add_handover(self):
         t = self.tasks.current()
@@ -333,6 +367,68 @@ class ContractsPage(QWidget):
                 self.ctx.cs.save_task({"TinhTrangCV": "Đã nghiệm thu", "TienDoPT": 100}, t["Ma"])
             self.refresh_detail()
 
+    def edit_partner(self):
+        r = self.table.current()
+        if not r:
+            return info(self, "Chọn một hợp đồng trước.")
+        if not r.get("MaDoiTac"):
+            return info(self, "Hợp đồng chưa gắn đối tác trong danh mục: bấm Sửa hợp đồng để chọn đối tác.")
+        p = dict(self.ctx.db.get("DoiTac", r["MaDoiTac"]))
+        if partner_dialog(self.ctx, self, p, p["Ma"]):
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Sửa đối tác", p["TenDoiTac"])
+            self._reload_keep()
+
+    # ---- hóa đơn đầu ra của hợp đồng đang chọn
+    def _out_contract(self) -> str | None:
+        ma = self.current_id()
+        if not ma:
+            info(self, "Chọn một hợp đồng trước.")
+            return None
+        if self.ctx.db.get("HopDong", ma)["ChieuHopDong"] != "Đầu ra":
+            info(self, "Hóa đơn đầu vào nhập ở trang Hóa đơn đầu vào.")
+            return None
+        return ma
+
+    def _helper(self):
+        if self._inv_helper is None:
+            from .invoices_page import InvoicesPage
+            self._inv_helper = InvoicesPage(self.ctx, "ra")
+            self._inv_helper.hide()
+        return self._inv_helper
+
+    def add_invoice(self):
+        ma = self._out_contract()
+        if ma and self._helper()._save({"MaHopDong": ma}, parent=self):
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Thêm hóa đơn đầu ra", self.table.current()["SoHopDong"])
+            self._reload_keep()
+
+    def edit_invoice(self):
+        r = self.invoices.current()
+        if not r or self._out_contract() is None:
+            return info(self, "Chọn một hóa đơn.") if not r else None
+        if self._helper()._save(dict(self.ctx.db.get("HoaDonDauRa", r["Ma"])), r["Ma"], parent=self):
+            self._reload_keep()
+
+    def delete_invoice(self):
+        r = self.invoices.current()
+        if not r or self._out_contract() is None:
+            return info(self, "Chọn một hóa đơn.") if not r else None
+        pays = self.ctx.cs.invoice_payments(r["Ma"])
+        if confirm(self, f"Xóa hóa đơn số {r['SoHoaDon']} ({fmt_money(r['GiaTriSauThue'])} đ)?"
+                         + (f"\n\nHóa đơn đã có {len(pays)} lần thanh toán: các lần này vẫn giữ trong thẻ Thanh toán "
+                            "của hợp đồng (không còn gắn với hóa đơn)." if pays else "")):
+            self.ctx.cs.delete_out_invoice(r["Ma"])
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa hóa đơn đầu ra", r["SoHoaDon"])
+            self._reload_keep()
+
+    def invoice_payment(self):
+        r = self.invoices.current()
+        if not r or self._out_contract() is None:
+            return info(self, "Chọn một hóa đơn.") if not r else None
+        from .invoices_page import invoice_payment
+        if invoice_payment(self.ctx, self, r):
+            self._reload_keep()
+
     # ---- thanh toán
     def add_payment(self):
         ma = self.current_id()
@@ -342,7 +438,7 @@ class ContractsPage(QWidget):
             return info(self, "Thanh toán được ghi cho hợp đồng đầu ra (tiền thu về).")
         v = payment_dialog(self.ctx, self, ma, {"HinhThuc": "Chuyển khoản"})
         if v and run_safely(self, self.ctx.cs.save_payment, v):
-            self.refresh()
+            self._reload_keep()
 
     def edit_payment(self):
         p = self.payments.current()
@@ -351,13 +447,13 @@ class ContractsPage(QWidget):
         if not self.ctx.can("HoaDonDauRa", "Sua"):
             return
         if edit_payment(self.ctx, self, p["Ma"]):
-            self.refresh()
+            self._reload_keep()
 
     def del_payment(self):
         p = self.payments.current()
         if p and confirm(self, f"Xóa lần thanh toán {fmt_money(p['SoTien'])} đ ngày {fmt_date(p['NgayThanhToan'])}?"):
             self.ctx.cs.delete_payment(p["Ma"])
-            self.refresh()
+            self._reload_keep()
 
     # ---- Excel
     def save_template(self):

@@ -472,6 +472,7 @@ def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
     qtbot.addWidget(tab)
     tab.year.setValue(2026)
     tab.reload()
+    tab.reload()
     names = [r.get("TenDong") for r in tab.table.rows]
     assert "Doanh thu" in names and "Tổng chi phí phải nộp" in names
     dt = next(r for r in tab.table.rows if r.get("Nguon") == "doanh_thu")
@@ -644,7 +645,11 @@ def test_home_fits_window_with_long_contract_names(qtbot, ctx):
         qtbot.wait(50)
         scroll = page.findChild(QScrollArea)
         body = scroll.widget()
-        assert body.width() <= scroll.viewport().width()                   # không phải kéo ngang
+        from PySide6.QtWidgets import QWidget
+        wide = [f"{type(x).__name__}#{x.objectName()} min={x.minimumSizeHint().width()} "
+                f"w={x.width()} {getattr(x, 'text', lambda: '')()[:30]!r}"
+                for x in body.findChildren(QWidget) if x.minimumSizeHint().width() > 250]
+        assert body.width() <= scroll.viewport().width(), wide              # không phải kéo ngang
         assert body.minimumSizeHint().width() <= scroll.viewport().width()
         assert page.bottom.direction() == (QBoxLayout.TopToBottom if w < page.NARROW else QBoxLayout.LeftToRight)
         assert not page.grab().isNull()
@@ -697,3 +702,125 @@ def test_out_invoice_contract_picker_filters(qtbot, ctx):
     assert done not in ids(cell) and open_ in ids(cell) and len(ids(cell)) > 2
     batch.type_filter.set_value(giam_sat)
     assert [x for x in ids(batch.table.cellWidget(0, 8)) if x != "__chon_hop_dong__"] == [open_]
+
+
+def test_contract_tab_adds_out_invoice_and_payment(qtbot, ctx, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from qlhd.ui import invoices_page
+    from qlhd.ui.contracts_page import ContractsPage
+    from qlhd.ui.invoices_page import InvoicesPage
+
+    page = ContractsPage(ctx)
+    qtbot.addWidget(page)
+    page.refresh()
+    hd = next(r for r in page.table.rows if r["ChieuHopDong"] == "Đầu ra")
+    page.select_contract(hd["Ma"])
+    page.detail.setCurrentIndex(1)
+    seen = []
+
+    def fake_save(self, values, ma=None, *a, parent=None, **k):
+        seen.append((dict(values), ma, parent))
+        dlg = invoices_page.FormDialog("x", self._fields(keep=values.get("MaHopDong")), values, parent)
+        dlg.close()
+        v = {"MaHopDong": values["MaHopDong"], "SoHoaDon": "77", "NgayXuatHD": "2026-05-02",
+             "GiaTriTruocThue": 10_000_000, "ThueSuat": "10%"}
+        ctx.cs.save_out_invoice(v, ma)
+        return True
+    monkeypatch.setattr(InvoicesPage, "_save", fake_save)
+    page.add_invoice()
+    assert seen[0][0]["MaHopDong"] == hd["Ma"] and seen[0][2] is page
+    assert page.current_id() == hd["Ma"] and page.detail.currentIndex() == 1       # vẫn đứng ở hợp đồng đó
+    row = next(r for r in page.invoices.rows if r["SoHoaDon"] == "77")
+    assert row["TTThanhToan"] == "Chưa thu" and row["ConPhaiThu"] == 11_000_000
+    # ghi nhận thanh toán ngay tại thẻ Hóa đơn
+    page.invoices.selectRow(page.invoices.rows.index(row))
+    monkeypatch.setattr(invoices_page, "payment_dialog", lambda c, p, ma_hd, v, *a: dict(
+        v, MaHopDong=ma_hd, NgayThanhToan="2026-05-20", SoThamChieuSK="FT777"))
+    page.invoice_payment()
+    row = next(r for r in page.invoices.rows if r["SoHoaDon"] == "77")
+    assert row["TTThanhToan"] == "Đã thu đủ" and "FT777" in row["SoThamChieuSK"]
+    # đã có thanh toán: bấm lại thì mở chi tiết các lần thanh toán
+    page.invoices.selectRow(page.invoices.rows.index(row))
+    opened = []
+    monkeypatch.setattr(invoices_page.InvoicePaymentsDialog, "exec", lambda d: opened.append(1) or QDialog.Rejected)
+    page.invoice_payment()
+    assert opened == [1]
+    # xóa hóa đơn ngay tại thẻ Hóa đơn (hỏi xác nhận), lần thanh toán vẫn giữ ở hợp đồng
+    from qlhd.ui import contracts_page
+    monkeypatch.setattr(contracts_page, "confirm", lambda *a: True)
+    page.invoices.selectRow(page.invoices.rows.index(row))
+    page.delete_invoice()
+    assert not any(r["SoHoaDon"] == "77" for r in page.invoices.rows) and page.current_id() == hd["Ma"]
+    assert any(p["SoThamChieuSK"] == "FT777" for p in page.payments.rows)
+    # xóa công việc
+    ctx.cs.save_task({"MaHopDong": hd["Ma"], "TenNoiDungCV": "Khảo sát", "TinhTrangCV": "Chưa làm"})
+    page._reload_keep()
+    page.tasks.selectRow(next(i for i, t in enumerate(page.tasks.rows) if t["TenNoiDungCV"] == "Khảo sát"))
+    page.delete_task()
+    assert not any(t["TenNoiDungCV"] == "Khảo sát" for t in page.tasks.rows)
+
+
+def test_cross_links_between_screens(qtbot, ctx, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from qlhd.ui import assets_page, contracts_page
+    from qlhd.ui.contracts_page import ContractsPage
+    from qlhd.ui.home_page import HomePage, _ClickFrame
+    from qlhd.ui.invoices_page import InvoicesPage
+    from qlhd.ui.main_window import MainWindow
+    from qlhd.ui.reports_page import row_contract
+
+    hd = ctx.cs.contracts("Đầu ra")[0]
+    # hóa đơn → mở hợp đồng (trong cửa sổ chính chuyển sang trang Hợp đồng đúng hợp đồng đó)
+    monkeypatch.setattr(MainWindow, "_startup_notices", lambda self: None)
+    win = MainWindow(ctx)
+    qtbot.addWidget(win)
+    inv_page = next(p for p in win.pages if isinstance(p, InvoicesPage) and p.kind == "ra")
+    win.go_to("Hóa đơn đầu ra")
+    inv_page.table.selectRow(0)
+    inv_page.go_contract()
+    assert win.top_title.text() == "Hợp đồng" and win.contracts_page.current_id() == hd["Ma"]
+    # Tổng quan: bấm dòng công nợ mở hợp đồng
+    home = HomePage(ctx)
+    qtbot.addWidget(home)
+    home.refresh()
+    got = []
+    home.open_contract.connect(got.append)
+    home.findChildren(_ClickFrame)[0].clicked.emit()
+    assert got == [hd["Ma"]]
+    # báo cáo: dòng hợp đồng / hóa đơn / thanh toán biết hợp đồng của nó, dòng tổng thì không
+    assert row_contract({"Ma": "x", "ChieuHopDong": "Đầu ra", "SoHopDong": "1"}) == "x"
+    assert row_contract({"Ma": "i", "MaHopDong": "y"}) == "y" and row_contract({"_kieu": "tong", "MaHopDong": "y"}) is None
+    # sửa đối tác ngay ở trang Hợp đồng: tên trên hợp đồng đổi theo
+    page = ContractsPage(ctx)
+    qtbot.addWidget(page)
+    page.select_contract(hd["Ma"])
+    monkeypatch.setattr(contracts_page.FormDialog, "exec", lambda d: (
+        d.set_value("TenDoiTac", "Ban QLDA Hà Nội (đổi tên)"), QDialog.Accepted)[1])
+    monkeypatch.setattr(contracts_page, "confirm_changes", lambda *a, **k: True, raising=False)
+    from qlhd.ui import widgets
+    monkeypatch.setattr(widgets, "confirm_changes", lambda *a, **k: True)
+    page.edit_partner()
+    assert ctx.db.get("HopDong", hd["Ma"])["TenDoiTac"] == "Ban QLDA Hà Nội (đổi tên)"
+    assert page.current_id() == hd["Ma"]
+    # sổ tài sản: phân loại lại tài sản sinh từ hóa đơn ngay trong sổ
+    from qlhd.core.assets import AssetService
+    svc = AssetService(ctx.db)
+    line = svc.pending_lines()[0]
+    svc.set_line_class(line["Ma"], "CCDC", "TB02", 24)
+    asset = next(a for a in svc.assets("CCDC") if a["MaDongHD"] == line["Ma"])
+    ap = assets_page.AssetsPage(ctx)
+    qtbot.addWidget(ap)
+    tab = ap.ccdc
+    tab.year.setValue(2026)
+    tab.reload()
+    i = next(i for i, r in enumerate(tab.table.rows) if r.get("Ma") == asset["Ma"])
+    tab.table.selectRow(i)
+    monkeypatch.setattr(assets_page.ClassifyDialog, "exec", lambda d: QDialog.Accepted)
+    from qlhd.core import asset_catalog as dm
+    monkeypatch.setattr(assets_page.ClassifyDialog, "values", lambda d: (dm.CHI_PHI, "CP06", None))
+    monkeypatch.setattr(assets_page, "error", lambda _p, text, *a: (_ for _ in ()).throw(AssertionError(text)))
+    monkeypatch.setattr(assets_page, "confirm_changes", lambda *a, **k: True)
+    tab.reclassify()
+    assert not any(a["MaDongHD"] == line["Ma"] for a in svc.assets("CCDC"))

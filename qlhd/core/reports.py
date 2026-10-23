@@ -60,6 +60,8 @@ class ReportFilters:
     nguoi_mua: list[str] = field(default_factory=list)     # hóa đơn đầu ra theo người mua (khóa người mua)
     gop_ra_vao: bool = False              # False: đầu ra và đầu vào mỗi loại một bảng
     ky_tuong_doi: str | None = None       # tháng này / quý trước…: tự tính từ – đến lúc xuất (mẫu xuất nhanh)
+    tach_nam: bool = True                 # chia báo cáo theo năm ký hợp đồng (mỗi năm một nhóm, có dòng cộng năm)
+    nam: int | None = None                # chỉ lấy hợp đồng ký trong năm này (dùng khi tách theo năm)
 
     @classmethod
     def from_dict(cls, d: dict) -> "ReportFilters":
@@ -168,6 +170,9 @@ class ContractReports:
         if f.den:
             where.append("NgayKy <= ?")
             params.append(f.den)
+        if f.nam:
+            where.append("substr(NgayKy, 1, 4) = ?")
+            params.append(str(f.nam))
         types = {t["Ma"]: t["TenLoaiHD"] for t in self.db.query("SELECT Ma, TenLoaiHD FROM LoaiHopDong")}
         tu, den = self._window(f)
         out = []
@@ -189,14 +194,57 @@ class ContractReports:
             out.append(row)
         return out
 
+    NO_YEAR_SPLIT = ("thoi_gian",)        # ngữ cảnh đã chia theo kỳ thời gian
+
     def build(self, context: str, f: ReportFilters) -> list[Report]:
         """Một ngữ cảnh có thể ra nhiều bảng (mỗi bảng một sheet khi xuất Excel)."""
         f = f.resolved()
+        if f.tach_nam and f.nam is None and context not in self.NO_YEAR_SPLIT:
+            return self._by_year(context, f)
         out = getattr(self, "_ctx_" + context)(f)
         reps = out if isinstance(out, list) else [out]
         for rep in reps:
             rep.subtitle = rep.subtitle or f.describe()
         return reps
+
+    def years(self, f: ReportFilters) -> list[int]:
+        """Các năm có hợp đồng (theo ngày ký) trong phạm vi lọc, và năm của hóa đơn đầu vào mua trực tiếp."""
+        ys = {int(c["NgayKy"][:4]) for c in self.contracts(_with(f, nam=None)) if c["NgayKy"]}
+        ys |= {int(i["NgayNhanHD"][:4]) for i in self._in_invoices(_with(f, nam=None))
+               if not i["MaHopDong"] and i["NgayNhanHD"]}
+        return sorted(ys)
+
+    def _by_year(self, context: str, f: ReportFilters) -> list[Report]:
+        """Tách báo cáo theo năm ký hợp đồng: trong mỗi bảng, từng năm một nhóm (tiêu đề NĂM …, các dòng,
+        dòng Cộng năm), cuối bảng là tổng cộng các năm."""
+        merged: dict[str, Report] = {}
+        totals: dict[str, list[dict]] = {}
+        for y in self.years(f):
+            for rep in self.build(context, _with(f, nam=y)):
+                if not any(not r.get("_kieu") for r in rep.rows):
+                    continue
+                first = rep.columns[0][0]
+                m = merged.setdefault(rep.sheet, Report(rep.title, rep.columns, [], None, rep.subtitle, rep.sheet))
+                m.rows.append({"_kieu": "nhom", "_nhan": f"NĂM {y}"})
+                m.rows += rep.rows
+                if rep.total:
+                    m.rows.append(dict(rep.total, _kieu="cong", **{first: f"Cộng năm {y}"}))
+                    totals.setdefault(rep.sheet, []).append(rep.total)
+        out = []
+        for sheet, m in merged.items():
+            year_totals = totals.get(sheet)
+            if year_totals:
+                first = m.columns[0][0]
+                kinds = {k: kind for k, _, kind in m.columns}
+                keys = {k for t in year_totals for k, v in t.items()
+                        if isinstance(v, (int, float)) and not isinstance(v, bool) and kinds.get(k) != PCT}
+                m.total = {k: sum(t.get(k) or 0 for t in year_totals) for k in keys}
+                m.total[first] = "TỔNG CỘNG"
+            m.subtitle = (m.subtitle + " · " if m.subtitle else "") + "Tách theo năm ký hợp đồng"
+            out.append(m)
+        if not out:                      # không có dữ liệu: vẫn trả bảng rỗng như khi không tách năm
+            return self.build(context, _with(f, tach_nam=False))
+        return out
 
     def _by_direction(self, f, make) -> Report | list[Report]:
         """Đầu ra và đầu vào tách hai bảng, trừ khi người dùng chọn gộp chung hoặc đã lọc một chiều."""
@@ -391,7 +439,11 @@ class ContractReports:
 
     def _in_invoices(self, f) -> list:
         out = []
+        years = {r["Ma"]: (r["NgayKy"] or "")[:4] for r in self.db.query("SELECT Ma, NgayKy FROM HopDong")} \
+            if f.nam else {}
         for inv in self.cs.in_invoices():
+            if f.nam and (years.get(inv["MaHopDong"]) if inv["MaHopDong"] else inv["NgayNhanHD"][:4]) != str(f.nam):
+                continue
             if f.tu and inv["NgayNhanHD"] < f.tu or f.den and inv["NgayNhanHD"] > f.den:
                 continue
             if f.co_hd_lien_ket is True and not inv["MaHopDong"]:
