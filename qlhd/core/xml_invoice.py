@@ -65,7 +65,18 @@ def parse_invoice(source: str | Path | bytes) -> dict:
         raise InvoiceXMLError("Không tìm thấy số hóa đơn (thẻ <SHDon>) trong file.")
     tong_truoc = _money(_text(data, "TToan", "TgTCThue"))
     vat = _money(_text(data, "TToan", "TgTThue"))
-    tong_sau = _money(_text(data, "TToan", "TgTTTBSo")) or tong_truoc + vat
+    # phí ngoài VAT (VD phí bảo vệ môi trường trên hóa đơn nước sạch): <DSLPhi><LPhi><TLPhi>…<TPhi>…
+    phi, ten_phi = 0, []
+    ds_phi = _find(data, "TToan", "DSLPhi")
+    if ds_phi is not None:
+        for lp in ds_phi:
+            if _local(lp.tag) == "LPhi":
+                phi += _money(_text(lp, "TPhi"))
+                if _text(lp, "TLPhi"):
+                    ten_phi.append(_text(lp, "TLPhi"))
+    tong_sau = _money(_text(data, "TToan", "TgTTTBSo")) or tong_truoc + vat + phi
+    if not phi and tong_truoc and tong_sau - tong_truoc - vat > 0:
+        phi = tong_sau - tong_truoc - vat            # tổng thanh toán lớn hơn tiền hàng + thuế: phần chênh là phí
     thue_suat = []
     ts_root = _find(data, "THTTLTSuat")
     if ts_root is not None:
@@ -118,6 +129,8 @@ def parse_invoice(source: str | Path | bytes) -> dict:
         "GiaTriTruocThue": tong_truoc,
         "VAT": vat,
         "GiaTriSauThue": tong_sau,
+        "PhiKhac": phi,
+        "TenPhiKhac": "; ".join(ten_phi),
         "ThueSuat": thue_suat,
         "MatHang": join_items(items),
         "ThueSuatHD": "; ".join(rates),

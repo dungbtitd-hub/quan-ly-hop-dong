@@ -402,45 +402,56 @@ class FormDialog(QDialog):
             return
         from ..core.vat import complete, parse_rate
 
-        def rate() -> str:
-            if "ThueSuat" not in w:
+        def rate(key: str = "ThueSuat") -> str:
+            if key not in w:
                 return ""
             try:
-                return parse_rate(self.values()["ThueSuat"])
+                return parse_rate(self.values()[key])
             except ValueError:
                 return ""
 
+        has_fee = "PhiKhac" in w
         anchor = ["GiaTriTruocThue" if self.values()["GiaTriTruocThue"] or not self.values()[after] else after]
 
         def update(changed: str) -> None:
             v = self.values()
             b, t, a, r = v["GiaTriTruocThue"] or None, v["VAT"] or None, v[after] or None, rate()
+            fa = {}
+            if has_fee:      # phí ngoài VAT: gõ số tiền thì giữ số đó, có tỷ lệ thì tính theo tỷ lệ
+                fr = rate("TyLePhiKhac")
+                fa = {"fee": v["PhiKhac"]} if changed == "PhiKhac" or not fr else {"fee": None, "fee_rate": fr}
             if changed in ("GiaTriTruocThue", after):
                 anchor[0] = changed          # số tiền người dùng gõ sau cùng làm gốc khi đổi thuế suất
             # giữ ô vừa sửa và dữ kiện đi cùng, tính lại các ô phụ thuộc
             if changed == "GiaTriTruocThue":
-                res = complete(b, None, None, r) if r else complete(b, t, None)
-            elif changed == "ThueSuat":
-                if not r:
+                res = complete(b, None, None, r, **fa) if r else complete(b, t, None, **fa)
+            elif changed in ("ThueSuat", "TyLePhiKhac", "PhiKhac"):
+                if changed == "ThueSuat" and not r:
                     return
-                res = complete(None, None, a, r) if anchor[0] == after and a else \
-                    complete(b, None, None, r) if b else complete(None, None, a, r)
+                tt = None if r else t
+                res = complete(None, tt, a, r, **fa) if anchor[0] == after and a else \
+                    complete(b, tt, None, r, **fa) if b else complete(None, tt, a, r, **fa)
             elif changed == "VAT":
-                res = complete(b, t, None) if b else complete(None, t, a)
+                res = complete(b, t, None, **fa) if b else complete(None, t, a, **fa)
             else:
-                res = complete(None, None, a, r) if r else complete(b, None, a) if b else complete(None, t, a)
+                res = complete(None, None, a, r, **fa) if r else complete(b, None, a, **fa) if b else \
+                    complete(None, t, a, **fa)
             if res.error:
                 return
-            for key, val in (("GiaTriTruocThue", res.before), ("VAT", res.vat), (after, res.after)):
+            out = [("GiaTriTruocThue", res.before), ("VAT", res.vat), (after, res.after)]
+            if has_fee:
+                out.append(("PhiKhac", res.fee))
+            for key, val in out:
                 if key != changed:
                     w[key].set_value(val)
 
-        for key in ("GiaTriTruocThue", "VAT", after):
+        for key in ("GiaTriTruocThue", "VAT", after) + (("PhiKhac",) if has_fee else ()):
             w[key].textEdited.connect(lambda _t, k=key: update(k))
-        if "ThueSuat" in w:
-            box = w["ThueSuat"]
-            sig = box.currentTextChanged if isinstance(box, QComboBox) else box.textEdited
-            sig.connect(lambda _t: update("ThueSuat"))
+        for key in ("ThueSuat", "TyLePhiKhac"):
+            if key in w:
+                box = w[key]
+                sig = box.currentTextChanged if isinstance(box, QComboBox) else box.textEdited
+                sig.connect(lambda _t, k=key: update(k))
 
     def set_value(self, key, v) -> None:
         w = self.widgets[key]

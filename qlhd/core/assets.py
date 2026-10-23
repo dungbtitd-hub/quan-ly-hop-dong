@@ -42,6 +42,8 @@ EXTRA_COLS = [("PhanLoai", "Phân loại"), ("NhomDM", "Nhóm danh mục"), ("Ly
               ("HoaDon", "Hóa đơn đầu vào"), ("GhiChu", "Ghi chú")]
 
 
+FEE_NOTE = "Phí ngoài VAT của hóa đơn"
+
 # Nhập sổ từ Excel: tình trạng từng dòng và cách xử lý
 ST_NEW, ST_SAME_CODE, ST_MAYBE, ST_IN_FILE = "Mới", "Đã có (trùng mã)", "Có thể trùng", "Trùng trong file"
 A_ADD, A_UPDATE, A_SKIP = "them", "cap_nhat", "bo_qua"
@@ -226,6 +228,9 @@ class AssetService:
         if inv is None:
             return
         old = self.lines_of(ma_hd)
+        fee_lines = [o for o in old if o["GhiChu"] == FEE_NOTE]
+        old = [o for o in old if o["GhiChu"] != FEE_NOTE]
+        self._sync_fee_line(inv, fee_lines, len(lines or old or [1]) + 1)
         if lines:
             if old and len(old) == len(lines) and all(o["TenHang"] == n["TenHang"] and o["ThanhTien"] == n["ThanhTien"]
                                                        for o, n in zip(old, lines)):
@@ -249,6 +254,26 @@ class AssetService:
                 self.db.update("DongHoaDonDauVao", o["Ma"], vals, commit=False)
                 self._sync_asset(self.db.get("DongHoaDonDauVao", o["Ma"]), inv)
         self.db.conn.commit()
+
+    def _sync_fee_line(self, inv, fee_lines: list, stt: int) -> None:
+        """Phí ngoài VAT của hóa đơn (VD phí bảo vệ môi trường trên hóa đơn nước): một dòng riêng để tính chi phí."""
+        fee = int(inv["PhiKhac"] or 0) if "PhiKhac" in inv.keys() else 0
+        ten = (inv["TenPhiKhac"] or "").strip() or "Phí bảo vệ môi trường"
+        if not fee:
+            for o in fee_lines:
+                self._drop_line(o)
+            return
+        if fee_lines:
+            o = fee_lines[0]
+            for extra in fee_lines[1:]:
+                self._drop_line(extra)
+            if o["ThanhTien"] != fee or o["TenHang"] != ten:
+                vals = {"TenHang": ten, "ThanhTien": fee}
+                if o["TuDong"]:
+                    vals.update(self._auto_class(inv, ten, fee, None, None))
+                self.db.update("DongHoaDonDauVao", o["Ma"], vals, commit=False)
+            return
+        self._add_line(inv, {"STT": stt, "TenHang": ten, "ThanhTien": fee, "ThueSuat": "KCT", "GhiChu": FEE_NOTE})
 
     def backfill(self) -> int:
         """Hóa đơn đầu vào nhập trước khi có module này: tạo dòng gộp để phân loại."""

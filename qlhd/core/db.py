@@ -316,6 +316,9 @@ ADDED_COLUMNS = [
     ("HoaDonDauVao", "NhomThue", "TEXT"),
     ("HoaDonDauVao", "NguoiMuaHang", "TEXT"),
     ("HoaDonDauVao", "SoThamChieuSK", "TEXT"),
+    ("HoaDonDauVao", "PhiKhac", "INTEGER"),            # phí ngoài VAT, VD phí bảo vệ môi trường (nước sạch)
+    ("HoaDonDauVao", "TyLePhiKhac", "TEXT"),           # tỷ lệ phí trên giá trị trước thuế, VD '10%'
+    ("HoaDonDauVao", "TenPhiKhac", "TEXT"),
 ]
 
 

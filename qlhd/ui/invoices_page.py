@@ -62,6 +62,9 @@ def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[di
                     MSTNguoiMua=d["MSTNguoiMua"], TinhChatHD="Gốc"), notes
     if mst_cty and d["MSTNguoiMua"] and d["MSTNguoiMua"] != mst_cty:
         notes.append(f"MST người mua {d['MSTNguoiMua']} khác MST công ty {mst_cty}: hóa đơn có thể không phải của công ty.")
+    if d.get("PhiKhac"):
+        common.update(PhiKhac=d["PhiKhac"], TenPhiKhac=d.get("TenPhiKhac") or "Phí bảo vệ môi trường")
+        notes.append(f"Hóa đơn có {common['TenPhiKhac']} {fmt_money(d['PhiKhac'])} đ ngoài thuế GTGT.")
     return dict(common, SoHoaDonGoc=d["SoHoaDon"], TenNhaCungCap=d["TenNguoiBan"], MaThueNCC=d["MSTNguoiBan"],
                 NgayNhanHD=d["NgayLap"] or None, NhomThue=guess_tax_group(d["VAT"]), _Dong=d.get("Dong") or None), notes
 
@@ -119,7 +122,8 @@ class InvoicesPage(QWidget):
             cols = [("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDonGoc", "Số", "text"), ("NgayNhanHD", "Ngày", "date"),
                     ("TenNhaCungCap", "Tên người bán", "text"), ("MaThueNCC", "MST người bán", "text"),
                     ("MatHang", "Mặt hàng", "text"), ("GiaTriTruocThue", "Trước thuế", "money"),
-                    ("ThueSuat", "Thuế suất", "text"), ("VAT", "VAT", "money"), ("GiaTriSauThue", "Sau thuế", "money"),
+                    ("ThueSuat", "Thuế suất", "text"), ("VAT", "VAT", "money"), ("PhiKhac", "Phí BVMT", "money"),
+                    ("GiaTriSauThue", "Sau thuế", "money"),
                     ("NhomThue", "Nhóm thuế", "text"), ("NguoiMuaHang", "Người mua hàng", "text"),
                     ("SoThamChieuSK", "Số sao kê", "text"), ("SoHopDong", "Số HĐ đầu vào", "text")]
         self.table = DataTable(cols)
@@ -208,6 +212,10 @@ class InvoicesPage(QWidget):
                 {"key": "GiaTriTruocThue", "label": "Trước thuế", "kind": "money"},
                 rate_field(),
                 {"key": "VAT", "label": "VAT", "kind": "money"},
+                {"key": "PhiKhac", "label": "Phí BVMT / phí khác", "kind": "money",
+                 "hint": "Chỉ hóa đơn có phí ngoài VAT (VD nước sạch: phí bảo vệ môi trường). Không có thì để 0."},
+                {"key": "TyLePhiKhac", "label": "Tỷ lệ phí", "kind": "combo_edit", "options": ["10%"],
+                 "hint": "Nhập tỷ lệ thì phí = tỷ lệ × trước thuế."},
                 {"key": "GiaTriSauThue", "label": "Sau thuế", "kind": "money",
                  "hint": VAT_HINT},
                 {"key": "NhomThue", "label": "Nhóm thuế GTGT", "kind": "combo", "options": TAX_GROUP_OPTIONS,

@@ -77,14 +77,52 @@ class VatResult:
     computed: list[str] = field(default_factory=list)   # các ô phần mềm đã tự tính
     notes: list[str] = field(default_factory=list)      # lưu ý (lệch nhỏ, thiếu dữ kiện…)
     error: str = ""                                     # số liệu mâu thuẫn
+    fee: int = 0                                        # phí ngoài VAT (VD phí bảo vệ môi trường nước sạch)
+    fee_rate: str = ""
 
 
 def _money(n: int) -> str:
     return f"{n:,}".replace(",", ".")
 
 
-def complete(before: int | None, vat: int | None, after: int | None, rate: str | None = "") -> VatResult:
-    """None = ô trống. Trả về bộ số đầy đủ và các ô đã tự tính."""
+def complete(before: int | None, vat: int | None, after: int | None, rate: str | None = "",
+             fee: int | None = None, fee_rate: str | None = "") -> VatResult:
+    """None = ô trống. Trả về bộ số đầy đủ và các ô đã tự tính.
+    Hóa đơn có phí ngoài VAT (VD nước sạch: phí bảo vệ môi trường 10% tiền nước): tổng thanh toán = trước thuế
+    + VAT + phí; phí nhập số tiền hoặc tỷ lệ % trên giá trị trước thuế."""
+    fee_rate = fee_rate or ""
+    fr = rate_value(fee_rate)
+    if fee is None and fr is None:
+        return _complete(before, vat, after, rate)
+    r = rate_value(rate or "")
+    auto = []
+    if fee is None:
+        if before is None and after is not None:
+            if vat is not None:
+                before = _round((after - vat) * 100 / (100 + fr))
+            elif r is not None:
+                before = _round(after * 100 / (100 + r + fr))
+                vat = _round(before * r / 100)
+                auto.append("VAT")
+            else:
+                before = _round(after * 100 / (100 + fr))
+                vat = 0
+            auto.insert(0, "Trước thuế")
+        fee = _round((before or 0) * fr / 100)
+        auto.append("Phí")
+    res = _complete(before, vat, None if after is None else after - fee, rate)
+    res.computed = auto + [c for c in res.computed if c not in auto]
+    res.fee, res.fee_rate = fee, fee_rate
+    res.after += fee
+    if res.error and after is not None:
+        res.error = (f"Trước thuế {_money(res.before)} + VAT {_money(res.vat)} + phí {_money(fee)} = "
+                     f"{_money(res.before + res.vat + fee)}, khác tổng thanh toán {_money(after)}.")
+    if fr is not None and "Phí" not in auto and abs(_round(res.before * fr / 100) - fee) > 1:
+        res.notes.append(f"Phí {_money(fee)} khác {fee_rate} × trước thuế = {_money(_round(res.before * fr / 100))}.")
+    return res
+
+
+def _complete(before: int | None, vat: int | None, after: int | None, rate: str | None = "") -> VatResult:
     rate = rate or ""
     r = rate_value(rate)
     res = VatResult(rate=rate)
@@ -145,10 +183,14 @@ def fill(v: dict, after_key: str = "GiaTriSauThue", strict: bool = True) -> VatR
         return int(x) if x not in (None, "", 0) else None
 
     rate = parse_rate(v.get("ThueSuat"))
-    res = complete(amount("GiaTriTruocThue"), amount("VAT"), amount(after_key), rate)
+    fee_rate = parse_rate(v.get("TyLePhiKhac"))
+    res = complete(amount("GiaTriTruocThue"), amount("VAT"), amount(after_key), rate,
+                   amount("PhiKhac") if "PhiKhac" in v else None, fee_rate)
     if res.error and strict:
         raise ValueError(res.error)
     v["GiaTriTruocThue"], v["VAT"], v[after_key] = res.before, res.vat, res.after
     if "ThueSuat" in v or res.rate:
         v["ThueSuat"] = res.rate
+    if "PhiKhac" in v or res.fee:
+        v["PhiKhac"], v["TyLePhiKhac"] = res.fee, res.fee_rate
     return res

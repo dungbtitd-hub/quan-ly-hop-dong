@@ -90,7 +90,8 @@ def parse_text(text: str) -> dict:
     m = _first([r"(?:Tên đơn vị|Đơn vị mua hàng|Tên người mua|Người mua hàng)(?:\s*\([^)]*\))?\s*[:：]\s*(.+)"], t)
     if m:
         out["TenNguoiMua"] = m.group(1).strip()
-    m = _first([r"C[ộo]ng ti[ềe]n h[àa]ng(?:\s*h[óo]a, d[ịi]ch v[ụu])?(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT], flat)
+    m = _first([r"C[ộo]ng ti[ềe]n h[àa]ng(?:\s*h[óo]a, d[ịi]ch v[ụu])?(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT,
+                r"C[ộo]ng ti[ềe]n (?:n[ưu][ớo]c|đi[ệe]n)(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT], flat)
     if m:
         out["GiaTriTruocThue"] = _money(m.group(1))
     m = _first([r"Ti[ềe]n thu[ếe] GTGT(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT,
@@ -100,10 +101,14 @@ def parse_text(text: str) -> dict:
     m = _first([r"T[ổo]ng (?:c[ộo]ng )?ti[ềe]n thanh to[áa]n(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT], flat)
     if m:
         out["GiaTriSauThue"] = _money(m.group(1))
+    m = _first([r"Ph[íi] b[ảa]o v[ệe] m[ôo]i tr[ưu][ờo]ng[^:：]{0,60}[:：]\s*" + AMOUNT], flat)
+    out["PhiKhac"] = _money(m.group(1)) if m else 0
+    if out["PhiKhac"]:
+        out["TenPhiKhac"] = "Phí bảo vệ môi trường"
     if not out["GiaTriSauThue"] and out["GiaTriTruocThue"]:
-        out["GiaTriSauThue"] = out["GiaTriTruocThue"] + out["VAT"]
+        out["GiaTriSauThue"] = out["GiaTriTruocThue"] + out["VAT"] + out["PhiKhac"]
     if not out["GiaTriTruocThue"] and out["GiaTriSauThue"]:
-        out["GiaTriTruocThue"] = out["GiaTriSauThue"] - out["VAT"]
+        out["GiaTriTruocThue"] = out["GiaTriSauThue"] - out["VAT"] - out["PhiKhac"]
     m = _first([r"(?:S[ốo] h[ợo]p đ[ồo]ng|H[ợo]p đ[ồo]ng s[ốo])(?:\s*\([^)]*\))?\s*[:：]\s*([^\s,;]+)"], flat)
     if m:
         out["SoHopDong"] = m.group(1).strip(".")
