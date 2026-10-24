@@ -288,6 +288,7 @@ class DataTable(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setDefaultSectionSize(30)
         self.horizontalHeader().setHighlightSections(False)
+        self.horizontalHeader().setResizeContentsPrecision(300)   # đo độ rộng cột theo 300 dòng đầu: bảng lớn không bị khựng
         self.doubleClicked.connect(lambda _: self.current() and self.activated_row.emit(self.current()))
 
     def set_rows(self, rows, columns=None) -> None:
@@ -301,6 +302,7 @@ class DataTable(QTableWidget):
                     n += 1
                     r["STT"] = n
         self.setSortingEnabled(False)
+        self.setUpdatesEnabled(False)
         self.clear()
         self.verticalHeader().setDefaultSectionSize(int(30 * style.font_scale()))   # theo cỡ chữ đang chọn
         self.setColumnCount(len(self.columns))
@@ -350,6 +352,7 @@ class DataTable(QTableWidget):
         for j, (_, _, kind) in enumerate(self.columns):
             self.setColumnWidth(j, 150 if kind == "pct" else min(max(self.columnWidth(j) + 12, 70), 360))
         hdr.setStretchLastSection(True)
+        self.setUpdatesEnabled(True)
 
     def _row_of(self, item) -> dict | None:
         if item is None:

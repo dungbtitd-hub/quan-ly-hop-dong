@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from .assets import AssetService
-from .contracts import OPEN_STATUSES, ContractService
+from .contracts import OPEN_STATUSES, VALUE_FLAGS, ContractService
 from .db import Database
 from .reports import fmt_date, fmt_money
 
@@ -21,11 +21,16 @@ ALERT_TYPES = {
     "cv_sap_han": ("Công việc sắp đến hạn", "Trong 7 ngày tới"),
     "hd_chua_thu": ("Hóa đơn đầu ra chưa thu đủ", "Còn phải thu, kèm số ngày từ khi xuất"),
     "hd_chua_xuat": ("Hợp đồng chưa xuất đủ hóa đơn", "Đã nghiệm thu / hoàn thành mà còn giá trị chưa xuất"),
+    "hd_lech_gia_tri": ("Giá trị hợp đồng lệch hóa đơn",
+                        "Hóa đơn vượt giá trị HĐ, hoặc thanh toán toàn bộ / lần cuối mà tổng lệch (có thể nhập sai)"),
     "tam_ung": ("Tạm ứng chưa khấu trừ", "Đã nhận tạm ứng, chưa trừ vào hóa đơn nào"),
     "thieu_du_lieu": ("Hợp đồng thiếu dữ liệu", "Thiếu ngày thực hiện, giá trị, loại, MST đối tác…"),
     "hddv_xem_lai": ("Hóa đơn đầu vào cần xem lại", "Chưa phân loại, gợi ý chờ xác nhận, nghi sai, nghi trùng…"),
 }
 DEFAULT_TYPES = tuple(ALERT_TYPES)
+# ngữ cảnh đã có khi người dùng lưu lựa chọn ở bản cũ: ngữ cảnh mới thêm sau đó mặc định được bật
+_TYPES_BEFORE_1_0_18 = ("hd_het_han", "cv_qua_han", "cv_sap_han", "hd_chua_thu", "hd_chua_xuat", "tam_ung",
+                        "thieu_du_lieu", "hddv_xem_lai")
 DUE_SOON_DAYS = 7
 TONE_ORDER = {"danger": 0, "warn": 1, "accent": 2}
 
@@ -58,9 +63,20 @@ def missing_fields(hd) -> list[str]:
     return out
 
 
+_CACHE: dict = {}
+
+
 def collect(db: Database, today: str | None = None, types=None) -> list[Alert]:
+    """Các việc cần nhắc. Dữ liệu chưa đổi (cùng ngày, cùng ngữ cảnh) thì dùng lại kết quả lần trước."""
     today = today or date.today().isoformat()
     types = set(types or DEFAULT_TYPES)
+    key = (db.cache_key(), today, frozenset(types))
+    if _CACHE.get("key") != key:
+        _CACHE.update(key=key, items=_collect(db, today, types))
+    return list(_CACHE["items"])
+
+
+def _collect(db: Database, today: str, types: set) -> list[Alert]:
     cs, t = ContractService(db), date.fromisoformat(today)
     out: list[Alert] = []
     if "hd_het_han" in types:
@@ -99,7 +115,7 @@ def collect(db: Database, today: str | None = None, types=None) -> list[Alert]:
                              f"{r['TenDoiTac']} · xuất {fmt_date(r['NgayXuatHD'])} · "
                              + ("chưa thu" if not r["Da"] else f"đã thu {fmt_money(r['Da'])} đ"),
                              f"{fmt_money(left)} đ · {age} ngày", r["MaHopDong"], left, thu_tu=-age))
-    if types & {"hd_chua_xuat", "tam_ung", "thieu_du_lieu"}:
+    if types & {"hd_chua_xuat", "tam_ung", "thieu_du_lieu", "hd_lech_gia_tri"}:
         for hd in db.active("HopDong", "TinhTrangHopDong != 'Hủy'", order="NgayKy"):
             if "thieu_du_lieu" in types and hd["TinhTrangHopDong"] in OPEN_STATUSES:
                 miss = missing_fields(hd)
@@ -107,9 +123,18 @@ def collect(db: Database, today: str | None = None, types=None) -> list[Alert]:
                     out.append(Alert("thieu_du_lieu", "warn", f"Hợp đồng {hd['SoHopDong']} – {hd['TenHopDong']}",
                                      "Thiếu " + ", ".join(miss), f"Thiếu {len(miss)} mục", hd["Ma"],
                                      thu_tu=-len(miss)))
-            if hd["ChieuHopDong"] != "Đầu ra" or not types & {"hd_chua_xuat", "tam_ung"}:
+            if not types & {"hd_chua_xuat", "tam_ung", "hd_lech_gia_tri"}:
                 continue
             s = cs.summary(hd["Ma"])
+            # "chua_ro_dot" (nhiều hóa đơn chưa ghi đợt) có thể chỉ là chưa xuất hết: chỉ tô màu ở trang Hợp đồng
+            if "hd_lech_gia_tri" in types and s["LechGiaTri"] in ("vuot", "toan_bo"):
+                out.append(Alert("hd_lech_gia_tri", "danger" if s["LechGiaTri"] == "vuot" else "warn",
+                                 f"Hợp đồng {hd['SoHopDong']} – {hd['TenHopDong']}",
+                                 f"{VALUE_FLAGS[s['LechGiaTri']]}: HĐ {fmt_money(s['GiaTriHD'])} đ, hóa đơn "
+                                 f"{fmt_money(s['DaXuatHD'])} đ", f"Lệch {fmt_money(abs(s['DaXuatHD'] - s['GiaTriHD']))} đ",
+                                 hd["Ma"], abs(s["DaXuatHD"] - s["GiaTriHD"])))
+            if hd["ChieuHopDong"] != "Đầu ra":
+                continue
             if "tam_ung" in types and s["TamUngConLai"] > 0:
                 out.append(Alert("tam_ung", "accent", f"Hợp đồng {hd['SoHopDong']} – {hd['TenHopDong']}",
                                  f"{hd['TenDoiTac']} · tạm ứng chưa khấu trừ vào hóa đơn",
@@ -276,15 +301,24 @@ class AlertSettings:
         if raw is None:
             return list(default)
         try:
-            return [x for x in json.loads(raw) if x in ALERT_TYPES]
+            chosen = [x for x in json.loads(raw) if x in ALERT_TYPES]
         except ValueError:
             return list(default)
+        try:
+            known = json.loads(self.db.setting(key + "#biet") or "null") or _TYPES_BEFORE_1_0_18
+        except ValueError:
+            known = _TYPES_BEFORE_1_0_18
+        return chosen + [t for t in ALERT_TYPES if t not in known and t not in chosen]
+
+    def _save_list(self, key: str, types) -> None:
+        self.db.set_setting(key, json.dumps([t for t in types if t in ALERT_TYPES]))
+        self.db.set_setting(key + "#biet", json.dumps(list(ALERT_TYPES)))
 
     def app_types(self, user: str) -> list[str]:
         return self._list(f"thong_bao_loai:{user}", DEFAULT_TYPES)
 
     def set_app_types(self, user: str, types) -> None:
-        self.db.set_setting(f"thong_bao_loai:{user}", json.dumps([t for t in types if t in ALERT_TYPES]))
+        self._save_list(f"thong_bao_loai:{user}", types)
 
     def telegram(self) -> dict:
         return {"token": self.db.setting("tg_token") or "", "chat": self.db.setting("tg_chat") or "",
@@ -295,9 +329,9 @@ class AlertSettings:
     def set_telegram(self, v: dict) -> None:
         for key, val in (("tg_token", v.get("token", "").strip() or None), ("tg_chat", v.get("chat", "").strip() or None),
                          ("tg_bat", "1" if v.get("bat") else "0"), ("tg_gio", v.get("gio") or "08:00"),
-                         ("tg_khi_mo", "1" if v.get("khi_mo") else "0"),
-                         ("tg_loai", json.dumps([t for t in v.get("loai", []) if t in ALERT_TYPES]))):
+                         ("tg_khi_mo", "1" if v.get("khi_mo") else "0")):
             self.db.set_setting(key, val)
+        self._save_list("tg_loai", v.get("loai", []))
 
     def due(self, now: str, opening: bool = False) -> bool:
         """Đến giờ gửi bản tin hằng ngày chưa (mỗi ngày một lần)? now: 'YYYY-MM-DD HH:MM'."""

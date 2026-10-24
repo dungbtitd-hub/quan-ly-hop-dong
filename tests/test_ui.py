@@ -861,6 +861,17 @@ def test_report_filters_follow_context(qtbot, ctx):
     assert not rp.tu.isEnabled()                             # kỳ tương đối vẫn khóa ô ngày
     rp.context.set_value("hop_dong")
     assert not rp.tu.isEnabled() and rp.ky_td.isEnabled() and not rp.ky.isEnabled()
+    # thanh toán đứng sau xuất hóa đơn: chưa xuất hóa đơn thì không lọc thanh toán
+    rp.tt_tt.set_value("Chưa thu")
+    assert rp.tt_tt.isEnabled() and rp.filters().tt_thanh_toan == "Chưa thu"
+    rp.tt_xuat.set_value("Chưa xuất")
+    assert not rp.tt_tt.isEnabled() and rp.filters().tt_thanh_toan is None
+    rp.tt_xuat.set_value(None)
+    rp.chieu.set_value("Đầu vào")
+    assert not rp.tt_tt.isEnabled()
+    rp.chieu.set_value(None)
+    rp.context.set_value("hoa_don_vao")
+    assert [rp.tt_tt.itemData(i) for i in range(rp.tt_tt.count())] == [None, "Chưa thu", "Đã thu đủ"]
 
 
 def test_classify_dialog_lists_every_group_and_switches_class(qtbot):

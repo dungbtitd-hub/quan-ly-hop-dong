@@ -207,3 +207,58 @@ def test_reports_aggregate_or_drill_down_to_contracts_and_invoices(company, tmp_
     unpaid_in = cr.build("hoa_don_vao", ReportFilters(tach_nam=False, tt_thanh_toan="Chưa thu", nhom_ky_hd="nam"))[0]
     assert sum(1 for r in unpaid_in.rows if not r.get("_kieu")) == 2           # đầu vào chưa có sao kê
     export_xlsx([ct, sau, q, g], tmp_path / "x.xlsx")
+
+
+def test_contract_value_mismatch_flag_and_fix(company):
+    from qlhd.core import alerts as al
+    from qlhd.core.contracts import value_filter_ok
+    d = sample_data(company["kt"].db)
+    cs, hd = d["cs"], d["hd"]
+    # một hóa đơn chưa ghi đợt = thanh toán toàn bộ: 55 triệu lệch giá trị HĐ 110 triệu
+    assert cs.summary(hd)["LechGiaTri"] == "toan_bo"
+    assert value_filter_ok("toan_bo", "lech") and not value_filter_ok("toan_bo", "khop")
+    assert [a.loai for a in al.collect(cs.db, "2026-05-01", ["hd_lech_gia_tri"])] == ["hd_lech_gia_tri"]
+    # ghi là đợt 1: không còn lệch
+    inv = dict(cs.db.get("HoaDonDauRa", d["inv"]))
+    cs.save_out_invoice(dict(inv, DotThanhToan="Lần 1"), d["inv"])
+    assert cs.summary(hd)["LechGiaTri"] is None
+    assert al.collect(cs.db, "2026-05-01", ["hd_lech_gia_tri"]) == []
+    # lần cuối mà tổng chưa bằng giá trị HĐ: lệch
+    cs.save_out_invoice({"KyHieuHD": "C26TAA", "SoHoaDon": "13", "MaHopDong": hd, "NgayXuatHD": "2026-04-01",
+                         "GiaTriTruocThue": 40_000_000, "VAT": 4_000_000, "DotThanhToan": "Lần cuối"})
+    assert cs.summary(hd)["LechGiaTri"] == "toan_bo"
+    # sửa nhanh: lấy giá trị HĐ theo tổng hóa đơn
+    new = cs.value_from_invoices(hd)
+    assert new == {"GiaTriTruocThue": 90_000_000, "VAT": 9_000_000, "GiaTriTongSauThue": 99_000_000}
+    cs.save_contract(dict(cs.db.get("HopDong", hd), **new), hd)
+    assert cs.summary(hd)["LechGiaTri"] is None
+    # hóa đơn vượt giá trị HĐ
+    cs.save_out_invoice({"KyHieuHD": "C26TAA", "SoHoaDon": "14", "MaHopDong": hd, "NgayXuatHD": "2026-04-02",
+                         "GiaTriTruocThue": 1_000_000, "VAT": 100_000, "DotThanhToan": "Lần 3"})
+    assert cs.summary(hd)["LechGiaTri"] == "vuot"
+
+
+def test_new_alert_type_is_on_for_old_saved_choices(company):
+    from qlhd.core import alerts as al
+    db = company["kt"].db
+    db.set_setting("thong_bao_loai:kt", '["hd_het_han"]')       # lựa chọn lưu ở bản cũ
+    st = al.AlertSettings(db)
+    assert st.app_types("kt") == ["hd_het_han", "hd_lech_gia_tri"]
+    st.set_app_types("kt", ["hd_het_han"])                       # bỏ chọn ở bản mới thì giữ nguyên
+    assert st.app_types("kt") == ["hd_het_han"]
+
+
+def test_report_payment_filter_skips_contracts_without_invoices(company):
+    db = company["kt"].db
+    d = sample_data(db)
+    cs = d["cs"]
+    cs.save_contract({"ThoiGianThucHien": 3, "SoHopDong": "09/2026", "TenHopDong": "Chưa xuất hóa đơn",
+                      "ChieuHopDong": "Đầu ra", "MaDoiTac": d["cdt"], "GiaTriTruocThue": 5_000_000,
+                      "NgayKy": "2026-02-01"})
+    cr = ContractReports(db)
+    nos = lambda **k: {c["SoHopDong"] for c in cr.contracts(ReportFilters(tach_nam=False, **k))}  # noqa: E731
+    assert "09/2026" in nos(tt_xuat_hd="Chưa xuất")
+    assert "09/2026" not in nos(tt_thanh_toan="Chưa thu")           # chưa có hóa đơn: không có tình trạng thu
+    assert "05/2026/MB" not in nos(tt_thanh_toan="Chưa thu")        # hợp đồng đầu vào không có tiền thu về
+    assert nos(tt_thanh_toan="Thu một phần") == {"01/2026/HĐTV"}
+    assert "09/2026" in nos(tt_xuat_hd="Chưa xuất", tt_thanh_toan="Đã thu đủ")   # chưa xuất: bỏ qua lọc thu

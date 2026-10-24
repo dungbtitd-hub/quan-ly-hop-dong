@@ -112,11 +112,18 @@ class Report:
     sheet: str = "Báo cáo"
 
 
+# lọc thanh toán của hóa đơn đầu vào (đã trả = có số sao kê); "Thu một phần" không áp dụng
+IN_PAID = {"Đã thu đủ": True, "Chưa thu": False, "Còn phải thu": False}
+
+
 def fmt_date(s: str | None) -> str:
     if not s:
         return ""
+    d = s[:10]
+    if len(d) == 10 and d[4] == d[7] == "-" and d[:4].isdigit() and d[5:7].isdigit() and d[8:].isdigit():
+        return f"{d[8:]}/{d[5:7]}/{d[:4]}"
     try:
-        return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        return datetime.strptime(d, "%Y-%m-%d").strftime("%d/%m/%Y")
     except ValueError:
         return s
 
@@ -195,14 +202,18 @@ class ContractReports:
             row = dict(hd)
             row.update(s)
             row["LoaiHD"] = types.get(hd["MaLoaiHD"], "(Chưa phân loại)")
-            if f.tt_thanh_toan:
+            if f.tt_xuat_hd and s["TinhTrangXuatHD"] != f.tt_xuat_hd:
+                continue
+            # tình trạng thanh toán chỉ có nghĩa với hợp đồng đã xuất hóa đơn: chưa có hóa đơn thì không tính
+            # (tránh lẫn hợp đồng chưa xuất hóa đơn vào "Chưa thu", hay tạm ứng vào "Đã thu đủ")
+            if f.tt_thanh_toan and f.tt_xuat_hd != "Chưa xuất":
+                if s["DaXuatHD"] <= 0 or hd["ChieuHopDong"] != "Đầu ra":     # tiền thu về chỉ có ở HĐ đầu ra
+                    continue
                 if f.tt_thanh_toan == "Còn phải thu":
                     if s["ConPhaiThu"] <= 0:
                         continue
                 elif s["TinhTrangThanhToan"] != f.tt_thanh_toan:
                     continue
-            if f.tt_xuat_hd and s["TinhTrangXuatHD"] != f.tt_xuat_hd:
-                continue
             out.append(row)
         return out
 
@@ -561,8 +572,10 @@ class ContractReports:
                 continue
             if f.co_hd_lien_ket is False and inv["MaHopDong"]:
                 continue
-            if f.tt_thanh_toan and bool(inv["SoThamChieuSK"]) != (f.tt_thanh_toan == "Đã thu đủ"):
-                continue          # đầu vào: có số sao kê = đã thanh toán
+            if f.tt_thanh_toan:          # đầu vào: có số sao kê = đã thanh toán; không có "một phần"
+                want = IN_PAID.get(f.tt_thanh_toan)
+                if want is None or bool((inv["SoThamChieuSK"] or "").strip()) != want:
+                    continue
             out.append(inv)
         return out
 

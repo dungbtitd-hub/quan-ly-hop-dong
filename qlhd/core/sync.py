@@ -55,6 +55,20 @@ FOREIGN_KEYS = {
     "TaiSan": {"MaDongHD": "DongHoaDonDauVao"},
 }
 
+# Cài đặt chỉ thuộc máy này, không gửi kèm gói: tên máy, bản sao lưu hoàn tác, khóa / mốc chống chỉnh giờ,
+# lệnh xóa, Telegram (mã bot riêng từng máy, tránh nhiều máy cùng gửi bản tin), trạng thái bộ lọc đang chọn,
+# nhắc việc đã hiện hôm nay, đếm đăng nhập sai thu chi.
+LOCAL_SETTINGS = {"ten_may", "dong_bo_hoan_tac", "dong_bo_hoan_tac_tc", "ngay_lon_nhat", "khoa_cong_ty_tam",
+                  "lenh_xoa_cho_gui", "lenh_xoa_da_dung", "dang_nhap_cuoi", "ra_soat_phan_loai_phien_ban"}
+LOCAL_SETTING_PREFIXES = ("tg_", "tc_sai:", "bo_loc:", "nhac_hd_ngay:", "nhac_phan_loai_ngay:")
+
+
+def shared_setting(key: str) -> bool:
+    """Cài đặt phần mềm dùng chung (đồng bộ sang máy khác): nhắc hạn, mẫu báo cáo, ngữ cảnh thông báo, Tổng quan,
+    giao diện, cỡ chữ…"""
+    return key not in LOCAL_SETTINGS and not key.startswith(LOCAL_SETTING_PREFIXES)
+
+
 TABLE_LABELS = {
     "LoaiHopDong": "Loại hợp đồng", "DoiTac": "Đối tác", "NhomDoiTac": "Nhóm đối tác",
     "NhomDoiTacThanhVien": "Thành viên nhóm", "HopDong": "Hợp đồng", "CongViec": "Công việc",
@@ -322,7 +336,9 @@ class SyncService:
         mst, cty = self._company()
         tables = self.collect(scope, partner=partner, contract_ids=contract_ids,
                               in_invoice_from=in_invoice_from, in_invoice_to=in_invoice_to)
-        body: dict = {"tables": tables}
+        body: dict = {"tables": tables,
+                      "settings": [dict(r) for r in self.db.query("SELECT Khoa, GiaTri, NgaySua FROM CaiDat")
+                                   if shared_setting(r["Khoa"])]}
         if self.accounts is not None:
             tok = self.accounts.signed_revocations()
             if tok:
@@ -347,6 +363,8 @@ class SyncService:
         scope_text = {"all": "Toàn bộ dữ liệu", "changes": "Các thay đổi từ lần gửi trước",
                       "contracts": f"{len(contract_ids or [])} hợp đồng được chọn"}[scope]
         counts = {t: len(v) for t, v in tables.items() if v}
+        if body["settings"]:
+            counts["CaiDat"] = len(body["settings"])
         salt = os.urandom(16)
         header = {"phien_ban": 1, "loai": loai, "may_gui": self.db.machine_id, "ten_may": self.machine_name(),
                   "nguoi_xuat": user["HoTen"], "thoi_diem": now_iso(), "pham_vi": scope_text,
@@ -361,7 +379,7 @@ class SyncService:
             " VALUES (?, ?, 'Gửi', ?, ?, ?, ?, ?)",
             (partner or "", partner_name or "(chưa chọn máy nhận)", header["thoi_diem"], header["thoi_diem"],
              scope_text + (" + Thu chi (Gói Giám đốc)" if loai == "giam_doc" else ""),
-             ", ".join(f"{TABLE_LABELS[t]}: {n}" for t, n in counts.items()), user["TenDangNhap"]))
+             ", ".join(f"{TABLE_LABELS.get(t, 'Cài đặt')}: {n}" for t, n in counts.items()), user["TenDangNhap"]))
         self.db.log(user["TenDangNhap"], "Xuất gói đồng bộ" + (" Giám đốc" if loai == "giam_doc" else ""), str(path))
         return header
 
@@ -537,7 +555,8 @@ class SyncService:
 
     def apply(self, pkg: Package, *, user, decisions: dict | None = None, prefer: str | None = None,
               only_groups: set | None = None) -> dict:
-        """decisions: {(bảng, mã bên gửi): hành động}. only_groups: chỉ đồng bộ các hợp đồng đã chọn."""
+        """decisions: {(bảng, mã bên gửi): hành động}. only_groups: chỉ đồng bộ các hợp đồng đã chọn.
+        Đồng bộ tất cả (only_groups None) nhận cả cài đặt phần mềm dùng chung trong gói."""
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup = self.backup_dir() / f"QuanLyHopDong-truoc-dong-bo-{stamp}.db"
         self.db.backup_to(backup)
@@ -578,8 +597,11 @@ class SyncService:
                 result["loi"] += 1
                 result["loi_chi_tiet"].append(f"{it.label}: {e}")
 
+        result["cai_dat"] = 0
         try:
             self._classify(pkg, id_map, decisions, prefer, apply_item)
+            if only_groups is None:
+                result["cai_dat"] = self._apply_settings(pkg.body.get("settings") or [])
             if lines:                           # dòng gộp nhận phân loại tay: cập nhật sổ TSCĐ, CCDC theo
                 from .assets import AssetService
                 svc = AssetService(self.db)
@@ -607,7 +629,8 @@ class SyncService:
         h = pkg.header
         summary = (f"Thêm {result['them']}, cập nhật {result['cap_nhat']}, gộp {result['gop']} "
                    f"(bổ sung thông tin {result['bo_sung']}), "
-                   f"bỏ qua {result['bo_qua']}, chưa xử lý {result['chua_xu_ly']}, lỗi {result['loi']}")
+                   f"bỏ qua {result['bo_qua']}, chưa xử lý {result['chua_xu_ly']}, lỗi {result['loi']}"
+                   + (f", cài đặt {result['cai_dat']}" if result["cai_dat"] else ""))
         self.db.conn.execute(
             "INSERT INTO LichSuDongBo (MaMayDoiTac, TenMayDoiTac, Chieu, ThoiDiem, MocDuLieu, PhamVi, KetQua, TenDangNhap)"
             " VALUES (?, ?, 'Nhận', ?, ?, ?, ?, ?)",
@@ -618,6 +641,24 @@ class SyncService:
         result["sao_luu"] = str(backup)
         result["tom_tat"] = summary
         return result
+
+    def _apply_settings(self, rows: list[dict]) -> int:
+        """Cài đặt sửa sau (theo giờ sửa) được giữ, kể cả cài đặt đã xóa; không rõ giờ sửa thì giữ của máy này."""
+        n = 0
+        for r in rows:
+            key = r.get("Khoa")
+            if not key or not shared_setting(key):
+                continue
+            local = self.db.one("SELECT GiaTri, NgaySua FROM CaiDat WHERE Khoa = ?", (key,))
+            theirs = r.get("NgaySua") or ""
+            if local is not None and (theirs <= (local["NgaySua"] or "") or local["GiaTri"] == r.get("GiaTri")):
+                continue
+            if local is None and r.get("GiaTri") is None:
+                continue
+            self.db.conn.execute("INSERT OR REPLACE INTO CaiDat (Khoa, GiaTri, NgaySua) VALUES (?, ?, ?)",
+                                 (key, r.get("GiaTri"), theirs or None))
+            n += 1
+        return n
 
     def wipe_order_for_me(self, pkg) -> str | None:
         """Lệnh xóa sạch hợp lệ dành cho máy này trong gói (nếu có)."""

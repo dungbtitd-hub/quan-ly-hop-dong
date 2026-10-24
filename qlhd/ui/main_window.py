@@ -187,7 +187,8 @@ class MainWindow(QMainWindow):
         self.startup_timer.timeout.connect(self._startup_notices)
         self.startup_timer.start(500)
         self.last_activity = time.monotonic()
-        QApplication.instance().installEventFilter(_ActivityFilter(self))
+        self.activity_filter = _ActivityFilter(self)
+        QApplication.instance().installEventFilter(self.activity_filter)
         self.idle_timer = QTimer(self)
         self.idle_timer.timeout.connect(self._check_idle)
         self.idle_timer.start(15_000)
@@ -600,6 +601,7 @@ class MainWindow(QMainWindow):
         self.startup_timer.stop()
         self.idle_timer.stop()
         self.tg_timer.stop()
+        QApplication.instance().removeEventFilter(self.activity_filter)   # đăng xuất / đăng nhập lại không cộng dồn
         if self.finance_page and not self.ctx.wiped:
             self.finance_page.lock()
         self.ctx.lock_finance()

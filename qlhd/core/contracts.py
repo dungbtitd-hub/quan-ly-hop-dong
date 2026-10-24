@@ -52,6 +52,42 @@ def invoice_filter_ok(s: dict, f: str | None) -> bool:
             or f == "con_xuat" and con > 0)
 
 
+# Đợt thanh toán ghi trên hóa đơn đầu ra (để đối chiếu với giá trị hợp đồng)
+INSTALLMENTS = ([("(Chưa ghi)", None), ("Toàn bộ hợp đồng (thanh toán một lần)", "Toàn bộ")]
+                + [(f"Lần {i}", f"Lần {i}") for i in range(1, 11)] + [("Lần cuối / quyết toán", "Lần cuối")])
+FULL_INSTALLMENTS = ("Toàn bộ", "Lần cuối")
+VALUE_TOLERANCE = 10          # đồng: chênh lệch do làm tròn VAT không tính là lệch
+VALUE_FLAGS = {
+    "vuot": "Tổng hóa đơn vượt giá trị hợp đồng",
+    "toan_bo": "Hóa đơn thanh toán toàn bộ / lần cuối nhưng tổng hóa đơn lệch giá trị hợp đồng",
+    "chua_ro_dot": "Tổng hóa đơn chưa bằng giá trị hợp đồng, các hóa đơn chưa ghi đợt thanh toán",
+}
+VALUE_FILTERS = (("Lệch giá trị hóa đơn (mọi trường hợp)", "lech"), ("Hóa đơn vượt giá trị HĐ", "vuot"),
+                 ("Thanh toán toàn bộ / lần cuối nhưng lệch", "toan_bo"),
+                 ("Chưa ghi đợt thanh toán, tổng lệch", "chua_ro_dot"), ("Khớp hoặc chưa đủ dữ kiện", "khop"))
+
+
+def value_flag(direction: str, value: int, invoiced: int, installments: list) -> str | None:
+    """Giá trị hợp đồng có thể đã nhập sai: so với tổng hóa đơn và đợt thanh toán ghi trên hóa đơn.
+    installments: đợt của từng hóa đơn (không tính hóa đơn đã hủy). Một hóa đơn duy nhất chưa ghi đợt được coi
+    là thanh toán toàn bộ. Trả về mã trong VALUE_FLAGS hoặc None."""
+    if invoiced <= 0 or abs(invoiced - (value or 0)) <= VALUE_TOLERANCE:
+        return None
+    if invoiced > (value or 0):
+        return "vuot"
+    if direction != "Đầu ra":
+        return None
+    if any(d in FULL_INSTALLMENTS for d in installments) or installments == [None] or installments == [""]:
+        return "toan_bo"
+    if installments and not any(installments):
+        return "chua_ro_dot"
+    return None
+
+
+def value_filter_ok(flag: str | None, f: str | None) -> bool:
+    return not f or f == "lech" and bool(flag) or f == "khop" and not flag or flag == f
+
+
 PAY_STATE_LABELS = {"du": "Đã thanh toán đủ", "mot_phan": "Thanh toán một phần", "chua": "Chưa thanh toán"}
 
 
@@ -125,9 +161,21 @@ def _fill_vat(v: dict, after_key: str) -> None:
 VAT_TABLES = (("HopDong", "GiaTriTongSauThue"), ("HoaDonDauRa", "GiaTriSauThue"), ("HoaDonDauVao", "GiaTriSauThue"))
 
 
+_BACKFILL_SEEN: dict = {}
+
+
 def backfill_vat(db) -> int:
-    """Dữ liệu nhập ở bản cũ đã đủ dữ kiện mà chưa tính (VD có thuế suất nhưng VAT = 0, sau thuế = trước thuế,
+    """Bỏ qua khi dữ liệu không đổi kể từ lần chạy trước (gọi ở mỗi lần chuyển trang).
+    Dữ liệu nhập ở bản cũ đã đủ dữ kiện mà chưa tính (VD có thuế suất nhưng VAT = 0, sau thuế = trước thuế,
     hoặc thiếu sau thuế): tính bổ sung. Trả về số bản ghi đã cập nhật."""
+    if _BACKFILL_SEEN.get("key") == db.cache_key():
+        return 0
+    n = _backfill_vat(db)
+    _BACKFILL_SEEN["key"] = db.cache_key()
+    return n
+
+
+def _backfill_vat(db) -> int:
     n = 0
     for table, after_key in VAT_TABLES:
         cols = db.columns(table)
@@ -378,7 +426,25 @@ class ContractService:
             "LanThuGanNhat": paid["d"] or "",
             "TinhTrangThanhToan": payment_status(invoiced, paid["s"]),
             "TinhTrangXuatHD": invoicing_status(value, invoiced),
+            "LechGiaTri": value_flag(hd["ChieuHopDong"], value, invoiced, self._installments(hd, cond_i, pi)),
         }
+
+    def _installments(self, hd, cond_i: str, params) -> list:
+        if hd["ChieuHopDong"] != "Đầu ra":
+            return []
+        return [r["DotThanhToan"] for r in self.db.query(
+            "SELECT DotThanhToan FROM HoaDonDauRa WHERE DaXoa = 0 AND MaHopDong = ? AND TinhChatHD != 'Đã hủy'"
+            + cond_i, params)]
+
+    def value_from_invoices(self, ma: str) -> dict:
+        """Giá trị hợp đồng tính lại theo tổng các hóa đơn (để sửa nhanh hợp đồng nhập sai giá trị)."""
+        hd = self.db.get("HopDong", ma)
+        table, after = (("HoaDonDauRa", "GiaTriSauThue") if hd["ChieuHopDong"] == "Đầu ra"
+                        else ("HoaDonDauVao", "GiaTriSauThue"))
+        extra = " AND TinhChatHD != 'Đã hủy'" if table == "HoaDonDauRa" else ""
+        r = self.db.one(f"SELECT COALESCE(SUM(GiaTriTruocThue), 0) b, COALESCE(SUM(VAT), 0) t,"
+                        f" COALESCE(SUM({after}), 0) a FROM {table} WHERE DaXoa = 0 AND MaHopDong = ?" + extra, (ma,))
+        return {"GiaTriTruocThue": r["b"], "VAT": r["t"], "GiaTriTongSauThue": r["a"]}
 
     # ---- công việc
     def tasks(self, ma_hd: str) -> list[sqlite3.Row]:

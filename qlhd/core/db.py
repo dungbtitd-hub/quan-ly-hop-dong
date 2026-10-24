@@ -318,6 +318,7 @@ ADDED_COLUMNS = [
     ("HopDong", "HoSoDaLay", "TEXT"),                  # hồ sơ, tài liệu đã lấy về từ đối tác
     ("HoaDonDauRa", "MatHang", "TEXT"),
     ("HoaDonDauRa", "ThueSuat", "TEXT"),
+    ("HoaDonDauRa", "DotThanhToan", "TEXT"),           # đợt: Toàn bộ / Lần 1, 2… / Lần cuối (trống = chưa ghi)
     ("HoaDonDauVao", "MatHang", "TEXT"),
     ("HoaDonDauVao", "ThueSuat", "TEXT"),
     ("HoaDonDauVao", "NhomThue", "TEXT"),
@@ -326,7 +327,8 @@ ADDED_COLUMNS = [
     ("HoaDonDauVao", "PhiKhac", "INTEGER"),            # phí ngoài VAT, VD phí bảo vệ môi trường (nước sạch)
     ("HoaDonDauVao", "TyLePhiKhac", "TEXT"),           # tỷ lệ phí trên giá trị trước thuế, VD '10%'
     ("HoaDonDauVao", "TenPhiKhac", "TEXT"),
-    ("TaiSan", "XoaKhoiSoNam", "INTEGER"),             # đã hết khấu hao, xóa khỏi sổ từ năm này (năm trước vẫn hiện)
+    ("TaiSan", "XoaKhoiSoNam", "INTEGER"),
+    ("CaiDat", "NgaySua", "TEXT"),                     # giờ sửa (UTC): khi đồng bộ, cài đặt sửa sau được giữ             # đã hết khấu hao, xóa khỏi sổ từ năm này (năm trước vẫn hiện)
 ]
 
 
@@ -433,6 +435,7 @@ class Database(Store):
 
     def __init__(self, path: str | Path, machine_id: str = "local"):
         self.path = str(path)
+        self._restores = 0
         conn = sqlite3.connect(self.path)
         super().__init__(conn, machine_id)
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -455,19 +458,22 @@ class Database(Store):
         source = sqlite3.connect(str(src))
         source.backup(self.conn)
         source.close()
+        self._restores += 1
         self._upgrade()
         self.conn.commit()
+
+    def cache_key(self) -> tuple:
+        """Đổi mỗi khi dữ liệu đổi: dùng làm khóa bộ nhớ đệm cho các phép tính nặng."""
+        return (id(self.conn), self.path, self._restores, self.conn.total_changes)
 
     # ---- cài đặt & nhật ký
     def setting(self, key: str, default: str | None = None) -> str | None:
         r = self.one("SELECT GiaTri FROM CaiDat WHERE Khoa = ?", (key,))
-        return r["GiaTri"] if r else default
+        return r["GiaTri"] if r and r["GiaTri"] is not None else default
 
     def set_setting(self, key: str, value: str | None) -> None:
-        if value is None:
-            self.execute("DELETE FROM CaiDat WHERE Khoa = ?", (key,))
-        else:
-            self.execute("INSERT OR REPLACE INTO CaiDat (Khoa, GiaTri) VALUES (?, ?)", (key, value))
+        """value None = xóa cài đặt: giữ dòng trống kèm giờ sửa để lần đồng bộ sau máy khác cũng xóa theo."""
+        self.execute("INSERT OR REPLACE INTO CaiDat (Khoa, GiaTri, NgaySua) VALUES (?, ?, ?)", (key, value, now_iso()))
 
     def log(self, user: str | None, action: str, target: str | None = None) -> None:
         self.execute(

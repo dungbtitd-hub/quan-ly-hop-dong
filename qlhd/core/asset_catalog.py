@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 from dataclasses import dataclass, field
 
 NGUONG_TSCD = 30_000_000          # đơn giá từ 30 triệu đồng và dùng trên 1 năm là TSCĐ
@@ -160,6 +161,7 @@ CATALOG: list[Nhom] = [
 BY_CODE = {n.ma: n for n in CATALOG}
 
 
+@lru_cache(maxsize=50_000)       # gọi lại rất nhiều lần với cùng tên hàng: nhớ kết quả
 def normalize(text: str) -> str:
     """Chữ thường, bỏ dấu, đ → d, tách chữ khỏi số, chỉ giữ chữ số và chữ cái; bọc hai đầu bằng dấu cách để so khớp nguyên từ."""
     t = unicodedata.normalize("NFD", str(text or "").lower()).replace("đ", "d")
@@ -173,6 +175,7 @@ _KEYWORDS = sorted(((normalize(k), n) for n in CATALOG for k in n.tu_khoa if nor
 _RAW = {(normalize(k), n.ma): unicodedata.normalize("NFC", k.lower()) for n in CATALOG for k in n.tu_khoa}
 
 
+@lru_cache(maxsize=50_000)       # gọi lại rất nhiều lần với cùng tên hàng: nhớ kết quả
 def find_group(name: str) -> Nhom | None:
     """Nhóm có từ khóa dài nhất xuất hiện trong tên hàng hóa, dịch vụ."""
     n = normalize(name)
@@ -186,7 +189,8 @@ def _has_marks(text: str) -> bool:
     return any(unicodedata.category(c) == "Mn" for c in unicodedata.normalize("NFD", text)) or "đ" in text
 
 
-def rival_groups(name: str, don_gia: int = 0) -> list[Nhom]:
+@lru_cache(maxsize=50_000)       # gọi lại rất nhiều lần với cùng tên hàng: nhớ kết quả
+def rival_groups(name: str, don_gia: int = 0) -> tuple[Nhom, ...]:
     """Nhóm khác cũng khớp tên hàng ở một cụm từ riêng (không nằm trong cụm của nhóm khớp nhất) mà dẫn tới phân loại
     khác: tên hàng mơ hồ (VD "máy tính kèm dịch vụ cài đặt"), không tự chọn được."""
     n = normalize(name)
@@ -207,7 +211,7 @@ def rival_groups(name: str, don_gia: int = 0) -> list[Nhom]:
             continue
         if default_class(nhom, don_gia) != default_class(best, don_gia):
             out.append(nhom)
-    return out
+    return tuple(out)
 
 
 def allowed_classes(nhom: Nhom, don_gia: int = 0) -> list[str]:
@@ -243,7 +247,7 @@ def default_months(nhom: Nhom, phan_loai: str, don_gia: int) -> int | None:
     return None
 
 
-@dataclass
+@dataclass(frozen=True)       # dùng chung qua bộ nhớ đệm của classify: không sửa tại chỗ
 class KetQua:
     phan_loai: str
     nhom: Nhom | None          # với "Chưa phân loại": nhóm gợi ý (chưa chọn), để kế toán xác nhận
@@ -255,6 +259,7 @@ class KetQua:
         return self.phan_loai == CHUA_PHAN_LOAI or (self.phan_loai in TAI_SAN and not self.so_thang)
 
 
+@lru_cache(maxsize=50_000)       # gọi lại rất nhiều lần với cùng tên hàng: nhớ kết quả
 def classify(name: str, don_gia: int, *, co_hop_dong: bool = False) -> KetQua:
     """Phân loại một dòng hóa đơn đầu vào theo tên và đơn giá chưa thuế của một đơn vị.
     Không khớp từ khóa nào: hóa đơn gắn hợp đồng đầu vào thì là vật tư, thầu phụ dự án (CP12), còn lại để kế toán

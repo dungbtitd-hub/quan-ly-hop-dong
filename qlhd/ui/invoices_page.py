@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFi
 
 from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
 from ..core.assets import AssetService
-from ..core.contracts import (INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
+from ..core.contracts import (INSTALLMENTS, INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
                               rate_from_amounts)
 from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
@@ -71,6 +71,13 @@ def bind_type_filter(dlg, contracts, head=()) -> None:
         opts = [o for o in full if o[1] not in by_ma or loai is None or (by_ma[o[1]]["MaLoaiHD"] or "") == loai]
         combo.set_options(opts, cur if any(o[1] == cur for o in opts) else (opts[0][1] if opts else None))
     kinds.currentIndexChanged.connect(apply)
+
+
+NO_BUYER = "__chua_ghi__"
+
+
+def _person(name) -> str:
+    return " ".join((name or "").split())
 
 
 def out_invoice_row(ctx, inv) -> dict:
@@ -217,7 +224,8 @@ class InvoicesPage(QWidget):
                         ("Không chịu thuế GTGT", "Không chịu thuế")]},
                     {"key": "tt", "label": "Thanh toán", "options": [
                         ("Tất cả", None), ("Đã trả (có số sao kê)", "da"), ("Chưa có số sao kê", "chua")]},
-                    {"key": "ncc", "label": "Người bán", "options": [("Mọi người bán", None)]}])
+                    {"key": "ncc", "label": "Người bán", "options": [("Mọi người bán", None)]},
+                    {"key": "nguoi_mua", "label": "Người mua hàng", "options": [("Mọi người mua hàng", None)]}])
         self.box.changed.connect(self.refresh)
         self.search = self.box.edit
         add_ok = ctx.can(self.feature, "Them")
@@ -259,7 +267,7 @@ class InvoicesPage(QWidget):
                     ("GiaTriSauThue", "Sau thuế", "money"), ("DaThu", "Đã thu", "money"),
                     ("ConPhaiThu", "Còn phải thu", "money"), ("TTThanhToan", "Tình trạng thanh toán", "text"),
                     ("NgayTT", "Ngày thanh toán", "text"), ("SoThamChieuSK", "Số tham chiếu sao kê", "text"),
-                    ("TinhChatHD", "Tính chất", "text")]
+                    ("TinhChatHD", "Tính chất", "text"), ("DotThanhToan", "Đợt thanh toán", "text")]
         else:
             cols = [("STT", "STT", "int"),
                     ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDonGoc", "Số", "text"), ("NgayNhanHD", "Ngày", "date"),
@@ -300,8 +308,13 @@ class InvoicesPage(QWidget):
             invs = self.ctx.cs.in_invoices()
             self.box.set_options("ncc", [("Mọi người bán", None)] + [
                 (n, n) for n in sorted({i["TenNhaCungCap"] for i in invs if i["TenNhaCungCap"]})])
-            co_hd, thue, tt, ncc = (self.box.value(k) for k in ("co_hd", "thue", "tt", "ncc"))
+            buyers = sorted({_person(i["NguoiMuaHang"]) for i in invs if _person(i["NguoiMuaHang"])}, key=str.lower)
+            self.box.set_options("nguoi_mua", [("Mọi người mua hàng", None), ("(Chưa ghi người mua hàng)", NO_BUYER)]
+                                 + [(n, n) for n in buyers])
+            co_hd, thue, tt, ncc, buyer = (self.box.value(k) for k in ("co_hd", "thue", "tt", "ncc", "nguoi_mua"))
             for inv in invs:
+                if buyer and _person(inv["NguoiMuaHang"]) != ("" if buyer == NO_BUYER else buyer):
+                    continue
                 r = dict(inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "") if inv["MaHopDong"] else "(Mua trực tiếp)"
                 paid = bool((inv["SoThamChieuSK"] or "").strip())
@@ -344,6 +357,9 @@ class InvoicesPage(QWidget):
                     {"key": "GiaTriSauThue", "label": "Sau thuế", "kind": "money",
                      "hint": VAT_HINT},
                     {"key": "TinhChatHD", "label": "Tính chất", "kind": "combo", "options": list(INVOICE_KINDS)},
+                    {"key": "DotThanhToan", "label": "Đợt thanh toán", "kind": "combo", "options": INSTALLMENTS,
+                     "hint": "Hóa đơn cho đợt nào của hợp đồng. Hợp đồng chỉ có một hóa đơn mà chưa ghi đợt thì "
+                             "coi là thanh toán toàn bộ: tổng lệch giá trị hợp đồng sẽ được cảnh báo."},
                     {"key": "DuongDanTep", "label": "Tệp gốc (XML/PDF)"},
                     {"key": "GhiChuHDDR", "label": "Ghi chú"}]
         contracts = [("(Không có – mua hàng trực tiếp)", None)] + contracts
@@ -535,7 +551,7 @@ class InvoicesPage(QWidget):
         table = "HoaDonDauRa" if self.kind == "ra" else "HoaDonDauVao"
         full = [dict(self.ctx.db.get(table, r["Ma"])) for r in rows]
         base = {f["key"]: f for f in self._base_fields(keep=[r["MaHopDong"] for r in full if r["MaHopDong"]])}
-        keys = (["MaHopDong", "TinhChatHD", "TenNguoiMua", "MSTNguoiMua", "GhiChuHDDR"] if self.kind == "ra" else
+        keys = (["MaHopDong", "TinhChatHD", "DotThanhToan", "TenNguoiMua", "MSTNguoiMua", "GhiChuHDDR"] if self.kind == "ra" else
                 ["MaHopDong", "NhomThue", "NguoiMuaHang", "GhiChuHDDV"])
         fields = [{k: v for k, v in base[k].items() if k != "hint"} for k in keys]
         num = "SoHoaDon" if self.kind == "ra" else "SoHoaDonGoc"

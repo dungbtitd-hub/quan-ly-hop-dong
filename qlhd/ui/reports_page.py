@@ -15,6 +15,12 @@ from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_tex
                       page_title, toolbar)
 
 TEMPLATE_PREFIX = "mau_bao_cao:"
+# Thanh toán: hóa đơn đầu ra / hợp đồng đã xuất hóa đơn
+PAY_OPTIONS = [("Tất cả", None), ("Chưa thu (đã xuất hóa đơn)", "Chưa thu"), ("Thu một phần", "Thu một phần"),
+               ("Đã thu đủ", "Đã thu đủ"), ("Chỉ còn phải thu", "Còn phải thu")]
+# hóa đơn đầu vào: đã trả = có số sao kê, không có "một phần"
+IN_PAY_OPTIONS = [("Tất cả", None), ("Chưa trả (chưa có số sao kê)", "Chưa thu"),
+                  ("Đã trả (có số sao kê)", "Đã thu đủ")]
 
 
 _DATE = {"ky_td", "tu", "den"}
@@ -102,6 +108,7 @@ class ReportsPage(QWidget):
         self.tinh_theo = Combo([("Ngày ký hợp đồng", "NgayKy"), ("Ngày lập hóa đơn", "NgayHoaDon"),
                                 ("Ngày tiền về", "NgayTienVe")])
         self.chieu = Combo([("Tất cả", None), ("Đầu ra", "Đầu ra"), ("Đầu vào", "Đầu vào")])
+        self.chieu.currentIndexChanged.connect(lambda *_: hasattr(self, "_labels") and self._pay_enabled())
         self.gop = QCheckBox("Gộp đầu ra, đầu vào chung bảng")
         self.gop.setToolTip("Mặc định hợp đồng / hóa đơn đầu ra và đầu vào được tách thành bảng (sheet) riêng.")
         self.tach_nam = QCheckBox("Tách theo năm ký hợp đồng")
@@ -112,10 +119,12 @@ class ReportsPage(QWidget):
         self.doi_tac = CheckList()
         self.nhom = CheckList()
         self.tinh_trang = CheckList(list(CONTRACT_STATUSES))
-        self.tt_tt = Combo([("Tất cả", None), ("Chưa thu", "Chưa thu"), ("Thu một phần", "Thu một phần"),
-                            ("Đã thu đủ", "Đã thu đủ"), ("Chỉ còn phải thu", "Còn phải thu")])
+        self.tt_tt = Combo(PAY_OPTIONS)
+        self.tt_tt.setToolTip("Chỉ xét hợp đồng / hóa đơn đã xuất hóa đơn: hợp đồng chưa xuất hóa đơn không có tình "
+                              "trạng thanh toán nên không nằm trong kết quả khi chọn ô này.")
         self.tt_xuat = Combo([("Tất cả", None), ("Chưa xuất", "Chưa xuất"), ("Xuất một phần", "Xuất một phần"),
                               ("Đã xuất đủ", "Đã xuất đủ")])
+        self.tt_xuat.currentIndexChanged.connect(lambda *_: hasattr(self, "_labels") and self._pay_enabled())
         self.lien_ket = Combo([("Tất cả", None), ("Có hợp đồng", True), ("Không có hợp đồng", False)])
         self.nhom_thue = Combo([(label, key) for key, label in TAX_MODES])
         self.nguoi_mua = CheckList()
@@ -141,7 +150,7 @@ class ReportsPage(QWidget):
                             ("", "tach_nam"),
                             ("4. Loại hợp đồng", "loai"), ("5. Chủ đầu tư / NCC", "doi_tac"),
                             ("6. Nhóm chủ đầu tư", "nhom"), ("7. Tình trạng HĐ", "tinh_trang"),
-                            ("8. Thanh toán", "tt_tt"), ("9. Xuất hóa đơn", "tt_xuat"),
+                            ("8. Xuất hóa đơn", "tt_xuat"), ("9. Thanh toán", "tt_tt"),
                             ("10. HĐơn đầu vào", "lien_ket"), ("11. Thuế GTGT đầu vào", "nhom_thue"),
                             ("12. Người mua (HĐơn ra)", "nguoi_mua"), ("Kỳ (ngữ cảnh thời gian)", "ky")):
             w = getattr(self, name)
@@ -225,7 +234,18 @@ class ReportsPage(QWidget):
             for w in widgets:
                 w.setEnabled(name in on)
         self.b_group.setEnabled("doi_tac" in on)
+        self.tt_tt.set_options(IN_PAY_OPTIONS if self.context.value() == "hoa_don_vao" else PAY_OPTIONS,
+                               self.tt_tt.value())
+        self._pay_enabled()
         self._relative_changed()
+
+    def _pay_enabled(self, *_):
+        """Đã chọn "Chưa xuất" hóa đơn thì không còn tình trạng thanh toán để lọc: khóa ô Thanh toán."""
+        on = relevant(self.context.value())
+        ok = "tt_tt" in on and not ("tt_xuat" in on and self.tt_xuat.value() == "Chưa xuất") \
+            and not ("chieu" in on and self.chieu.value() == "Đầu vào")
+        self.tt_tt.setEnabled(ok)
+        self._labels["tt_tt"].setEnabled(ok)
 
     def _relative_changed(self):
         key = self.ky_td.value()
@@ -248,6 +268,8 @@ class ReportsPage(QWidget):
             gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value(), tach_nam=self.tach_nam.isChecked(),
             muc_chi_tiet=self.muc.value(), nhom_ky_hd=self.ky_hd.value(), chi_cong_ky=self.cong_ky.isChecked())
         default = ReportFilters()
+        if not self.tt_tt.isEnabled():
+            on = on - {"tt_tt"}
         for widget, keys in FILTER_KEYS.items():
             if widget not in on:
                 for k in keys:
@@ -291,7 +313,7 @@ class ReportsPage(QWidget):
     # ---- mẫu báo cáo
     def _template_names(self) -> list[str]:
         return [r["Khoa"][len(TEMPLATE_PREFIX):] for r in self.ctx.db.query(
-            "SELECT Khoa FROM CaiDat WHERE Khoa LIKE ? ORDER BY Khoa", (TEMPLATE_PREFIX + "%",))]
+            "SELECT Khoa FROM CaiDat WHERE Khoa LIKE ? AND GiaTri IS NOT NULL ORDER BY Khoa", (TEMPLATE_PREFIX + "%",))]
 
     def _template(self, name: str) -> dict:
         try:

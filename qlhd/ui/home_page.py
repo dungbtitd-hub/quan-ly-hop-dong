@@ -440,6 +440,11 @@ class HomePage(QWidget):
             if n_free:
                 fl.addWidget(hint(f"{n_free} hóa đơn đầu vào {ky_name} chưa gắn hợp đồng (chi phí chung hoặc cần chọn "
                                   "hợp đồng)."))
+            if by["hd_lech_gia_tri"]:
+                fl = self._panel("Giá trị hợp đồng lệch hóa đơn",
+                                 tagged(QLabel(str(len(by["hd_lech_gia_tri"]))), "Pill", "danger"))
+                self._alert_rows(fl, by["hd_lech_gia_tri"], "")
+                fl.addWidget(hint("Có thể nhập sai giá trị hợp đồng. Lọc ở Hợp đồng → \"Giá trị HĐ so với hóa đơn\"."))
         if "phanloai" in shown and can_ts:
             fl = self._panel("Hóa đơn đầu vào cần kế toán xem lại",
                              button("Mở danh sách", self.open_review.emit, "Link"))

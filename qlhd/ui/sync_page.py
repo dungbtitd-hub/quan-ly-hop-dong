@@ -152,6 +152,9 @@ class SyncPage(QWidget):
         self.hide_same.setChecked(True)
         self.hide_same.toggled.connect(self._fill_tree)
         self.b_all = button("Đồng bộ tất cả", self.apply_all, "Primary")
+        self.b_all.setToolTip("Nhận toàn bộ dữ liệu trong gói và cài đặt phần mềm dùng chung (nhắc hạn, mẫu báo cáo, "
+                              "ngữ cảnh thông báo, Tổng quan, giao diện…). Telegram, tên máy, bộ lọc đang chọn vẫn "
+                              "giữ riêng từng máy.")
         self.b_sel = button("Đồng bộ hợp đồng đã tích", self.apply_selected)
         self.b_all.setEnabled(False)
         self.b_sel.setEnabled(False)
@@ -192,6 +195,9 @@ class SyncPage(QWidget):
                f" – phạm vi: {h['pham_vi']}.")
         if self.pkg.is_director:
             txt += " <b>Gói Giám đốc (kèm thu chi đã mã hóa).</b>"
+        if h.get("pham_vi") != "Toàn bộ dữ liệu":
+            txt += (" Gói chỉ có một phần dữ liệu; muốn chuyển toàn bộ dữ liệu thì ở máy gửi chọn phạm vi "
+                    "\"Toàn bộ dữ liệu\".")
         if self.pkg.already_imported:
             txt += " <span style='color:" + style.color("warn") + "'>Gói này đã được nhận trước đây.</span>"
         self.pkg_info.setText(txt)
@@ -237,7 +243,9 @@ class SyncPage(QWidget):
             combo.currentIndexChanged.connect(lambda _=0, it=it, c=combo: setattr(it, "action", c.value()))
             self.tree.setItemWidget(row, 3, combo)
         self.tree.expandAll()
-        self.counts.setText(" · ".join(f"{k}: {v}" for k, v in stats.items()))
+        n_set = len(self.pkg.body.get("settings") or [])
+        self.counts.setText(" · ".join(f"{k}: {v}" for k, v in stats.items())
+                            + (f" · Cài đặt phần mềm: {n_set} mục (nhận khi bấm Đồng bộ tất cả)" if n_set else ""))
 
     def _decisions(self) -> dict:
         return {(it.table, it.their_ma): it.action for it in self.items if it.action}

@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
 
 from ..core import excel_import
 from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, INVOICE_FILTERS, PAY_FILTERS, PAY_METHODS,
-                              PAY_STATE_LABELS, TASK_STATUSES, ValidationError, contract_matches, contract_pay_state,
-                              duration_text, end_date, invoice_filter_ok)
+                              PAY_STATE_LABELS, TASK_STATUSES, VALUE_FILTERS, VALUE_FLAGS, ValidationError, contract_matches, contract_pay_state,
+                              duration_text, end_date, invoice_filter_ok, value_filter_ok)
 from ..core.reports import fmt_date, fmt_money
 from .filter_box import FilterBox
 from .widgets import (VAT_HINT, DataTable, bulk_edit, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
@@ -25,7 +25,9 @@ CONTRACT_COLS = [("STT", "STT", "int"), ("SoHopDong", "Số HĐ", "text"), ("Ten
                  ("GiaTriHD", "Giá trị HĐ", "money"), ("PhanTramTT", "% thanh toán", "pct"), ("DaXuatHD", "Đã xuất HĐơn", "money"),
                  ("DaThanhToan", "Đã thanh toán", "money"), ("ConPhaiThu", "Còn phải thu", "money"),
                  ("TamUngConLai", "Tạm ứng chưa khấu trừ", "money"), ("TTThanhToan", "Thanh toán", "text"),
-                 ("HoSoDaLay", "Hồ sơ đã lấy về", "text")]
+                 ("HoSoDaLay", "Hồ sơ đã lấy về", "text"), ("LechText", "Giá trị so với hóa đơn", "text")]
+VALUE_SHORT = {"vuot": "Hóa đơn vượt giá trị HĐ", "toan_bo": "Toàn bộ / lần cuối nhưng lệch",
+               "chua_ro_dot": "Lệch, chưa ghi đợt"}
 
 
 def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
@@ -158,6 +160,8 @@ class ContractsPage(QWidget):
                 {"key": "status", "label": "Tình trạng", "options": [("Mọi tình trạng", None)]
                  + [(x, x) for x in CONTRACT_STATUSES]},
                 {"key": "xuat", "label": "Xuất hóa đơn", "options": [("Tất cả", None)] + list(INVOICE_FILTERS)},
+                {"key": "gia_tri", "label": "Giá trị HĐ so với hóa đơn",
+                 "options": [("Tất cả", None)] + list(VALUE_FILTERS)},
                 {"key": "paid", "label": "Thanh toán", "options": [("Mọi tình trạng thanh toán", None)]
                  + list(PAY_FILTERS)}])
         self.box.changed.connect(self.refresh)
@@ -215,6 +219,11 @@ class ContractsPage(QWidget):
                     button("Ghi nhận / xem thanh toán", self.invoice_payment)]
         for b, right in zip(inv_btns, ("Them", "Sua", "Xoa", "Sua")):
             b.setEnabled(ctx.can("HoaDonDauRa", right))
+        b_fix = button("Lấy giá trị HĐ theo hóa đơn…", self.value_from_invoices)
+        b_fix.setToolTip("Hợp đồng nhập sai giá trị: đặt giá trị hợp đồng bằng tổng các hóa đơn (xem cũ → mới trước "
+                         "khi lưu)")
+        b_fix.setEnabled(ctx.can("HopDong", "Sua"))
+        inv_btns.append(b_fix)
         self.detail.addTab(self._wrap(self.invoices, inv_btns), "Hóa đơn")
         pay_btns = [button("Ghi nhận thanh toán", self.add_payment), button("Sửa lần thanh toán", self.edit_payment),
                     button("Xóa lần thanh toán", self.del_payment)]
@@ -250,8 +259,15 @@ class ContractsPage(QWidget):
             r = dict(hd)
             r.update(self.ctx.cs.summary(hd["Ma"]))
             if not contract_matches(hd, r, self.status.value(), self.paid.value()) \
-                    or not invoice_filter_ok(r, self.box.value("xuat")):
+                    or not invoice_filter_ok(r, self.box.value("xuat")) \
+                    or not value_filter_ok(r["LechGiaTri"], self.box.value("gia_tri")):
                 continue
+            if r["LechGiaTri"]:            # tô màu: giá trị hợp đồng có thể đã nhập sai
+                r["_canh_bao"] = True
+                r["LechText"] = VALUE_SHORT[r["LechGiaTri"]]
+                r["CanhBao"] = (f"{VALUE_FLAGS[r['LechGiaTri']]}: giá trị HĐ {fmt_money(r['GiaTriHD'])} đ, "
+                                f"tổng hóa đơn {fmt_money(r['DaXuatHD'])} đ. Kiểm tra giá trị hợp đồng hoặc đợt "
+                                "thanh toán trên hóa đơn (nút \"Lấy giá trị theo hóa đơn\" ở thẻ Hóa đơn).")
             r["TTThanhToan"] = PAY_STATE_LABELS[contract_pay_state(r)] if hd["ChieuHopDong"] == "Đầu ra" else ""
             r["LoaiHD"] = types.get(hd["MaLoaiHD"], "")
             r["ThoiGianTH"] = duration_text(hd["ThoiGianThucHien"], hd["DonViThoiGian"])
@@ -320,6 +336,28 @@ class ContractsPage(QWidget):
         v = contract_dialog(self.ctx, self, dict(self.ctx.db.get("HopDong", r["Ma"])))
         if v and run_safely(self, self.ctx.cs.save_contract, v, r["Ma"]):
             self.refresh()
+
+    def value_from_invoices(self):
+        """Sửa nhanh hợp đồng nhập sai giá trị: lấy giá trị theo tổng hóa đơn, hiện cũ → mới và hỏi trước khi lưu."""
+        r = self.table.current()
+        if not r:
+            return info(self, "Chọn một hợp đồng trước.")
+        hd = dict(self.ctx.db.get("HopDong", r["Ma"]))
+        new = self.ctx.cs.value_from_invoices(r["Ma"])
+        if not new["GiaTriTongSauThue"]:
+            return info(self, "Hợp đồng chưa có hóa đơn nào để lấy giá trị.")
+        labels = {"GiaTriTruocThue": "Giá trị trước thuế", "VAT": "Tiền thuế VAT",
+                  "GiaTriTongSauThue": "Giá trị sau thuế"}
+        changes = [(labels[k], fmt_money(hd[k] or 0) + " đ", fmt_money(v) + " đ")
+                   for k, v in new.items() if (hd[k] or 0) != v]
+        if not changes:
+            return info(self, "Giá trị hợp đồng đã bằng tổng các hóa đơn.")
+        if not confirm_changes(self, changes, f"của hợp đồng {hd['SoHopDong']} theo tổng hóa đơn"):
+            return
+        hd.update(new)
+        if run_safely(self, self.ctx.cs.save_contract, hd, hd["Ma"]):
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Sửa giá trị hợp đồng theo hóa đơn", hd["SoHopDong"])
+            self._reload_keep()
 
     def bulk_edit(self, rows: list[dict]):
         """Sửa cùng lúc loại, đối tác, tình trạng… cho các hợp đồng đã chọn."""

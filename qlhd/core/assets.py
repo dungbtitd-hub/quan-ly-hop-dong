@@ -232,6 +232,7 @@ FLAGS = {
     "nghi": ("Nghi phân loại sai", "warn"),
     "trung": ("Nghi trùng", "danger"),
 }
+_REVIEW_CACHE: dict = {}
 REVIEW_AFTER_UPGRADE = ("goi_y", "nguong", "nghi", "trung")     # rà soát dòng phần mềm đã tự phân loại
 
 
@@ -408,7 +409,11 @@ class AssetService:
     def review_lines(self, codes: tuple[str, ...] | None = None) -> list[dict]:
         """Dòng cần kế toán xem lại: chưa phân loại, có gợi ý chờ xác nhận, thiếu số tháng, sát ngưỡng CCDC/TSCĐ,
         nghi phân loại sai, nghi trùng."""
-        return [r for r in self._line_rows() if r["MaCanhBao"] and (codes is None or r["MaCanhBao"] in codes)]
+        # rà toàn bộ dòng hóa đơn khá nặng: dữ liệu chưa đổi thì dùng lại kết quả lần trước (không làm đơ phần mềm)
+        key = self.db.cache_key()
+        if _REVIEW_CACHE.get("key") != key:
+            _REVIEW_CACHE.update(key=key, rows=[r for r in self._line_rows() if r["MaCanhBao"]])
+        return [dict(r) for r in _REVIEW_CACHE["rows"] if codes is None or r["MaCanhBao"] in codes]
 
     def review_count(self) -> int:
         return len(self.review_lines())

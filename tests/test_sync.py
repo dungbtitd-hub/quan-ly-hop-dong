@@ -182,3 +182,27 @@ def test_suspected_invoice_duplicates_and_fill_on_merge(company, tmp_path):
     weak = next(i for i in d.compare(pkg) if i.table == "HoaDonDauVao" and i.status == ST_DUP)
     d.apply(pkg, user=gd.user, decisions={("HoaDonDauVao", weak.their_ma): A_BOTH})
     assert gd.db.one("SELECT COUNT(*) n FROM HoaDonDauVao WHERE DaXoa = 0")["n"] == 3
+
+
+def test_sync_all_carries_shared_settings_not_local_ones(company, tmp_path):
+    gd, kt = company["gd"], company["kt"]
+    gd.db.set_setting("nhac_het_han_truoc", "45")
+    gd.db.set_setting("mau_bao_cao:Quý", '{"context": "hop_dong"}')
+    gd.db.set_setting("tg_token", "bi-mat")
+    gd.db.set_setting("ten_may", "May GD")
+    kt.db.set_setting("mau_bao_cao:Cũ", '{"context": "loai_hd"}')
+    d, pkg = _send(gd, kt, tmp_path)
+    d.apply(pkg, user=kt.user, only_groups={"x"})                   # đồng bộ hợp đồng đã tích: không nhận cài đặt
+    assert kt.db.setting("nhac_het_han_truoc") is None
+    res = d.apply(pkg, user=kt.user)
+    assert res["cai_dat"] >= 2
+    assert kt.db.setting("nhac_het_han_truoc") == "45" and kt.db.setting("mau_bao_cao:Quý")
+    assert kt.db.setting("tg_token") is None and kt.db.setting("ten_may") != "May GD"
+    assert kt.db.setting("mau_bao_cao:Cũ")                            # cài đặt riêng của máy nhận vẫn còn
+    # xóa ở máy gửi (sau) thì máy nhận cũng xóa theo; máy nhận sửa sau thì giữ của máy nhận
+    gd.db.set_setting("mau_bao_cao:Quý", None)
+    kt.db.set_setting("nhac_het_han_truoc", "20")
+    d, pkg = _send(gd, kt, tmp_path, "goi2.qlhd")
+    d.apply(pkg, user=kt.user)
+    assert kt.db.setting("mau_bao_cao:Quý") is None
+    assert kt.db.setting("nhac_het_han_truoc") == "20"
