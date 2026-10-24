@@ -159,6 +159,13 @@ def invoicing_status(value: int, invoiced: int) -> str:
     return "Xuất một phần"
 
 
+def invoice_no_key(r) -> tuple:
+    """Khóa sắp xếp theo số hóa đơn: năm xuất, ký hiệu, rồi số (so theo giá trị số, "0000125" < "0000131")."""
+    so = str(r["SoHoaDon"] or "").strip()
+    digits = "".join(ch for ch in so if ch.isdigit())
+    return ((r["NgayXuatHD"] or "")[:4], (r["KyHieuHD"] or "").strip().upper(), int(digits) if digits else 0, so)
+
+
 class ContractService:
     def __init__(self, db: Database):
         self.db = db
@@ -377,9 +384,9 @@ class ContractService:
 
     # ---- hóa đơn đầu ra
     def out_invoices(self, ma_hd: str | None = None) -> list[sqlite3.Row]:
-        if ma_hd:
-            return self.db.active("HoaDonDauRa", "MaHopDong = ?", (ma_hd,), "NgayXuatHD")
-        return self.db.active("HoaDonDauRa", order="NgayXuatHD DESC")
+        """Hóa đơn đầu ra xếp theo số hóa đơn (trong từng năm, từng ký hiệu), số nhỏ trước."""
+        rows = self.db.active("HoaDonDauRa", "MaHopDong = ?", (ma_hd,)) if ma_hd else self.db.active("HoaDonDauRa")
+        return sorted(rows, key=invoice_no_key)
 
     def save_out_invoice(self, values: dict, ma: str | None = None) -> str:
         v = dict(values)

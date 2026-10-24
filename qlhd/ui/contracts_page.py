@@ -17,7 +17,7 @@ from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm, c
                       rate_field, require, run_safely, toolbar)
 
 
-CONTRACT_COLS = [("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp đồng", "text"),
+CONTRACT_COLS = [("STT", "STT", "int"), ("SoHopDong", "Số HĐ", "text"), ("TenHopDong", "Tên hợp đồng", "text"),
                  ("TenDoiTac", "Đối tác", "text"), ("ChieuHopDong", "Chiều", "text"), ("LoaiHD", "Loại", "text"),
                  ("NgayKy", "Ngày ký", "date"), ("ThoiGianTH", "Thời gian TH", "text"),
                  ("NgayKetThucDuKien", "Ngày kết thúc", "date"), ("TinhTrangHopDong", "Tình trạng", "text"),
@@ -226,6 +226,7 @@ class ContractsPage(QWidget):
             r["TTThanhToan"] = PAY_STATE_LABELS[contract_pay_state(r)] if hd["ChieuHopDong"] == "Đầu ra" else ""
             r["LoaiHD"] = types.get(hd["MaLoaiHD"], "")
             r["ThoiGianTH"] = duration_text(hd["ThoiGianThucHien"], hd["DonViThoiGian"])
+            r["STT"] = len(rows) + 1
             rows.append(r)
         self.table.set_rows(rows)
         tot = sum(r["GiaTriHD"] for r in rows)
