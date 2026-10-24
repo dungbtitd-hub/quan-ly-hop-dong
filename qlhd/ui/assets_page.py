@@ -15,7 +15,7 @@ from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_C
                            ST_NEW, ST_SAME_CODE, TSCD_COLS, TSCD_KEYS, AssetError, AssetService)
 from ..core.reports import fmt_date, fmt_money
 from . import style
-from .widgets import (Combo, DataTable, FormDialog, button, confirm, confirm_changes, error, hint, info, page_title,
+from .widgets import (Combo, DataTable, FormDialog, button, confirm, confirm_changes, confirm_delete, error, hint, info, page_title,
                       run_safely, toolbar)
 
 LINE_COLS = [("STT", "STT", "int"), ("NgayNhanHD", "Ngày HĐ", "date"), ("SoHoaDonGoc", "Số HĐ", "text"),
@@ -471,7 +471,15 @@ class RegisterTab(QWidget):
 
     def delete(self):
         r = self._current()
-        if r is not None and confirm(self, f"Xóa {r['MaTS']} – {r['TenTS']} khỏi sổ?"):
+        if r is not None and r.get("MaDongHD"):
+            info(self, "Tài sản này sinh ra từ hóa đơn đầu vào. Muốn bỏ thì phân loại lại dòng hóa đơn "
+                       "(ví dụ thành Chi phí trong kỳ).")
+            return
+        if r is not None and confirm_delete(
+                self, f"tài sản {r['MaTS']} – {r['TenTS']} khỏi sổ {self.loai_so}",
+                [f"Nguyên giá {fmt_money(r.get('NguyenGia') or 0)} đ" if r.get("NguyenGia") else "",
+                 "Số khấu hao, phân bổ của tài sản này cũng không còn trong sổ các năm.",
+                 "Xóa cả trên các máy khác ở lần đồng bộ sau."]):
             if run_safely(self, self.svc.delete_asset, r["Ma"]) is None:
                 self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa tài sản", r["TenTS"])
                 self.reload()
@@ -489,9 +497,8 @@ class RegisterTab(QWidget):
         chosen = dlg.chosen()
         if not chosen:
             return
-        if not confirm(self, f"Xóa {len(chosen)} tài sản đã hết khấu hao khỏi sổ {self.loai_so} từ năm {y}?\n"
-                             + "\n".join(f"{r['MaTS']} – {r['TenTS']}" for r in chosen[:10])
-                             + ("\n…" if len(chosen) > 10 else "")):
+        if not confirm_delete(self, f"{len(chosen)} tài sản đã hết khấu hao khỏi sổ {self.loai_so} từ năm {y}",
+                              [f"{r['MaTS']} – {r['TenTS']}" for r in chosen], permanent=False, count=len(chosen)):
             return
         n = run_safely(self, self.svc.remove_depreciated, [r["Ma"] for r in chosen], y)
         if n is not None:

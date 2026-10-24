@@ -12,7 +12,7 @@ from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_FILTERS, PA
                               TASK_STATUSES, ValidationError, contract_matches, contract_pay_state, duration_text,
                               end_date)
 from ..core.reports import fmt_date, fmt_money
-from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm, confirm_changes, error, hint, info,
+from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
                       page_title,
                       rate_field, require, run_safely, toolbar)
 
@@ -23,7 +23,8 @@ CONTRACT_COLS = [("STT", "STT", "int"), ("SoHopDong", "Số HĐ", "text"), ("Ten
                  ("NgayKetThucDuKien", "Ngày kết thúc", "date"), ("TinhTrangHopDong", "Tình trạng", "text"),
                  ("GiaTriHD", "Giá trị HĐ", "money"), ("PhanTramTT", "% thanh toán", "pct"), ("DaXuatHD", "Đã xuất HĐơn", "money"),
                  ("DaThanhToan", "Đã thanh toán", "money"), ("ConPhaiThu", "Còn phải thu", "money"),
-                 ("TTThanhToan", "Thanh toán", "text")]
+                 ("TamUngConLai", "Tạm ứng chưa khấu trừ", "money"), ("TTThanhToan", "Thanh toán", "text"),
+                 ("HoSoDaLay", "Hồ sơ đã lấy về", "text")]
 
 
 def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
@@ -55,6 +56,8 @@ def contract_dialog(ctx, parent, values: dict | None = None) -> dict | None:
          "hint": f"Để 0 thì dùng cài đặt chung (hiện là {ctx.cs.remind_days()} ngày)."},
         {"key": "TinhTrangHopDong", "label": "Tình trạng", "kind": "combo", "options": list(CONTRACT_STATUSES)},
         {"key": "GhiChu", "label": "Ghi chú", "kind": "multiline"},
+        {"key": "HoSoDaLay", "label": "Hồ sơ đã lấy về", "kind": "multiline",
+         "hint": "Tài liệu đã lấy từ đối tác về lưu (VD: bản vẽ gốc, biên bản, hồ sơ pháp lý, ngày lấy…)."},
     ]
 
     def add_partner(dlg):
@@ -105,9 +108,10 @@ def partner_dialog(ctx, parent, values: dict | None = None, ma: str | None = Non
 
 def payment_dialog(ctx, parent, ma_hd: str, values: dict | None = None,
                    title: str = "Ghi nhận thanh toán") -> dict | None:
-    invoices = [("(Tạm ứng / chưa có hóa đơn)", None)] + [
-        (f"{i['KyHieuHD'] or ''} số {i['SoHoaDon']} – {fmt_money(i['GiaTriSauThue'])}", i["Ma"])
-        for i in ctx.cs.out_invoices(ma_hd)]
+    out = [i for i in ctx.cs.out_invoices(ma_hd) if i["TinhChatHD"] != "Đã hủy"]
+    invoices = [("(Tạm ứng – hợp đồng chưa xuất hóa đơn)" if not out else "(Tạm ứng / theo hợp đồng, chưa gắn hóa đơn)",
+                 None)] + [(f"{i['KyHieuHD'] or ''} số {i['SoHoaDon']} – {fmt_money(i['GiaTriSauThue'])}", i["Ma"])
+                           for i in out]
     fields = [{"key": "NgayThanhToan", "label": "Ngày tiền về", "kind": "date"},
               {"key": "SoTien", "label": "Số tiền", "kind": "money", "required": True},
               {"key": "HinhThuc", "label": "Hình thức", "kind": "combo", "options": list(PAY_METHODS)},
@@ -163,7 +167,14 @@ class ContractsPage(QWidget):
         self.b_partner = button("Sửa đối tác…", self.edit_partner)
         self.b_partner.setToolTip("Sửa tên, MST, vai trò của đối tác (chủ đầu tư / nhà cung cấp) của hợp đồng đang chọn")
         self.b_partner.setEnabled(ctx.can("DanhMuc", "Sua") or ctx.can("HopDong", "Sua"))
-        lay.addLayout(toolbar(self.b_add, self.b_edit, self.b_del, self.b_partner, self.b_imp, self.b_tpl, "stretch"))
+        self.b_inv = button("Thêm hóa đơn đầu ra", self.add_invoice_top)
+        self.b_inv.setToolTip("Thêm hóa đơn đầu ra cho hợp đồng đang chọn (điền sẵn hợp đồng)")
+        self.b_inv.setEnabled(ctx.can("HoaDonDauRa", "Them"))
+        self.b_pay = button("Ghi nhận thanh toán", self.add_payment_top)
+        self.b_pay.setToolTip("Ghi tiền thu về cho hợp đồng đang chọn (hợp đồng đã xuất hóa đơn)")
+        self.b_pay.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
+        lay.addLayout(toolbar(self.b_add, self.b_edit, self.b_del, self.b_inv, self.b_pay, self.b_partner, self.b_imp,
+                              self.b_tpl, "stretch"))
         lay.addLayout(toolbar(QLabel("Lọc:"), self.filter, self.status, self.paid, "stretch", self.search))
         split = QSplitter(Qt.Vertical)
         self.table = DataTable(CONTRACT_COLS)
@@ -297,7 +308,16 @@ class ContractsPage(QWidget):
 
     def delete(self):
         r = self.table.current()
-        if r and confirm(self, f"Xóa hợp đồng {r['SoHopDong']} cùng công việc, hóa đơn đầu ra, thanh toán của nó?"):
+        if not r:
+            return
+        cs, ma = self.ctx.cs, r["Ma"]
+        n_in = self.ctx.db.one("SELECT COUNT(*) AS n FROM HoaDonDauVao WHERE DaXoa = 0 AND MaHopDong = ?", (ma,))["n"]
+        if confirm_delete(self, f"hợp đồng {r['SoHopDong']} – {r.get('TenHopDong') or ''}", [
+                f"{len(cs.tasks(ma))} công việc (cùng các lần bàn giao, nghiệm thu)",
+                f"{len(cs.out_invoices(ma))} hóa đơn đầu ra",
+                f"{len(cs.payments(ma))} lần thanh toán / tạm ứng",
+                f"{n_in} hóa đơn đầu vào đang gắn với hợp đồng: giữ lại, chỉ bỏ gắn" if n_in else "",
+                "Xóa cả trên các máy khác ở lần đồng bộ sau."]):
             self.ctx.cs.delete_contract(r["Ma"])
             self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa hợp đồng", r["SoHopDong"])
             self.refresh()
@@ -332,7 +352,8 @@ class ContractsPage(QWidget):
         t = self.tasks.current()
         if not t:
             return info(self, "Chọn một công việc.")
-        if confirm(self, f"Xóa công việc \"{t['TenNoiDungCV']}\" cùng các lần bàn giao, nghiệm thu của nó?"):
+        if confirm_delete(self, f"công việc \"{t['TenNoiDungCV']}\"",
+                          ["Các lần bàn giao, nghiệm thu của công việc này cũng bị xóa."]):
             self.ctx.cs.delete_task(t["Ma"])
             self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa công việc", t["TenNoiDungCV"])
             self._reload_keep()
@@ -396,6 +417,11 @@ class ContractsPage(QWidget):
             self._inv_helper.hide()
         return self._inv_helper
 
+    def add_invoice_top(self):
+        if self._out_contract():
+            self.detail.setCurrentIndex(1)              # thẻ Hóa đơn của hợp đồng đó
+            self.add_invoice()
+
     def add_invoice(self):
         ma = self._out_contract()
         if ma and self._helper()._save({"MaHopDong": ma}, parent=self):
@@ -414,9 +440,9 @@ class ContractsPage(QWidget):
         if not r or self._out_contract() is None:
             return info(self, "Chọn một hóa đơn.") if not r else None
         pays = self.ctx.cs.invoice_payments(r["Ma"])
-        if confirm(self, f"Xóa hóa đơn số {r['SoHoaDon']} ({fmt_money(r['GiaTriSauThue'])} đ)?"
-                         + (f"\n\nHóa đơn đã có {len(pays)} lần thanh toán: các lần này vẫn giữ trong thẻ Thanh toán "
-                            "của hợp đồng (không còn gắn với hóa đơn)." if pays else "")):
+        if confirm_delete(self, f"hóa đơn đầu ra số {r['SoHoaDon']} ({fmt_money(r['GiaTriSauThue'])} đ)",
+                          [f"Hóa đơn đã có {len(pays)} lần thanh toán: các lần này vẫn giữ trong thẻ Thanh toán "
+                           "của hợp đồng (thành tạm ứng chưa gắn hóa đơn)." if pays else ""]):
             self.ctx.cs.delete_out_invoice(r["Ma"])
             self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa hóa đơn đầu ra", r["SoHoaDon"])
             self._reload_keep()
@@ -436,9 +462,19 @@ class ContractsPage(QWidget):
             return info(self, "Chọn một hợp đồng trước.")
         if self.ctx.db.get("HopDong", ma)["ChieuHopDong"] != "Đầu ra":
             return info(self, "Thanh toán được ghi cho hợp đồng đầu ra (tiền thu về).")
+        inv = self.invoices.current() if self.detail.currentIndex() == 1 else None
+        if inv:                                         # đang chọn hóa đơn nào ở thẻ Hóa đơn thì ghi cho hóa đơn đó
+            from .invoices_page import invoice_payment
+            if invoice_payment(self.ctx, self, inv):
+                self._reload_keep()
+            return
         v = payment_dialog(self.ctx, self, ma, {"HinhThuc": "Chuyển khoản"})
         if v and run_safely(self, self.ctx.cs.save_payment, v):
             self._reload_keep()
+
+    def add_payment_top(self):
+        if self._out_contract():
+            self.add_payment()
 
     def edit_payment(self):
         p = self.payments.current()
@@ -451,7 +487,9 @@ class ContractsPage(QWidget):
 
     def del_payment(self):
         p = self.payments.current()
-        if p and confirm(self, f"Xóa lần thanh toán {fmt_money(p['SoTien'])} đ ngày {fmt_date(p['NgayThanhToan'])}?"):
+        if p and confirm_delete(self, f"lần thanh toán {fmt_money(p['SoTien'])} đ ngày {fmt_date(p['NgayThanhToan'])}",
+                                [f"Số tham chiếu: {p['SoThamChieuSK']}" if p.get("SoThamChieuSK") else "",
+                                 "Số đã thu, còn phải thu của hợp đồng và hóa đơn sẽ tính lại."]):
             self.ctx.cs.delete_payment(p["Ma"])
             self._reload_keep()
 
@@ -605,7 +643,8 @@ class CatalogPage(QWidget):
 
     def del_type(self):
         r = self.types.current()
-        if r and confirm(self, f"Xóa loại hợp đồng \"{r['TenLoaiHD']}\"?"):
+        if r and confirm_delete(self, f"loại hợp đồng \"{r['TenLoaiHD']}\"",
+                                ["Loại đang được hợp đồng nào dùng thì phần mềm không cho xóa."]):
             run_safely(self, self.ctx.cs.delete_contract_type, r["Ma"])
             self.refresh()
 
@@ -620,7 +659,9 @@ class CatalogPage(QWidget):
 
     def del_partner(self):
         r = self.partners.current()
-        if r and confirm(self, f"Xóa đối tác \"{r['TenDoiTac']}\"?"):
+        if r and confirm_delete(self, f"đối tác \"{r['TenDoiTac']}\"",
+                                [f"MST {r['MaSoThue']}" if r.get("MaSoThue") else "",
+                                 "Đối tác đang có hợp đồng thì phần mềm không cho xóa."]):
             run_safely(self, self.ctx.cs.delete_partner, r["Ma"])
             self.refresh()
 
@@ -663,7 +704,9 @@ class CatalogPage(QWidget):
 
     def del_group(self):
         r = self.groups.current()
-        if r and confirm(self, f"Xóa nhóm \"{r['TenNhom']}\"?"):
+        if r and confirm_delete(self, f"nhóm \"{r['TenNhom']}\"",
+                                [f"{len(self.ctx.cs.group_members(r['Ma']))} chủ đầu tư trong nhóm được giữ nguyên, "
+                                 "chỉ bỏ nhóm."]):
             self.ctx.cs.delete_group(r["Ma"])
             self.refresh()
 

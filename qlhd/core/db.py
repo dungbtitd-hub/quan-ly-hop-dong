@@ -315,6 +315,7 @@ ADDED_COLUMNS = [
     ("HopDong", "DonViThoiGian", "TEXT"),
     ("HopDong", "NhacTruocNgay", "INTEGER"),
     ("HopDong", "ThueSuat", "TEXT"),
+    ("HopDong", "HoSoDaLay", "TEXT"),                  # hồ sơ, tài liệu đã lấy về từ đối tác
     ("HoaDonDauRa", "MatHang", "TEXT"),
     ("HoaDonDauRa", "ThueSuat", "TEXT"),
     ("HoaDonDauVao", "MatHang", "TEXT"),

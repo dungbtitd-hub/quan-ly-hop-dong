@@ -14,8 +14,9 @@ from ..core import finance_import
 from ..core.finance import FinanceError, FinanceStore
 from ..core.reports import FinanceReports, export_xlsx, fmt_date, fmt_money, period_range
 from .profit_page import ProfitTab
+from . import style
 from .widgets import (Combo, DataTable, DateEdit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
-                      confirm_changes,
+                      confirm_changes, confirm_delete,
                       copy_text, error, hint, info, page_title, run_safely, toolbar)
 
 ENTRY_COLS = [("Ngay", "Ngày", "date"), ("SoPhieu", "Số phiếu / Số HĐ", "text"), ("PhanLoai", "Phân loại", "text"),
@@ -39,7 +40,7 @@ class RecoveryCodeDialog(QDialog):
                            "Warn"))
         edit = QLineEdit(code)
         edit.setReadOnly(True)
-        edit.setStyleSheet("font-family: Consolas, Menlo, monospace; font-size: 14pt;")
+        edit.setStyleSheet(f"font-family: Consolas, Menlo, monospace; font-size: {style.pt(14)};")
         lay.addWidget(edit)
         row = QHBoxLayout()
         row.addWidget(button("Sao chép", lambda: copy_text(code)))
@@ -466,7 +467,9 @@ class FinancePage(QWidget):
         rows = [r for r in self.ledger.selected() if r["Nguon"] == "Phiếu"]
         if not rows:
             return info(self, "Chọn phiếu chi / phiếu thu khác cần xóa (khoản thu hợp đồng xóa ở phần Hợp đồng).")
-        if confirm(self, f"Xóa vĩnh viễn {len(rows)} phiếu, tổng {fmt_money(sum(r['Thu'] + r['Chi'] for r in rows))} đ?"):
+        if confirm_delete(self, f"{len(rows)} phiếu thu chi, tổng {fmt_money(sum(r['Thu'] + r['Chi'] for r in rows))} đ",
+                          [f"{fmt_date(r['Ngay']) if r.get('Ngay') else ''} {r.get('NoiDung') or ''} "
+                           f"{fmt_money(r['Thu'] + r['Chi'])} đ".strip() for r in rows], count=len(rows)):
             self.ctx.finance.delete_vouchers([r["Ma"] for r in rows])
             self.reload()
 
@@ -614,7 +617,9 @@ class FinancePage(QWidget):
 
     def _cat_delete(self):
         sel = self._cat_selected()
-        if sel and sel[0] == "cat" and confirm(self, "Xóa mục này?"):
+        if sel and sel[0] == "cat" and confirm_delete(self, "mục thu chi đang chọn",
+                                                       ["Mục đã có phiếu hoặc có mục con thì phần mềm không cho xóa (chỉ ẩn); dùng "
+                                                        "\"Chuyển phiếu\" sang mục khác trước."]):
             run_safely(self, self.ctx.finance.delete_category, sel[1])
             self.reload_categories()
 
@@ -762,7 +767,10 @@ class FinancePage(QWidget):
         p = self._d_preview()
         if not p["so_phieu"]:
             return info(self, "Không có phiếu nào trong khoảng này.")
-        if not confirm(self, f"Xóa vĩnh viễn {p['so_phieu']} phiếu? Nên xuất Excel trước."):
+        if not confirm_delete(self, f"{p['so_phieu']} phiếu thu chi từ {fmt_date(self.d_tu.value())} đến "
+                                    f"{fmt_date(self.d_den.value())}",
+                              [f"Thu khác {fmt_money(p['thu'])} đ, chi {fmt_money(p['chi'])} đ.",
+                               "Sau bước này phải nhập lại Khóa thu chi."], count=p["so_phieu"]):
             return
         key = ask_secret(self, "Xác nhận", "Nhập lại Khóa thu chi để xóa:")
         if key is None:

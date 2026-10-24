@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QComboBox, QCheckBox, QFileDialog, QGridLayout, Q
 from ..core.contracts import CONTRACT_STATUSES
 from ..core.reports import (CONTEXT_LABELS, CONTEXTS, RELATIVE_PERIODS, TAX_MODES, ContractReports, ReportFilters,
                             export_xlsx, relative_range)
-from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm, hint, info,
+from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm_delete, hint, info,
                       page_title, toolbar)
 
 TEMPLATE_PREFIX = "mau_bao_cao:"
@@ -339,7 +339,7 @@ class ReportsPage(QWidget):
 
     def _del_template(self):
         name = self.templates.value()
-        if name and confirm(self, f"Xóa mẫu báo cáo \"{name}\"?"):
+        if name and confirm_delete(self, f"mẫu báo cáo \"{name}\"", ["Chỉ xóa mẫu đã lưu, số liệu không đổi."]):
             self.ctx.db.set_setting(TEMPLATE_PREFIX + name, None)
             self.refresh()
 

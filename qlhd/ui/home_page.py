@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QBoxLayout, QDialog, QDialogButtonBox, QFrame, QG
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from ..core.reports import fmt_date, fmt_money
+from . import style
 from .widgets import button, card, hint, info, page_title, tagged
 
 WEEKDAYS = ("Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ nhật")
@@ -259,7 +260,7 @@ class HomePage(QWidget):
         wd.setAlignment(Qt.AlignCenter)
         num = QLabel(str(d.day))
         num.setAlignment(Qt.AlignCenter)
-        num.setStyleSheet("font-size:13pt; font-weight:700;")
+        num.setStyleSheet(f"font-size:{style.pt(13)}; font-weight:700;")
         v.addWidget(wd)
         v.addWidget(num)
         mark = tagged(QLabel(f"{len(events)} việc" if events else " "), "Hint" if not events else "Warn")

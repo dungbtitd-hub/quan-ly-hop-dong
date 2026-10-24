@@ -40,6 +40,48 @@ def confirm_changes(parent, changes: list[tuple[str, str, str]], what: str = "")
                    "Xác nhận sửa dữ liệu")
 
 
+class DeleteDialog(QDialog):
+    """Hỏi kỹ trước khi xóa: nêu rõ xóa gì, kéo theo gì, có hoàn tác được không; phải tích đồng ý mới bấm Xóa được."""
+
+    def __init__(self, what: str, details=(), *, permanent: bool = True, count: int = 1, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Xác nhận xóa")
+        self.setMinimumWidth(460)
+        lay = QVBoxLayout(self)
+        head = QLabel(f"Bạn sắp xóa {what}.")
+        head.setWordWrap(True)
+        head.setStyleSheet("font-weight:600;")
+        lay.addWidget(head)
+        details = [d for d in details if d]
+        if details:
+            lay.addWidget(hint("\n".join(f"• {d}" for d in details[:15])
+                               + (f"\n… và {len(details) - 15} mục khác." if len(details) > 15 else "")))
+        warn = QLabel("Xóa vĩnh viễn, không thể hoàn tác. Nên xuất Excel hoặc sao lưu trước nếu cần giữ."
+                      if permanent else "Có thể khôi phục lại sau ở mục đã xóa.")
+        warn.setWordWrap(True)
+        warn.setObjectName("Danger" if permanent else "Hint")
+        lay.addWidget(warn)
+        self.agree = QCheckBox(f"Tôi đã kiểm tra, đồng ý xóa {count} mục này" if count > 1
+                               else "Tôi đã kiểm tra, đồng ý xóa")
+        lay.addWidget(self.agree)
+        bb = QDialogButtonBox()
+        self.ok = bb.addButton("Xóa", QDialogButtonBox.AcceptRole)
+        self.ok.setObjectName("Danger")
+        cancel = bb.addButton("Không xóa", QDialogButtonBox.RejectRole)
+        self.ok.setEnabled(False)
+        self.ok.setAutoDefault(False)
+        cancel.setDefault(True)
+        self.agree.toggled.connect(self.ok.setEnabled)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+
+def confirm_delete(parent, what: str, details=(), *, permanent: bool = True, count: int = 1) -> bool:
+    """Mọi thao tác xóa đều qua đây (hỏi kỹ, mặc định là Không xóa)."""
+    return DeleteDialog(what, details, permanent=permanent, count=count, parent=parent).exec() == QDialog.Accepted
+
+
 def ask_secret(parent, title: str, label: str) -> str | None:
     text, ok = QInputDialog.getText(parent, title, label, QLineEdit.Password)
     return text if ok else None
@@ -260,6 +302,7 @@ class DataTable(QTableWidget):
                     r["STT"] = n
         self.setSortingEnabled(False)
         self.clear()
+        self.verticalHeader().setDefaultSectionSize(int(30 * style.font_scale()))   # theo cỡ chữ đang chọn
         self.setColumnCount(len(self.columns))
         self.setHorizontalHeaderLabels([c[1] for c in self.columns])
         self.setRowCount(len(self.rows))

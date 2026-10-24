@@ -35,6 +35,7 @@ CONTRACT_COLS = [
     ("Ngày kết thúc dự kiến", "NgayKetThucDuKien", False, "date"),
     ("Tình trạng", "TinhTrangHopDong", False, "status"),
     ("Ghi chú", "GhiChu", False, "text"),
+    ("Hồ sơ đã lấy về", "HoSoDaLay", False, "text"),
 ]
 INVOICE_COLS = [
     ("Số hợp đồng", "SoHopDong", True, "text"),
@@ -63,7 +64,7 @@ EXAMPLES = {
     "Hợp đồng": [
         ["01/2026/HĐTV", "Tư vấn thiết kế trường THCS A", "Đầu ra", "Tư vấn thiết kế", "Ban QLDA quận Ba Đình",
          "0101234567", 100000000, "8%", None, None, date(2026, 1, 15), date(2026, 2, 1), 11, "tháng", None,
-         "Đang thực hiện", "Ví dụ, xóa dòng này trước khi nhập"],
+         "Đang thực hiện", "Ví dụ, xóa dòng này trước khi nhập", "Bản vẽ khảo sát gốc, biên bản giao mốc (lấy 20/01/2026)"],
         ["05/2026/MB", "Mua vật tư văn phòng", "Đầu vào", "Mua sắm", "Công ty TNHH Vật tư B", "0309876543",
          None, "10%", None, 22000000, date(2026, 2, 3), None, 30, "ngày", None, "Hoàn thành", "Ví dụ, xóa dòng này trước khi nhập"],
     ],

@@ -1,6 +1,7 @@
 """Giao diện phẳng hiện đại, thanh điều hướng tối bên trái; hai chế độ sáng / tối."""
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from string import Template
@@ -30,7 +31,9 @@ THEMES = {
     },
 }
 THEME_NAMES = {"sang": "Sáng", "toi": "Tối"}
+FONT_SIZES = {"nho": ("Nhỏ", 0.9), "vua": ("Vừa", 1.0), "lon": ("Lớn", 1.15), "rat_lon": ("Rất lớn", 1.3)}
 _current = "sang"
+_font = "vua"
 
 QSS = Template("""
 * { font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif; font-size: 10pt; color: $text; }
@@ -206,9 +209,26 @@ def _assets(theme: str) -> dict[str, str]:
     return out
 
 
+def font_scale() -> float:
+    return FONT_SIZES.get(_font, FONT_SIZES["vua"])[1]
+
+
+def font_size() -> str:
+    return _font
+
+
+def pt(size: float) -> str:
+    """Cỡ chữ theo tùy chọn cỡ chữ đang dùng (cho style đặt riêng trong mã)."""
+    return f"{size * font_scale():.1f}pt"
+
+
 def qss(theme: str = "sang") -> str:
     theme = theme if theme in THEMES else "sang"
-    return QSS.substitute({**THEMES[theme], **_assets(theme)})
+    text = QSS.substitute({**THEMES[theme], **_assets(theme)})
+    k = font_scale()
+    if k != 1.0:      # mọi cỡ chữ trong QSS nhân theo tỷ lệ đã chọn
+        text = re.sub(r"(\d+(?:\.\d+)?)pt", lambda m: f"{float(m.group(1)) * k:.1f}pt", text)
+    return text
 
 
 def color(key: str) -> str:
@@ -220,9 +240,11 @@ def current() -> str:
     return _current
 
 
-def apply_theme(app, theme: str = "sang") -> None:
-    global _current
+def apply_theme(app, theme: str = "sang", font: str | None = None) -> None:
+    global _current, _font
     _current = theme if theme in THEMES else "sang"
+    if font is not None:
+        _font = font if font in FONT_SIZES else "vua"
     t = THEMES[_current]
     pal = QPalette()
     for role, key in ((QPalette.Window, "bg"), (QPalette.WindowText, "text"), (QPalette.Base, "card"),

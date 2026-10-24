@@ -355,7 +355,10 @@ class ContractService:
         paid = self.db.one("SELECT COALESCE(SUM(SoTien), 0) s, MAX(NgayThanhToan) d FROM ThanhToanHopDong"
                            " WHERE DaXoa = 0 AND MaHopDong = ?" + cond_p, pp)
         value = hd["GiaTriTongSauThue"]
+        adv = self.db.one("SELECT COALESCE(SUM(SoTien), 0) s FROM ThanhToanHopDong WHERE DaXoa = 0 AND MaHopDong = ?"
+                          " AND MaHDDauRa IS NULL" + cond_p, pp)["s"]
         return {
+            "TamUngConLai": adv,                     # tạm ứng chưa khấu trừ vào hóa đơn nào
             "GiaTriHD": value, "DaXuatHD": invoiced, "ConPhaiXuat": max(value - invoiced, 0),
             "DaThanhToan": paid["s"], "ConPhaiThu": invoiced - paid["s"],
             "PhanTramTT": round(paid["s"] * 100 / value, 1) if value else 0.0,
@@ -454,6 +457,34 @@ class ContractService:
             self.db.update("ThanhToanHopDong", ma, v)
             return ma
         return self.db.insert("ThanhToanHopDong", v)
+
+    def advances(self, ma_hd: str) -> list[sqlite3.Row]:
+        """Các lần thu tạm ứng / theo hợp đồng chưa gắn hóa đơn nào (chưa khấu trừ)."""
+        return self.db.active("ThanhToanHopDong", "MaHopDong = ? AND MaHDDauRa IS NULL", (ma_hd,), "NgayThanhToan")
+
+    def apply_advances(self, ma_hd: str, ma_hddr: str, amount: int) -> int:
+        """Khấu trừ `amount` đồng tạm ứng (lần cũ trước) vào hóa đơn: lần tạm ứng nằm trọn trong số khấu trừ thì gắn vào
+        hóa đơn; lần khấu trừ một phần thì tách: phần khấu trừ thành lần thu của hóa đơn, phần còn lại vẫn là tạm ứng."""
+        left = max(int(amount or 0), 0)
+        done = 0
+        for r in self.advances(ma_hd):
+            if left <= 0:
+                break
+            if r["SoTien"] <= left:
+                self.db.update("ThanhToanHopDong", r["Ma"], {"MaHDDauRa": ma_hddr}, commit=False)
+                part = r["SoTien"]
+            else:
+                part = left
+                self.db.update("ThanhToanHopDong", r["Ma"], {"SoTien": r["SoTien"] - part}, commit=False)
+                v = {k: r[k] for k in ("MaHopDong", "NgayThanhToan", "HinhThuc", "SoThamChieuSK")}
+                v.update(MaHDDauRa=ma_hddr, SoTien=part,
+                         GhiChu=f"Khấu trừ một phần tạm ứng ngày {r['NgayThanhToan']}" +
+                         (f" – {r['GhiChu']}" if r["GhiChu"] else ""))
+                self.db.insert("ThanhToanHopDong", v, commit=False)
+            left -= part
+            done += part
+        self.db.conn.commit()
+        return done
 
     def delete_payment(self, ma: str) -> None:
         self.db.soft_delete("ThanhToanHopDong", ma)

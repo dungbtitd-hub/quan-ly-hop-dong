@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, Q
 
 from ..core.profit import GROUPS, REVENUE_MODES, ProfitError, ProfitService
 from ..core.reports import export_xlsx, fmt_money
-from .widgets import (Combo, DataTable, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm, confirm_changes,
+from .widgets import (Combo, DataTable, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm, confirm_changes, confirm_delete,
                       error, hint,
                       info, run_safely, toolbar)
 
@@ -218,7 +218,8 @@ class ProfitTab(QWidget):
 
     def delete_row(self):
         r = self._current_row()
-        if r is not None and confirm(self, f"Xóa vĩnh viễn dòng \"{r['TenDong']}\"?"):
+        if r is not None and confirm_delete(self, f"dòng \"{r['TenDong']}\" của bảng lãi lỗ",
+                                            ["Số nhập tay của dòng này ở mọi tháng cũng bị xóa."]):
             self._run(self.svc.delete_row, r["Ma"])
 
     def close_year(self):
@@ -275,8 +276,9 @@ class ProfitTab(QWidget):
 
     def delete_year(self):
         y = self.year.value()
-        if confirm(self, f"Xóa vĩnh viễn số liệu bảng lãi lỗ năm {y} (dòng tự thêm, số nhập tay, số chốt)? Không "
-                         "khôi phục được. Nên xuất Excel trước.") and self._check_key():
+        if confirm_delete(self, f"toàn bộ số liệu bảng lãi lỗ năm {y}",
+                          ["Dòng tự thêm, số nhập tay, số đã chốt của năm này.",
+                           "Sau bước này phải nhập lại Khóa thu chi."]) and self._check_key():
             n = self.svc.delete_year(y)
             info(self, f"Đã xóa {n} bản ghi lãi lỗ năm {y}.")
             self.reload()

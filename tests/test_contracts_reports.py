@@ -151,3 +151,28 @@ def test_reports_split_by_contract_year(company):
     for key, _ in CONTEXTS:
         assert cr.build(key, ReportFilters())
     assert cr.build("hop_dong", ReportFilters(tach_nam=False))[0].rows[0].get("_nhan") is None
+
+
+def test_advance_before_invoice_then_deducted_per_installment(company):
+    """Hợp đồng chưa xuất hóa đơn vẫn ghi tạm ứng; có hóa đơn thì khấu trừ tạm ứng, phần còn lại thu đợt sau."""
+    db = company["gd"].db
+    d = sample_data(db)
+    cs = d["cs"]
+    hd = cs.save_contract({"ThoiGianThucHien": 3, "SoHopDong": "30/2026/HĐTV", "TenHopDong": "Hai đợt",
+                           "ChieuHopDong": "Đầu ra", "MaDoiTac": d["cdt"], "GiaTriTruocThue": 200_000_000,
+                           "VAT": 20_000_000, "NgayKy": "2026-05-01"})
+    cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-05-05", "SoTien": 30_000_000})
+    cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-05-20", "SoTien": 40_000_000})
+    assert sum(r["SoTien"] for r in cs.advances(hd)) == 70_000_000
+    inv1 = cs.save_out_invoice({"SoHoaDon": "101", "MaHopDong": hd, "NgayXuatHD": "2026-06-01",
+                                "GiaTriTruocThue": 50_000_000, "VAT": 5_000_000})
+    assert cs.apply_advances(hd, inv1, 50_000_000) == 50_000_000                   # khấu trừ một phần: tách lần 2
+    assert sorted(p["SoTien"] for p in cs.invoice_payments(inv1)) == [20_000_000, 30_000_000]
+    assert [r["SoTien"] for r in cs.advances(hd)] == [20_000_000]
+    cs.save_payment({"MaHopDong": hd, "MaHDDauRa": inv1, "NgayThanhToan": "2026-06-10", "SoTien": 5_000_000})
+    assert sum(p["SoTien"] for p in cs.invoice_payments(inv1)) == 55_000_000
+    inv2 = cs.save_out_invoice({"SoHoaDon": "102", "MaHopDong": hd, "NgayXuatHD": "2026-08-01",
+                                "GiaTriTruocThue": 150_000_000, "VAT": 15_000_000})
+    assert cs.apply_advances(hd, inv2, 20_000_000) == 20_000_000 and not cs.advances(hd)
+    total = sum(p["SoTien"] for p in db.active("ThanhToanHopDong", "MaHopDong = ?", (hd,)))
+    assert total == 75_000_000                                                       # không sinh thêm tiền

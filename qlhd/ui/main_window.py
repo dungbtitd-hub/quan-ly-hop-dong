@@ -246,6 +246,14 @@ class MainWindow(QMainWindow):
         self.theme_btn.setIconSize(QSize(18, 18))
         self.theme_btn.clicked.connect(self.toggle_theme)
         lay.addWidget(self.theme_btn)
+        self.font_btn = QToolButton()
+        self.font_btn.setObjectName("IconButton")
+        self.font_btn.setFixedSize(38, 38)
+        self.font_btn.setText("Aa")
+        self.font_btn.setToolTip("Cỡ chữ")
+        self.font_btn.setPopupMode(QToolButton.InstantPopup)
+        self.font_btn.setMenu(self._font_menu())
+        lay.addWidget(self.font_btn)
         self.bell = QToolButton()
         self.bell.setObjectName("IconButton")
         self.bell.setFixedSize(38, 38)
@@ -273,7 +281,7 @@ class MainWindow(QMainWindow):
                    ("Đổi mật khẩu…", "key", lambda: self._my_account(1)), None,
                    ("Bản quyền / Gia hạn…", "key", self._renew),
                    ("Giới thiệu / Nhà phát triển", "info", self._about), None,
-                   ("Chuyển giao diện sáng / tối", "moon", self.toggle_theme),
+                   ("Chuyển giao diện sáng / tối", "moon", self.toggle_theme), "font",
                    ("Sao lưu ngay", "save", self._backup), ("Khôi phục từ bản sao lưu…", "import", self._restore),
                    ("Mở thư mục dữ liệu", "folder",
                     lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.ctx.data_dir))))]
@@ -284,6 +292,9 @@ class MainWindow(QMainWindow):
             if e is None:
                 m.addSeparator()
                 continue
+            if e == "font":
+                m.addMenu(self._font_menu())
+                continue
             text, icon_name, fn = e
             a = QAction(text, self)
             if icon_name:
@@ -291,6 +302,26 @@ class MainWindow(QMainWindow):
             a.triggered.connect(fn)
             m.addAction(a)
         return m
+
+    def _font_menu(self) -> QMenu:
+        m = QMenu("Cỡ chữ", self)
+        self.font_actions = {}
+        for key, (label, k) in style.FONT_SIZES.items():
+            a = QAction(f"{label} ({round(k * 100)}%)", self)
+            a.setCheckable(True)
+            a.setChecked(style.font_size() == key)
+            a.triggered.connect(lambda _=False, key=key: self.set_font_size(key))
+            m.addAction(a)
+            self.font_actions[key] = a
+        return m
+
+    def set_font_size(self, key: str) -> None:
+        """Đổi cỡ chữ toàn phần mềm, nhớ cho lần mở sau trên máy này."""
+        style.apply_theme(QApplication.instance(), style.current(), key)
+        self.ctx.db.set_setting("co_chu", key)
+        for k, a in self.font_actions.items():
+            a.setChecked(k == key)
+        self.refresh_all()
 
     def _paint_topbar(self):
         dark = style.current() == "toi"

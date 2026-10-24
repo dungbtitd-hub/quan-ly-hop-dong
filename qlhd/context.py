@@ -17,7 +17,7 @@ from .core.sync import SyncService
 KEEP_BACKUPS = 30
 # Giữ lại khi xóa sạch dữ liệu nhưng vẫn dùng tiếp bản quyền, tài khoản trên máy này.
 LICENSE_TABLES = ("ThongTinMay", "BanQuyen", "NguoiDung", "PhanQuyen", "MaDaCap", "DanhSachThuHoi", "KhoaThuChi")
-LICENSE_SETTINGS = ("khoa_cong_ty_tam", "ngay_lon_nhat", "giao_dien")
+LICENSE_SETTINGS = ("khoa_cong_ty_tam", "ngay_lon_nhat", "giao_dien", "co_chu")
 KEEP_FILES = ("machine.seed",)     # tệp sinh Mã máy dự phòng: giữ để Mã máy không đổi
 
 

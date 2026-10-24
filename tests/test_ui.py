@@ -455,7 +455,7 @@ def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
     assert previews[-1] == 1 and "thêm 1" in shown[-1]
     assert any(r.get("TenTS") == "Quạt cây" for r in page.ccdc.table.rows)
     # xóa tài sản hết khấu hao khỏi sổ
-    monkeypatch.setattr(assets_page, "confirm", lambda *a: True)
+    monkeypatch.setattr(assets_page, "confirm_delete", lambda *a, **k: True)
     monkeypatch.setattr(assets_page.RemoveDepreciatedDialog, "exec", lambda dlg: QDialog.Accepted)
     page.ccdc.year.setValue(2027)
     done = page.svc.fully_depreciated("CCDC", 2027)
@@ -549,13 +549,13 @@ def test_invoice_payment_details(qtbot, ctx, monkeypatch):
     page.add_payment()                       # đã có thanh toán: mở chi tiết thay vì ghi mới
     assert opened == [1]
     asked = []
-    monkeypatch.setattr(invoices_page, "confirm", lambda _p, text, *a: asked.append(text) or False)
+    monkeypatch.setattr(invoices_page, "confirm_delete", lambda _p, text, *a, **k: asked.append(text) or False)
     dlg = InvoicePaymentsDialog(ctx, r, page)
     qtbot.addWidget(dlg)
     dlg.table.selectRow(0)
     dlg.delete()
     assert asked and "FT123" in asked[0] and ctx.cs.invoice_paid(r["Ma"]) == 30_000_000   # chưa xác nhận: không xóa
-    monkeypatch.setattr(invoices_page, "confirm", lambda *a: True)
+    monkeypatch.setattr(invoices_page, "confirm_delete", lambda *a, **k: True)
     dlg.delete()
     assert ctx.cs.invoice_paid(r["Ma"]) == 0 and dlg.table.rowCount() == 0
     page.search.clear()
@@ -735,6 +735,7 @@ def test_contract_tab_adds_out_invoice_and_payment(qtbot, ctx, monkeypatch):
     assert row["TTThanhToan"] == "Chưa thu" and row["ConPhaiThu"] == 11_000_000
     # ghi nhận thanh toán ngay tại thẻ Hóa đơn
     page.invoices.selectRow(page.invoices.rows.index(row))
+    monkeypatch.setattr(invoices_page, "advance_dialog", lambda *a: 0)
     monkeypatch.setattr(invoices_page, "payment_dialog", lambda c, p, ma_hd, v, *a: dict(
         v, MaHopDong=ma_hd, NgayThanhToan="2026-05-20", SoThamChieuSK="FT777"))
     page.invoice_payment()
@@ -748,7 +749,7 @@ def test_contract_tab_adds_out_invoice_and_payment(qtbot, ctx, monkeypatch):
     assert opened == [1]
     # xóa hóa đơn ngay tại thẻ Hóa đơn (hỏi xác nhận), lần thanh toán vẫn giữ ở hợp đồng
     from qlhd.ui import contracts_page
-    monkeypatch.setattr(contracts_page, "confirm", lambda *a: True)
+    monkeypatch.setattr(contracts_page, "confirm_delete", lambda *a, **k: True)
     page.invoices.selectRow(page.invoices.rows.index(row))
     page.delete_invoice()
     assert not any(r["SoHoaDon"] == "77" for r in page.invoices.rows) and page.current_id() == hd["Ma"]
@@ -865,3 +866,43 @@ def test_classify_dialog_lists_every_group_and_switches_class(qtbot):
     assert d.values()[1] is None
     assert dm.classify("Thay lốp xe ô tô", 3_000_000).nhom.ma == "CP03"
     assert dm.classify("Lốp xe Michelin", 3_000_000).nhom.ma == "CP03"
+
+
+def test_invoice_payment_offers_advance_deduction(qtbot, ctx, monkeypatch):
+    from qlhd.ui import invoices_page
+
+    hd = next(h["Ma"] for h in ctx.cs.contracts("Đầu ra"))
+    inv = ctx.cs.save_out_invoice({"SoHoaDon": "909", "MaHopDong": hd, "NgayXuatHD": "2026-06-01",
+                                   "GiaTriTruocThue": 1_000_000, "VAT": 100_000})
+    adv = ctx.cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-05-01", "SoTien": 400_000})
+    for a in ctx.cs.advances(hd):
+        if a["Ma"] != adv:
+            ctx.cs.delete_payment(a["Ma"])                               # chỉ giữ một tạm ứng để kiểm tra
+    asked, seen = [], []
+    monkeypatch.setattr(invoices_page, "advance_dialog", lambda p, r, adv: asked.append(adv) or 300_000)
+    monkeypatch.setattr(invoices_page, "info", lambda *a: None)
+    monkeypatch.setattr(invoices_page, "payment_dialog", lambda c, p, ma_hd, v, *a: seen.append(v) or None)
+    row = invoices_page.out_invoice_row(ctx, ctx.db.get("HoaDonDauRa", inv))
+    assert invoices_page.invoice_payment(ctx, None, row)
+    assert asked[0][0]["SoTien"] == 400_000 and seen[0]["SoTien"] == 800_000      # khấu trừ 300.000 / 400.000
+    assert ctx.db.get("ThanhToanHopDong", adv)["SoTien"] == 100_000 and ctx.cs.advances(hd)
+
+
+def test_delete_dialog_needs_explicit_agreement(qtbot):
+    from qlhd.ui.widgets import DeleteDialog
+    dlg = DeleteDialog("hợp đồng 01", ["2 công việc", ""], count=1)
+    qtbot.addWidget(dlg)
+    assert not dlg.ok.isEnabled()              # chưa tích đồng ý: không bấm Xóa được
+    dlg.agree.setChecked(True)
+    assert dlg.ok.isEnabled()
+
+
+def test_font_size_scales_whole_app(qtbot):
+    from PySide6.QtWidgets import QApplication
+    from qlhd.ui import style
+    try:
+        style.apply_theme(QApplication.instance(), "sang", "lon")
+        assert "11.5pt" in QApplication.instance().styleSheet() and style.pt(10) == "11.5pt"
+    finally:
+        style.apply_theme(QApplication.instance(), "sang", "vua")
+    assert "font-size: 10pt" in QApplication.instance().styleSheet()

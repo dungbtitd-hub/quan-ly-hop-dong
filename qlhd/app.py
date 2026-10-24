@@ -64,7 +64,7 @@ def main(argv=None) -> int:
         return self_test()
     app = create_app(argv)
     ctx = AppContext()
-    apply_theme(app, ctx.db.setting("giao_dien") or "sang")
+    apply_theme(app, ctx.db.setting("giao_dien") or "sang", ctx.db.setting("co_chu") or "vua")
     try:
         SplashDialog(ctx.acc).exec()
         if not ctx.acc.is_activated():

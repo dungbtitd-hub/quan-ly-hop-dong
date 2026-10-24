@@ -16,8 +16,8 @@ from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import edit_payment, payment_dialog
 from . import style
-from .widgets import (VAT_HINT, Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes,
-                      error, hint, info, rate_field,
+from .widgets import (VAT_HINT, Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
+                      error, hint, info, rate_field, require,
                       page_title, run_safely, toolbar)
 
 
@@ -84,15 +84,60 @@ def out_invoice_row(ctx, inv) -> dict:
     return r
 
 
+def advance_dialog(parent, r: dict, adv: list) -> int | None:
+    """Hỏi số tiền tạm ứng khấu trừ vào hóa đơn: mặc định tối đa có thể, nhập thấp hơn tùy ý; 0 = không khấu trừ."""
+    tong = sum(a["SoTien"] for a in adv)
+    most = min(tong, max(r["ConPhaiThu"], 0))
+    lines = "\n".join(f"• {fmt_date(a['NgayThanhToan'])}: {fmt_money(a['SoTien'])} đ" for a in adv[:8])
+    dlg = FormDialog("Khấu trừ tạm ứng", [
+        {"key": "SoTien", "label": f"Khấu trừ vào hóa đơn số {r['SoHoaDon']}", "kind": "money",
+         "hint": f"Hợp đồng có {fmt_money(tong)} đ tạm ứng chưa khấu trừ:\n{lines}\n\nTối đa {fmt_money(most)} đ "
+                 f"(hóa đơn còn phải thu {fmt_money(max(r['ConPhaiThu'], 0))} đ). Nhập số thấp hơn để khấu trừ một "
+                 "phần; 0 = không khấu trừ. Phần còn phải thu ghi ở bước sau."}],
+        {"SoTien": most}, parent,
+        validate=lambda v: require(0 <= (v["SoTien"] or 0) <= most,
+                                   f"Chỉ khấu trừ được từ 0 đến {fmt_money(most)} đ."))
+    left = QLabel()                                   # tự tính tạm ứng còn phải khấu trừ theo số đang nhập
+    left.setObjectName("Warn")
+
+    def show_left(v=None):
+        v = dlg.widget("SoTien").value() if v is None else v
+        left.setText(f"Sau lần này: tạm ứng còn phải khấu trừ {fmt_money(max(tong - (v or 0), 0))} đ · "
+                     f"hóa đơn còn phải thu {fmt_money(max(r['ConPhaiThu'] - (v or 0), 0))} đ")
+    dlg.widget("SoTien").valueChanged.connect(show_left)
+    show_left()
+    dlg.layout().insertWidget(dlg.layout().count() - 1, left)
+    if dlg.exec() != QDialog.Accepted:
+        return None
+    return int(dlg.values()["SoTien"] or 0)
+
+
 def invoice_payment(ctx, parent, r: dict) -> bool:
     """Ghi nhận thanh toán cho một hóa đơn đầu ra; đã có lần thanh toán thì mở chi tiết (sửa / xóa / thu thêm)."""
     if ctx.cs.invoice_payments(r["Ma"]):
         dlg = InvoicePaymentsDialog(ctx, r, parent)
         dlg.exec()
         return dlg.changed
+    changed = False
+    adv = ctx.cs.advances(r["MaHopDong"]) if r["ConPhaiThu"] > 0 else []
+    if adv:
+        amount = advance_dialog(parent, r, adv)
+        if amount:
+            done = ctx.cs.apply_advances(r["MaHopDong"], r["Ma"], amount)
+            ctx.db.log(ctx.user["TenDangNhap"] if ctx.user else None, "Khấu trừ tạm ứng",
+                       f"{fmt_money(done)} đ vào hóa đơn {r['SoHoaDon']}")
+            changed = True
+            r = out_invoice_row(ctx, ctx.db.get("HoaDonDauRa", r["Ma"]))
+            con = sum(a["SoTien"] for a in ctx.cs.advances(r["MaHopDong"]))
+            info(parent, f"Đã khấu trừ {fmt_money(done)} đ tạm ứng vào hóa đơn số {r['SoHoaDon']}.\n"
+                         f"Tạm ứng còn phải khấu trừ: {fmt_money(con)} đ.\n"
+                         + ("Hóa đơn đã đủ, không cần ghi thêm." if r["ConPhaiThu"] <= 0
+                            else f"Hóa đơn còn phải thu {fmt_money(r['ConPhaiThu'])} đ: ghi ở bước tiếp theo."))
+            if r["ConPhaiThu"] <= 0:
+                return True
     v = payment_dialog(ctx, parent, r["MaHopDong"], {"MaHDDauRa": r["Ma"], "SoTien": max(r["ConPhaiThu"], 0),
                                                      "HinhThuc": "Chuyển khoản"})
-    return bool(v and run_safely(parent, ctx.cs.save_payment, v))
+    return bool(v and run_safely(parent, ctx.cs.save_payment, v)) or changed
 
 
 def parse_invoice_file(path: str) -> dict:
@@ -334,7 +379,11 @@ class InvoicesPage(QWidget):
     def add_manual(self):
         if self.kind == "ra" and not self.ctx.cs.contracts("Đầu ra"):
             return info(self, "Chưa có hợp đồng đầu ra nào. Hãy thêm hợp đồng trước.")
-        if self._save({"TinhChatHD": "Gốc"}):
+        values = {"TinhChatHD": "Gốc"}
+        cur = self.table.current() if self.kind == "ra" else None
+        if cur and cur.get("MaHopDong"):             # đang chọn hóa đơn của hợp đồng nào thì điền sẵn hợp đồng đó
+            values["MaHopDong"] = cur["MaHopDong"]
+        if self._save(values):
             self.refresh()
             self.notify_pending()
 
@@ -475,7 +524,20 @@ class InvoicesPage(QWidget):
         if not r:
             return
         so = r.get("SoHoaDon") or r.get("SoHoaDonGoc")
-        if confirm(self, f"Xóa hóa đơn số {so}?"):
+        if self.kind == "ra":
+            pays = self.ctx.cs.invoice_payments(r["Ma"])
+            details = [f"Người mua: {r.get('TenNguoiMua') or r.get('TenDoiTac') or ''}",
+                       f"Hóa đơn đã có {len(pays)} lần thanh toán: các lần này vẫn giữ ở hợp đồng (thành tạm ứng "
+                       "chưa gắn hóa đơn)." if pays else ""]
+        else:
+            n_ts = self.ctx.db.one("SELECT COUNT(*) AS n FROM TaiSan t JOIN DongHoaDonDauVao d ON d.Ma = t.MaDongHD "
+                                   "WHERE t.DaXoa = 0 AND d.MaHoaDon = ?", (r["Ma"],))["n"]
+            details = [f"Người bán: {r.get('TenNhaCungCap') or ''}",
+                       "Các dòng hàng và phân loại của hóa đơn cũng bị xóa.",
+                       f"{n_ts} tài sản / CCDC sinh ra từ hóa đơn này bị bỏ khỏi sổ." if n_ts else ""]
+        if confirm_delete(self, f"hóa đơn đầu {'ra' if self.kind == 'ra' else 'vào'} số {so} "
+                                f"({fmt_money(r.get('GiaTriSauThue') or 0)} đ)",
+                          details + ["Xóa cả trên các máy khác ở lần đồng bộ sau."]):
             (self.ctx.cs.delete_out_invoice if self.kind == "ra" else self.ctx.cs.delete_in_invoice)(r["Ma"])
             self.refresh()
 
@@ -856,9 +918,10 @@ class InvoicePaymentsDialog(QDialog):
         p = self.table.current()
         if not p:
             return info(self, "Chọn một lần thanh toán.")
-        if confirm(self, f"Xóa thông tin thanh toán {fmt_money(p['SoTien'])} đ ngày {fmt_date(p['NgayThanhToan'])}"
-                         + (f", số tham chiếu {p['SoThamChieuSK']}" if p["SoThamChieuSK"] else "")
-                         + " của hóa đơn này?\n\nSau khi xóa, hóa đơn được tính lại số còn phải thu."):
+        if confirm_delete(self, f"thông tin thanh toán {fmt_money(p['SoTien'])} đ ngày {fmt_date(p['NgayThanhToan'])}"
+                                + (f", số tham chiếu {p['SoThamChieuSK']}" if p["SoThamChieuSK"] else "")
+                                + " của hóa đơn này",
+                          ["Sau khi xóa, hóa đơn được tính lại số còn phải thu."]):
             self.ctx.cs.delete_payment(p["Ma"])
             self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa lần thanh toán", fmt_money(p["SoTien"]))
             self.changed = True
