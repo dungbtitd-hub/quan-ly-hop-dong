@@ -18,7 +18,7 @@ from . import style
 from .widgets import (Combo, DataTable, FormDialog, button, confirm, confirm_changes, error, hint, info, page_title,
                       run_safely, toolbar)
 
-LINE_COLS = [("NgayNhanHD", "Ngày HĐ", "date"), ("SoHoaDonGoc", "Số HĐ", "text"),
+LINE_COLS = [("STT", "STT", "int"), ("NgayNhanHD", "Ngày HĐ", "date"), ("SoHoaDonGoc", "Số HĐ", "text"),
              ("TenNhaCungCap", "Người bán", "text"), ("TenHang", "Tên hàng hóa, dịch vụ", "text"),
              ("SoLuong", "SL", "text"), ("DonGiaTinh", "Đơn giá", "money"), ("ThanhTien", "Thành tiền chưa thuế", "money"),
              ("PhanLoai", "Phân loại", "text"), ("NhomDM", "Nhóm danh mục", "text"), ("SoThang", "Số tháng", "int")]
@@ -322,7 +322,7 @@ class RegisterTab(QWidget):
 
     def _columns(self):
         cols, keys = (TSCD_COLS, TSCD_KEYS) if self.loai_so == "TSCĐ" else (CCDC_COLS, CCDC_KEYS)
-        out = []
+        out = [("STT", "STT", "int")]
         for k, title in zip(keys, cols):
             kind = "money" if k in MONEY_KEYS else "int" if k in INT_KEYS - {"SoLuong"} else \
                 "date" if k.startswith("Ngay") else "text"

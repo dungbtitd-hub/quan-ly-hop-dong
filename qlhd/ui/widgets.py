@@ -252,6 +252,12 @@ class DataTable(QTableWidget):
         if columns is not None:
             self.columns = columns
         self.rows = [dict(r) for r in rows]
+        if any(c[0] == "STT" for c in self.columns):    # cột số thứ tự: đánh liền mạch, bỏ qua dòng nhóm / tổng
+            n = 0
+            for r in self.rows:
+                if not r.get("_kieu") and "STT" not in r:
+                    n += 1
+                    r["STT"] = n
         self.setSortingEnabled(False)
         self.clear()
         self.setColumnCount(len(self.columns))

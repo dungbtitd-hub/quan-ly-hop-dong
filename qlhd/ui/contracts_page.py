@@ -226,7 +226,6 @@ class ContractsPage(QWidget):
             r["TTThanhToan"] = PAY_STATE_LABELS[contract_pay_state(r)] if hd["ChieuHopDong"] == "Đầu ra" else ""
             r["LoaiHD"] = types.get(hd["MaLoaiHD"], "")
             r["ThoiGianTH"] = duration_text(hd["ThoiGianThucHien"], hd["DonViThoiGian"])
-            r["STT"] = len(rows) + 1
             rows.append(r)
         self.table.set_rows(rows)
         tot = sum(r["GiaTriHD"] for r in rows)

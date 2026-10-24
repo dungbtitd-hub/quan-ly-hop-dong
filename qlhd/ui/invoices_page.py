@@ -187,7 +187,8 @@ class InvoicesPage(QWidget):
         self.only.currentIndexChanged.connect(self.refresh)
         lay.addLayout(toolbar(*btns, "stretch", self.only, self.search))
         if kind == "ra":
-            cols = [("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"), ("NgayXuatHD", "Ngày lập", "date"),
+            cols = [("STT", "STT", "int"),
+                    ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"), ("NgayXuatHD", "Ngày lập", "date"),
                     ("SoHopDong", "Số HĐ", "text"), ("TenNguoiMua", "Người mua", "text"),
                     ("MatHang", "Mặt hàng", "text"), ("ThueSuat", "Thuế suất", "text"),
                     ("GiaTriTruocThue", "Trước thuế", "money"), ("VAT", "VAT", "money"),
@@ -196,7 +197,8 @@ class InvoicesPage(QWidget):
                     ("NgayTT", "Ngày thanh toán", "text"), ("SoThamChieuSK", "Số tham chiếu sao kê", "text"),
                     ("TinhChatHD", "Tính chất", "text")]
         else:
-            cols = [("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDonGoc", "Số", "text"), ("NgayNhanHD", "Ngày", "date"),
+            cols = [("STT", "STT", "int"),
+                    ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDonGoc", "Số", "text"), ("NgayNhanHD", "Ngày", "date"),
                     ("TenNhaCungCap", "Tên người bán", "text"), ("MaThueNCC", "MST người bán", "text"),
                     ("MatHang", "Mặt hàng", "text"), ("GiaTriTruocThue", "Trước thuế", "money"),
                     ("ThueSuat", "Thuế suất", "text"), ("VAT", "VAT", "money"), ("PhiKhac", "Phí BVMT", "money"),
