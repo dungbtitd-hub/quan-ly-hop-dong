@@ -142,6 +142,7 @@ FIELD_LABELS = {
     "PhanLoai": "phân loại", "MaNhom": "nhóm danh mục", "SoThang": "số tháng",
 }
 # Giá trị coi như "chưa nhập" – khi gộp bản ghi trùng thì được bổ sung từ máy gửi.
+CLASS_FIELDS = ("PhanLoai", "MaNhomDM", "SoThang", "TuDong")
 PLACEHOLDERS = {"PhanLoai": ("Chưa phân loại",)}
 
 
@@ -272,7 +273,10 @@ class SyncService:
                 since = r["t"]
             for t in SYNCED_TABLES:
                 if since:
-                    tables[t] = [dict(r) for r in self.db.query(f"SELECT * FROM {t} WHERE NgaySua > ?", (since,))]
+                    # NgaySua giữ giờ sửa ở máy gốc: bản ghi nhận từ máy khác sau lần gửi trước cũng phải gửi tiếp
+                    tables[t] = [dict(r) for r in self.db.query(
+                        f"SELECT * FROM {t} WHERE NgaySua > ? OR Ma IN "
+                        "(SELECT Ma FROM NhanDongBo WHERE Bang = ? AND ThoiDiem > ?)", (since, t, since))]
                 else:
                     tables[t] = [dict(r) for r in self.db.query(f"SELECT * FROM {t}")]
         elif scope == "contracts":
@@ -459,7 +463,10 @@ class SyncService:
                             taken.add(dup_ma)
                             dup_row = dict(self.db.get(table, dup_ma))
                             fill = fill_fields(r, dup_row)
-                            diff = differing_fields(r, dup_row)
+                            if table == "DongHoaDonDauVao" and not r.get("TuDong") and dup_row.get("TuDong"):
+                                # máy gửi đã phân loại tay, máy này mới tự phân loại: lấy phân loại tay
+                                fill.update({k: r.get(k) for k in CLASS_FIELDS if r.get(k) != dup_row.get(k)})
+                            diff = [k for k in differing_fields(r, dup_row) if k not in fill]
                             note = "Nghi trùng: " + ", ".join(reasons)
                             if fill:
                                 note += " · Gộp sẽ bổ sung: " + ", ".join(field_label(k) for k in fill)
@@ -502,6 +509,9 @@ class SyncService:
                 action = (decisions or {}).get((table, row["Ma"]))
                 if action is None or (status != ST_DUP and action in (A_MERGE, A_BOTH)):
                     action = default if status == ST_DUP else DEFAULT_ACTION[status]
+                if status == ST_CONFLICT and action is None and table == "DongHoaDonDauVao" \
+                        and bool(r.get("TuDong")) != bool(local.get("TuDong")):
+                    action = A_KEEP if r.get("TuDong") else A_TAKE      # phân loại tay luôn thắng phân loại tự động
                 if status == ST_CONFLICT and action is None and prefer:
                     action = A_TAKE if prefer == "gui" else A_KEEP
                 item = SyncItem(table, row["Ma"], r["Ma"], status, action, describe(table, r), group, r, local,
@@ -533,6 +543,12 @@ class SyncService:
         self.db.backup_to(backup)
         result = {"them": 0, "cap_nhat": 0, "gop": 0, "bo_sung": 0, "bo_qua": 0, "chua_xu_ly": 0, "loi": 0, "loi_chi_tiet": []}
         id_map = self._id_map()
+        stamp_now = now_iso()
+        lines: list[str] = []
+
+        def received(table: str, ma: str):
+            self.db.conn.execute("INSERT OR REPLACE INTO NhanDongBo (Bang, Ma, ThoiDiem) VALUES (?, ?, ?)",
+                                 (table, ma, stamp_now))
 
         def apply_item(it: SyncItem):
             in_scope = only_groups is None or it.group is None or it.group in only_groups
@@ -550,10 +566,13 @@ class SyncService:
                 if it.fill:                     # giữ nguyên bản ghi máy này, chỉ điền thêm các ô còn trống
                     self.db.update(it.table, it.dup_ma, it.fill, commit=False)
                     result["bo_sung"] += 1
+                    if it.table == "DongHoaDonDauVao" and set(CLASS_FIELDS) & set(it.fill):
+                        lines.append(it.dup_ma)
                 result["gop"] += 1
                 return
             try:
                 self.db.upsert_raw(it.table, it.incoming)
+                received(it.table, it.incoming["Ma"])
                 result["them" if it.local is None else "cap_nhat"] += 1
             except sqlite3.IntegrityError as e:
                 result["loi"] += 1
@@ -561,6 +580,12 @@ class SyncService:
 
         try:
             self._classify(pkg, id_map, decisions, prefer, apply_item)
+            if lines:                           # dòng gộp nhận phân loại tay: cập nhật sổ TSCĐ, CCDC theo
+                from .assets import AssetService
+                svc = AssetService(self.db)
+                for ma in lines:
+                    line = self.db.get("DongHoaDonDauVao", ma)
+                    svc._sync_asset(line, self.db.get("HoaDonDauVao", line["MaHoaDon"]))
             self.db.conn.commit()
         except Exception:
             self.db.conn.rollback()

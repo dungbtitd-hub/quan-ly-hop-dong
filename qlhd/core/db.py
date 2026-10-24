@@ -296,6 +296,12 @@ CREATE TABLE IF NOT EXISTS AnhXaMa (       -- bản ghi máy khác đã được
     MaNoiBo TEXT NOT NULL,
     PRIMARY KEY (Bang, MaNgoai)
 );
+CREATE TABLE IF NOT EXISTS NhanDongBo (    -- lúc máy này nhận bản ghi từ máy khác, để gửi tiếp khi đồng bộ "thay đổi"
+    Bang TEXT NOT NULL,
+    Ma TEXT NOT NULL,
+    ThoiDiem TEXT NOT NULL,
+    PRIMARY KEY (Bang, Ma)
+);
 CREATE TABLE IF NOT EXISTS CaiDat (
     Khoa TEXT PRIMARY KEY,
     GiaTri TEXT

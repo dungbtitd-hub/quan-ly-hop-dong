@@ -88,7 +88,7 @@ CATALOG: list[Nhom] = [
          ['cải tạo', 'sửa chữa lớn', 'sơn chống nóng', 'chống thấm', 'lắp đặt nội thất', 'thi công văn phòng'],
          'Nâng cấp làm tăng công năng TSCĐ thì cộng vào nguyên giá tài sản đó (kế toán chọn).'),
     Nhom('TB14', 'Phụ kiện lắp thêm cho xe', 'CHO_PB', '', '', 24, None, 'TSCĐ/CCDC',
-         ['phim cách nhiệt', 'camera hành trình', 'lốp xe', 'bọc ghế', 'thảm sàn', 'độ xe'],
+         ['phim cách nhiệt', 'camera hành trình', 'bọc ghế', 'thảm sàn', 'độ xe'],
          ''),
     Nhom('PB01', 'Phí sử dụng đường bộ, bảo hiểm xe, bảo hiểm tài sản trả cho nhiều tháng', 'CHO_PB', '', '', 12, None, 'CCDC',
          ['phí sử dụng đường bộ', 'cước sử dụng đường bộ', 'phí bảo trì đường bộ', 'bảo hiểm vật chất', 'bảo hiểm thân vỏ', 'bảo hiểm tnds', 'bảo hiểm tài sản', 'bảo hiểm cháy nổ'],
@@ -105,8 +105,11 @@ CATALOG: list[Nhom] = [
     Nhom('CP02', 'Phí qua trạm, vé cầu đường, gửi xe, rửa xe', 'CHI_PHI', '', '', None, None, '6',
          ['cước đường bộ', 'etc', 'vetc', 'epass', 'giao thông số', 'trạm thu phí', 'phí qua trạm', 'vé cầu đường', 'gửi xe', 'trông giữ xe', 'rửa xe'],
          'Cước ETC từng lượt là chi phí ngay; phí đường bộ trả cho nhiều tháng thuộc PB01.'),
-    Nhom('CP03', 'Bảo dưỡng, sửa chữa nhỏ xe và thiết bị', 'CHI_PHI', '', '', None, None, '6',
-         ['bảo dưỡng', 'thay dầu', 'sửa chữa', 'thay thế linh kiện', 'vá lốp', 'bảo trì'],
+    Nhom('CP03', 'Sửa chữa, bảo dưỡng xe ô tô, xe máy và thiết bị (gara, thay lốp, thay dầu…)', 'CHI_PHI', '', '', None,
+         None, '6',
+         ['bảo dưỡng', 'thay dầu', 'sửa chữa', 'thay thế linh kiện', 'vá lốp', 'bảo trì', 'gara', 'garage',
+          'đồng sơn', 'sơn xe', 'gò hàn', 'làm máy', 'má phanh', 'phanh xe', 'ắc quy', 'gầm xe', 'cân chỉnh',
+          'đảo lốp', 'thay lốp', 'lốp xe', 'lốp ô tô', 'săm lốp', 'ắc quy xe', 'ắc quy ô tô', 'dầu nhớt', 'lọc gió', 'lọc dầu', 'nước làm mát', 'công thợ', 'tiền công sửa'],
          ''),
     Nhom('CP04', 'Văn phòng phẩm, mực in, giấy', 'CHI_PHI', '', '', None, None, '6',
          ['văn phòng phẩm', 'vpp', 'giấy a4', 'giấy in', 'mực in', 'hộp mực', 'bút', 'sổ tay', 'sổ sách', 'kẹp', 'file hồ sơ', 'phong bì'],
@@ -233,14 +236,19 @@ def classify(name: str, don_gia: int, *, co_hop_dong: bool = False) -> KetQua:
     return KetQua(pl, nhom, default_months(nhom, pl, don_gia))
 
 
-def group_options(phan_loai: str | None = None) -> list[tuple[str, str]]:
-    """(nhãn, mã nhóm) cho hộp chọn; lọc theo phân loại nếu có, nhóm mặc định của phân loại đó lên đầu."""
+def group_options(phan_loai: str | None = None, *, all_groups: bool = False) -> list[tuple[str, str]]:
+    """(nhãn, mã nhóm) cho hộp chọn; nhóm hợp với phân loại lên đầu. all_groups: kèm cả các nhóm thuộc phân loại
+    khác (ghi rõ phân loại của nhóm) để kế toán tìm thấy mọi nhóm; chọn nhóm đó thì phân loại đổi theo."""
     out = []
     for n in CATALOG:
-        if phan_loai and phan_loai not in allowed_classes(n, NGUONG_TSCD) + allowed_classes(n, 0):
+        fits = not phan_loai or phan_loai in allowed_classes(n, NGUONG_TSCD) + allowed_classes(n, 0)
+        if not fits and not all_groups:
             continue
         main = not phan_loai or phan_loai in (default_class(n, 0), default_class(n, NGUONG_TSCD))
-        out.append((0 if main else 1, f"{n.ma} – {n.ten}", n.ma))
+        label = f"{n.ma} – {n.ten}"
+        if not fits:
+            label += f"  (→ {default_class(n, 0)})"
+        out.append((0 if main else 1 if fits else 2, label, n.ma))
     return [(label, ma) for _, label, ma in sorted(out, key=lambda x: x[0])]
 
 

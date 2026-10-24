@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from datetime import date
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QHeaderView, QLabel, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox,
+                               QFileDialog, QFormLayout, QHeaderView, QLabel, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
                                QWidget)
 
 from ..core import asset_catalog as dm
@@ -50,6 +51,10 @@ class ClassifyDialog(QDialog):
         pl = first["PhanLoai"] if first["PhanLoai"] != dm.CHUA_PHAN_LOAI else kq.phan_loai
         self.cls = Combo([(x, x) for x in CLASS_CHOICES], pl if pl in CLASS_CHOICES else dm.CHI_PHI)
         self.group = Combo()
+        self.group.setEditable(True)                    # gõ vài chữ (VD "lốp", "sửa") để tìm nhóm
+        self.group.setInsertPolicy(QComboBox.NoInsert)
+        self.group.completer().setFilterMode(Qt.MatchContains)
+        self.group.completer().setCompletionMode(QCompleter.PopupCompletion)
         self.cls.setMinimumWidth(380)
         self.group.setMinimumWidth(380)
         self.months = QSpinBox()
@@ -61,6 +66,7 @@ class ClassifyDialog(QDialog):
         self.warn = hint("", "Warn")
         form.addRow("Phân loại *", self.cls)
         form.addRow("Nhóm trong danh mục *", self.group)
+        form.addRow("", hint("Gõ vài chữ để tìm nhóm. Nhóm thuộc phân loại khác vẫn chọn được, phân loại tự đổi theo."))
         form.addRow("Thời gian khấu hao / phân bổ", self.months)
         form.addRow("", self.quick)
         lay.addLayout(form)
@@ -84,7 +90,7 @@ class ClassifyDialog(QDialog):
     def _class_changed(self):
         pl = self.cls.value()
         keep = self.group.value() or self._start_group
-        self.group.set_options(dm.group_options(pl), keep)
+        self.group.set_options(dm.group_options(pl, all_groups=True), keep)
         is_asset = pl in dm.TAI_SAN
         self.months.setEnabled(is_asset)
         while self.quick_lay.count():
@@ -101,6 +107,10 @@ class ClassifyDialog(QDialog):
 
     def _group_changed(self):
         pl = self.cls.value()
+        nhom = dm.BY_CODE.get(self.group.value() or "")
+        if nhom and pl not in dm.allowed_classes(nhom, self.lines[0]["DonGiaTinh"] or 0):
+            self.cls.set_value(dm.default_class(nhom, self.lines[0]["DonGiaTinh"] or 0))   # gọi lại _class_changed
+            return
         if pl in dm.TAI_SAN:
             nhom = dm.BY_CODE.get(self.group.value() or "")
             months = self._start_months
@@ -119,7 +129,8 @@ class ClassifyDialog(QDialog):
         self.warn.setText(msg)
 
     def values(self) -> tuple[str, str | None, int | None]:
-        return self.cls.value(), self.group.value(), (self.months.value() or None)
+        i = self.group.findText(self.group.currentText())     # chữ gõ dở không khớp nhóm nào: coi như chưa chọn
+        return self.cls.value(), (self.group.itemData(i) if i >= 0 else None), (self.months.value() or None)
 
 
 def classify_lines(ctx, parent, rows: list[dict]) -> bool:
@@ -420,9 +431,11 @@ class RegisterTab(QWidget):
         if r is None:
             return
         a = dict(self.ctx.db.get("TaiSan", r["Ma"]))
-        if a["MaDongHD"]:
-            info(self, "Tài sản sinh ra từ hóa đơn đầu vào: thời gian và giá trị theo dòng hóa đơn; đổi phân loại, "
-                       "số tháng thì làm ở thẻ Dòng hóa đơn đầu vào. Ở đây sửa được tên, mã, đơn vị sử dụng…")
+        if a["MaDongHD"] and confirm(self, "Tài sản này sinh ra từ hóa đơn đầu vào. Muốn đổi phân loại, nhóm hoặc số "
+                                           "tháng (VD chuyển sang Chi phí trong kỳ, nhóm sửa chữa xe) thì bấm Có để mở "
+                                           "hộp phân loại.\n\nBấm Không để sửa tên, mã, đơn vị sử dụng…",
+                                     "Đổi phân loại?"):
+            return self.reclassify()
         self._save(a, r["Ma"])
 
     def reclassify(self):

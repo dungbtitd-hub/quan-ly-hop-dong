@@ -850,3 +850,18 @@ def test_report_filters_follow_context(qtbot, ctx):
     assert not rp.tu.isEnabled()                             # kỳ tương đối vẫn khóa ô ngày
     rp.context.set_value("hop_dong")
     assert not rp.tu.isEnabled() and rp.ky_td.isEnabled() and not rp.ky.isEnabled()
+
+
+def test_classify_dialog_lists_every_group_and_switches_class(qtbot):
+    from qlhd.core import asset_catalog as dm
+    from qlhd.ui.assets_page import ClassifyDialog
+    d = ClassifyDialog([{"TenHang": "Thay lốp xe ô tô", "ThanhTien": 3_000_000, "DonGiaTinh": 3_000_000,
+                         "PhanLoai": dm.CCDC, "MaNhomDM": "TB01", "SoThang": 12}])
+    codes = [d.group.itemData(i) for i in range(d.group.count())]
+    assert "CP03" in codes and len(codes) == len(dm.CATALOG)
+    d.group.set_value("CP03")
+    assert d.values() == (dm.CHI_PHI, "CP03", None)
+    d.group.setEditText("lốp không có nhóm này")
+    assert d.values()[1] is None
+    assert dm.classify("Thay lốp xe ô tô", 3_000_000).nhom.ma == "CP03"
+    assert dm.classify("Lốp xe Michelin", 3_000_000).nhom.ma == "CP03"
