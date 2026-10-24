@@ -16,6 +16,7 @@ from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import edit_payment, payment_dialog
 from . import style
+from .in_invoice_form import InInvoiceDialog
 from .widgets import (VAT_HINT, Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
                       error, hint, info, rate_field, require,
                       page_title, run_safely, toolbar)
@@ -203,11 +204,6 @@ class InvoicesPage(QWidget):
         b_hd.setToolTip("Mở hợp đồng của hóa đơn đang chọn để xem, sửa hợp đồng, công việc, thanh toán")
         b_hd.setEnabled(ctx.can("HopDong"))
         btns = [b_add, b_file, b_edit, b_del, b_open, b_hd]
-        if kind == "vao":
-            b_cls = button("Phân loại dòng hàng…", self.classify_lines)
-            b_cls.setToolTip("Xếp các dòng hàng của hóa đơn vào chi phí / CCDC / TSCĐ (sửa nếu phần mềm tự xếp nhầm)")
-            b_cls.setEnabled(ctx.can("TaiSan", "Sua"))
-            btns.append(b_cls)
         b_add.setEnabled(add_ok)
         b_file.setEnabled(add_ok)
         if kind == "vao":
@@ -361,19 +357,26 @@ class InvoicesPage(QWidget):
         values = dict(values)
         if must_choose or (self.kind == "ra" and not values.get("MaHopDong")):
             values["MaHopDong"] = CHOOSE
-        dlg = FormDialog("Hóa đơn đầu ra" if self.kind == "ra" else "Hóa đơn đầu vào",
-                         self._fields(contract_hint, must_choose, suggested, keep=values.get("MaHopDong")), values,
-                         parent or self, validate=_check_chosen)
+        fields = self._fields(contract_hint, must_choose, suggested, keep=values.get("MaHopDong"))
         if self.kind == "ra":
+            dlg = FormDialog("Hóa đơn đầu ra", fields, values, parent or self, validate=_check_chosen)
             bind_type_filter(dlg, self._contracts)
+        else:           # một biểu mẫu: thông tin hóa đơn và phân loại từng dòng hàng
+            dlg = InInvoiceDialog(self.ctx, "Hóa đơn đầu vào", fields, values, parent or self,
+                                  validate=_check_chosen, ma=ma)
         while dlg.exec() == QDialog.Accepted:
             v = dlg.values()
             v.pop("_LoaiHD", None)
             try:
-                fn(dict(v, _Dong=values.get("_Dong")) if self.kind == "vao" else v, ma)
-                return True
+                saved = fn(dict(v, _Dong=values.get("_Dong")) if self.kind == "vao" else v, ma)
             except ValidationError as e:
                 error(parent or self, str(e))
+                continue
+            if self.kind == "vao":
+                errors = dlg.save_classes(saved or ma)
+                if errors:
+                    error(parent or self, "Đã lưu hóa đơn, nhưng chưa lưu được phân loại:\n" + "\n".join(errors[:10]))
+            return True
         return False
 
     def add_manual(self):

@@ -552,20 +552,29 @@ class FormDialog(QDialog):
             if f.get("required") and vals.get(f["key"]) in (None, ""):
                 error(self, f"Chưa nhập {f['label']}.")
                 return
-        if self.validate:
-            try:
+        try:
+            if self.validate:
                 self.validate(vals)
-            except Exception as e:  # noqa: BLE001
-                error(self, str(e))
-                return
+            self.validate_extra()
+        except Exception as e:  # noqa: BLE001
+            error(self, str(e))
+            return
         if self.editing:
             now = self._display()
             changes = [(f["label"], self._initial[f["key"]], now[f["key"]]) for f in self.fields
                        if now[f["key"]] != self._initial[f["key"]] and f.get("kind") != "password"
                        and not f.get("filter")]            # ô chỉ để lọc danh sách, không phải dữ liệu
+            changes += self.extra_changes()
             if changes and not confirm_changes(self, changes):
                 return
         self.accept()
+
+    def validate_extra(self) -> None:
+        """Kiểm tra thêm của biểu mẫu mở rộng (VD bảng phân loại dòng hàng); lỗi thì raise."""
+
+    def extra_changes(self) -> list[tuple[str, str, str]]:
+        """Thay đổi ngoài các ô của biểu mẫu, để liệt kê khi xác nhận sửa."""
+        return []
 
     def _display(self) -> dict:
         """Giá trị từng ô dưới dạng chữ như người dùng thấy (để so sánh và liệt kê thay đổi)."""

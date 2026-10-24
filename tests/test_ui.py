@@ -972,3 +972,57 @@ def test_home_contexts_are_selectable_and_remembered(qtbot, ctx):
         page.resize(1280, 800)
         qtbot.wait(500)
         page.grab().save(os.environ["QLHD_SHOT"])
+
+
+def test_in_invoice_form_classifies_lines_in_one_step(qtbot, ctx, monkeypatch):
+    import os
+
+    from PySide6.QtWidgets import QDialog
+
+    from qlhd.core import asset_catalog as dm
+    from qlhd.core.assets import AssetService
+    from qlhd.ui import widgets
+    from qlhd.ui.in_invoice_form import InInvoiceDialog
+    from qlhd.ui.invoices_page import InvoicesPage
+
+    page = InvoicesPage(ctx, "vao")
+    qtbot.addWidget(page)
+    lines = [{"TenHang": "Thay lốp ô tô", "SoLuong": 4, "DonGia": 2_000_000, "ThanhTien": 8_000_000},
+             {"TenHang": "Laptop và giấy vệ sinh", "SoLuong": 1, "DonGia": 15_000_000, "ThanhTien": 15_000_000}]
+    values = {"SoHoaDonGoc": "901", "TenNhaCungCap": "Gara A", "MaThueNCC": "0109999999", "NgayNhanHD": "2026-05-05",
+              "GiaTriTruocThue": 23_000_000, "VAT": 2_300_000, "_Dong": lines}
+    seen = {}
+
+    def run(dlg):
+        assert isinstance(dlg, InInvoiceDialog)
+        assert [ln["PhanLoai"] for ln in dlg.lines] == [dm.CHI_PHI, dm.CHUA_PHAN_LOAI]   # mơ hồ: không tự chọn
+        assert dlg.table.item(1, 5).text() == "Có gợi ý, chờ xác nhận"
+        cls, grp, months = dlg.rows[1]
+        grp.set_value("TB02")                     # chọn nhóm máy tính → phân loại tự đổi theo nhóm
+        months.setValue(24)
+        seen["cls"] = cls.value()
+        if os.environ.get("QLHD_SHOT_FORM"):
+            dlg.resize(1250, 760)
+            dlg.show()
+            qtbot.wait(100)
+            dlg.grab().save(os.environ["QLHD_SHOT_FORM"])
+        dlg.validate_extra()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(InInvoiceDialog, "exec", run)
+    assert page._save(values)
+    assert seen["cls"] == dm.CCDC
+    ma = ctx.db.one("SELECT Ma FROM HoaDonDauVao WHERE SoHoaDonGoc = '901'")["Ma"]
+    saved = AssetService(ctx.db).lines_of(ma)
+    assert [(x["PhanLoai"], x["MaNhomDM"], x["SoThang"], x["TuDong"]) for x in saved] == [
+        (dm.CHI_PHI, "CP03", None, 1), (dm.CCDC, "TB02", 24, 0)]
+    # sửa: mọi thông tin và phân loại trong một form, đổi phân loại phải xác nhận cũ → mới
+    asked = []
+    monkeypatch.setattr(widgets, "confirm_changes", lambda _p, ch, *a: asked.append(ch) or True)
+    dlg = InInvoiceDialog(ctx, "Hóa đơn đầu vào", page._fields(), dict(ctx.db.get("HoaDonDauVao", ma)), page, ma=ma)
+    qtbot.addWidget(dlg)
+    cls, grp, months = dlg.rows[0]
+    grp.set_value("TB01")
+    dlg.widget("GhiChuHDDV").setText("đổi")
+    dlg._accept()
+    assert asked and any(label.startswith("Dòng 1") for label, _o, _n in asked[0])
