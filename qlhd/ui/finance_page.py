@@ -15,7 +15,7 @@ from ..core.finance import FinanceError, FinanceStore
 from ..core.reports import FinanceReports, export_xlsx, fmt_date, fmt_money, period_range
 from .profit_page import ProfitTab
 from . import style
-from .widgets import (Combo, DataTable, DateEdit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
+from .widgets import (Combo, DataTable, DateEdit, bulk_edit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
                       confirm_changes, confirm_delete,
                       copy_text, error, hint, info, page_title, run_safely, toolbar)
 
@@ -457,10 +457,45 @@ class FinancePage(QWidget):
         r = self.ledger.current()
         if not r:
             return
+        rows = [x for x in self.ledger.selected() if x["Nguon"] == "Phiếu"]
+        if len(rows) > 1:
+            return self._bulk_edit(rows)
         if r["Nguon"] == "Hợp đồng":
             return info(self, "Khoản thu từ hợp đồng được sửa ở phần Hợp đồng / Hóa đơn đầu ra (nơi gốc).")
         v = dict(self.ctx.finance.fdb.get("PhieuThuChi", r["Ma"]))
         if VoucherDialog(self.ctx.finance, v["LoaiThuChi"], v, self).exec() == QDialog.Accepted:
+            self.reload()
+
+    def _bulk_edit(self, rows: list[dict]):
+        """Sửa cùng lúc quỹ, khoản mục, dự án… cho các phiếu đã chọn (khoản thu hợp đồng bỏ qua)."""
+        store = self.ctx.finance
+        full = [dict(store.fdb.get("PhieuThuChi", r["Ma"])) for r in rows]
+        for v in full:
+            v["_nhan"] = v.get("SoPhieu") or v.get("NoiDung") or v["Ma"]
+        kinds = {v["LoaiThuChi"] for v in full}
+        fields = [{"key": "MaQuy", "label": "Quỹ", "kind": "combo",
+                   "options": [(f["TenQuy"], f["Ma"]) for f in store.funds()]}]
+        if len(kinds) == 1:
+            fields.append({"key": "MaKhoanMuc", "label": "Khoản mục", "kind": "combo",
+                           "options": [("    " * d + c["TenKhoanMuc"], c["Ma"])
+                                       for c, d in store.category_tree(kinds.pop())]})
+        if all(v["LoaiThuChi"] == "Chi" for v in full):
+            fields += [{"key": "PhanLoaiChi", "label": "Phân loại chi", "kind": "combo",
+                        "options": [("Chi hoạt động văn phòng", "Văn phòng"), ("Chi dự án", "Dự án")]},
+                       {"key": "MaDuAn", "label": "Dự án", "kind": "combo",
+                        "options": [("(không)", None)] + [(f"{p['SoHopDong']} – {p['TenHopDong']}", p["Ma"])
+                                                          for p in store.projects()]}]
+        fields += [{"key": "DoiTuong", "label": "Người nhận / nộp"}, {"key": "NgayPhatSinh", "label": "Ngày",
+                                                                     "kind": "date"}]
+        names = {p["Ma"]: p["TenHopDong"] for p in store.projects()}
+
+        def save(r, ch):
+            ch = dict(ch)
+            if "MaDuAn" in ch:
+                ch["TenDuAn"] = names.get(ch["MaDuAn"]) if ch["MaDuAn"] else None
+            store.update_voucher(r["Ma"], ch)
+
+        if bulk_edit(self, f"Sửa {len(rows)} phiếu đã chọn", fields, full, save):
             self.reload()
 
     def _delete(self):

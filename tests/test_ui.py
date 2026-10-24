@@ -840,7 +840,8 @@ def test_report_filters_follow_context(qtbot, ctx):
     assert rp.filters().nhom_thue == "tach"                 # ô mờ không ảnh hưởng báo cáo
     rp.context.set_value("hoa_don_vao")
     assert rp.nhom_thue.isEnabled() and rp.lien_ket.isEnabled()
-    assert not rp.nguoi_mua.isEnabled() and not rp.loai.isEnabled() and not rp.tt_tt.isEnabled()
+    assert not rp.nguoi_mua.isEnabled() and not rp.loai.isEnabled()
+    assert rp.tt_tt.isEnabled()                              # hóa đơn đầu vào lọc được đã / chưa thanh toán
     assert rp.filters().nhom_thue == "Chịu thuế"
     rp.context.set_value("da_thanh_toan")
     assert rp.doi_tac.isEnabled() and not rp.nguoi_mua.isEnabled() and not rp.nhom_thue.isEnabled()
@@ -858,6 +859,7 @@ def test_classify_dialog_lists_every_group_and_switches_class(qtbot):
     from qlhd.ui.assets_page import ClassifyDialog
     d = ClassifyDialog([{"TenHang": "Thay lốp xe ô tô", "ThanhTien": 3_000_000, "DonGiaTinh": 3_000_000,
                          "PhanLoai": dm.CCDC, "MaNhomDM": "TB01", "SoThang": 12}])
+    qtbot.addWidget(d)
     codes = [d.group.itemData(i) for i in range(d.group.count())]
     assert "CP03" in codes and len(codes) == len(dm.CATALOG)
     d.group.set_value("CP03")
@@ -1026,3 +1028,56 @@ def test_in_invoice_form_classifies_lines_in_one_step(qtbot, ctx, monkeypatch):
     dlg.widget("GhiChuHDDV").setText("đổi")
     dlg._accept()
     assert asked and any(label.startswith("Dòng 1") for label, _o, _n in asked[0])
+
+
+def test_filter_box_and_bulk_edit_many_rows(qtbot, ctx, monkeypatch):
+    from qlhd.ui import widgets
+    from qlhd.ui.contracts_page import ContractsPage
+    from qlhd.ui.filter_box import FilterBox
+    from qlhd.ui.invoices_page import InvoicesPage
+    from qlhd.ui.widgets import BulkEditDialog
+
+    # ô tìm kiếm có bộ lọc thời gian theo năm, nhớ theo tài khoản
+    page = InvoicesPage(ctx, "ra")
+    qtbot.addWidget(page)
+    page.refresh()
+    n_all = page.table.rowCount()
+    assert n_all >= 1
+    page.box.set_mode("nam")
+    year = page.table.rows[0]["NgayXuatHD"][:4] if page.table.rows else None
+    page.box.period.set_value(f"{year}-01-01")
+    assert page.table.rowCount() == n_all and page.box.active()
+    page.box.clear()
+    again = FilterBox(ctx, "hoa_don_ra", "", [("Số", "SoHoaDon")], date_key="NgayXuatHD")
+    qtbot.addWidget(again)
+    assert again.mode == "all"
+
+    # chọn 2 hợp đồng, đổi tình trạng cùng lúc: chỉ ô được tích Đổi mới đổi, có xác nhận cũ → mới
+    cp = ContractsPage(ctx)
+    qtbot.addWidget(cp)
+    cp.refresh()
+    assert cp.table.rowCount() == 2
+    cp.table.selectAll()
+    seen = {}
+
+    def fake_exec(dlg):
+        seen["n"] = len(dlg.rows)
+        dlg.boxes["TinhTrangHopDong"].setChecked(True)
+        dlg.widgets["TinhTrangHopDong"].set_value("Hoàn thành")
+        seen["changes"] = dlg.change_list()
+        return widgets.QDialog.Accepted
+
+    monkeypatch.setattr(BulkEditDialog, "exec", fake_exec)
+    names_before = {h["Ma"]: h["TenHopDong"] for h in ctx.cs.contracts()}
+    cp.edit()
+    assert seen["n"] == 2 and seen["changes"][0][2] == "Hoàn thành"
+    assert {h["TinhTrangHopDong"] for h in ctx.cs.contracts()} == {"Hoàn thành"}
+    assert {h["Ma"]: h["TenHopDong"] for h in ctx.cs.contracts()} == names_before     # ô không tích giữ nguyên
+
+    # hộp sửa nhiều dòng: chưa tích ô nào thì không lưu
+    errs = []
+    monkeypatch.setattr(widgets, "error", lambda _p, t, *a: errs.append(t))
+    dlg = BulkEditDialog("x", [{"key": "GhiChu", "label": "Ghi chú"}], [{"GhiChu": "a"}, {"GhiChu": "b"}])
+    qtbot.addWidget(dlg)
+    dlg._accept()
+    assert errs and dlg.result() == 0

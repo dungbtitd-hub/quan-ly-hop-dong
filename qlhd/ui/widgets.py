@@ -519,32 +519,10 @@ class FormDialog(QDialog):
                 sig.connect(lambda _t, k=key: update(k))
 
     def set_value(self, key, v) -> None:
-        w = self.widgets[key]
-        if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
-            w.set_value(v)
-        elif isinstance(w, QPlainTextEdit):
-            w.setPlainText(v or "")
-        elif isinstance(w, QSpinBox):
-            w.setValue(int(v or 0))
-        elif isinstance(w, QCheckBox):
-            w.setChecked(bool(v))
-        else:
-            w.setText("" if v is None else str(v))
+        widget_set(self.widgets[key], v)
 
     def values(self) -> dict:
-        out = {}
-        for key, w in self.widgets.items():
-            if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
-                out[key] = w.value()
-            elif isinstance(w, QPlainTextEdit):
-                out[key] = w.toPlainText().strip()
-            elif isinstance(w, QSpinBox):
-                out[key] = w.value()
-            elif isinstance(w, QCheckBox):
-                out[key] = w.isChecked()
-            else:
-                out[key] = w.text().strip()
-        return out
+        return {key: widget_value(w) for key, w in self.widgets.items()}
 
     def _accept(self) -> None:
         vals = self.values()
@@ -578,23 +556,164 @@ class FormDialog(QDialog):
 
     def _display(self) -> dict:
         """Giá trị từng ô dưới dạng chữ như người dùng thấy (để so sánh và liệt kê thay đổi)."""
-        out = {}
-        for key, w in self.widgets.items():
-            if isinstance(w, MoneyEdit):
-                out[key] = fmt_money(w.value()) if w.value() else ""
-            elif isinstance(w, DateEdit):
-                out[key] = fmt_date(w.value()) if w.value() else ""
-            elif isinstance(w, QComboBox):
-                out[key] = w.currentText().strip()
-            elif isinstance(w, QPlainTextEdit):
-                out[key] = w.toPlainText().strip()
-            elif isinstance(w, QSpinBox):
-                out[key] = str(w.value())
-            elif isinstance(w, QCheckBox):
-                out[key] = "Có" if w.isChecked() else "Không"
-            else:
-                out[key] = w.text().strip()
+        return {key: widget_text(w) for key, w in self.widgets.items()}
+
+
+def widget_set(w, v) -> None:
+    if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
+        w.set_value(v)
+    elif isinstance(w, QPlainTextEdit):
+        w.setPlainText(v or "")
+    elif isinstance(w, QSpinBox):
+        w.setValue(int(v or 0))
+    elif isinstance(w, QCheckBox):
+        w.setChecked(bool(v))
+    else:
+        w.setText("" if v is None else str(v))
+
+
+def widget_value(w):
+    if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
+        return w.value()
+    if isinstance(w, QPlainTextEdit):
+        return w.toPlainText().strip()
+    if isinstance(w, QSpinBox):
+        return w.value()
+    if isinstance(w, QCheckBox):
+        return w.isChecked()
+    return w.text().strip()
+
+
+def widget_text(w) -> str:
+    """Giá trị của ô dưới dạng chữ như người dùng thấy."""
+    if isinstance(w, MoneyEdit):
+        return fmt_money(w.value()) if w.value() else ""
+    if isinstance(w, DateEdit):
+        return fmt_date(w.value()) if w.value() else ""
+    if isinstance(w, QComboBox):
+        return w.currentText().strip()
+    if isinstance(w, QPlainTextEdit):
+        return w.toPlainText().strip()
+    if isinstance(w, QSpinBox):
+        return str(w.value())
+    if isinstance(w, QCheckBox):
+        return "Có" if w.isChecked() else "Không"
+    return w.text().strip()
+
+
+def field_text(f: dict, v) -> str:
+    """Giá trị v của ô f dưới dạng chữ như trên biểu mẫu."""
+    kind = f.get("kind", "text")
+    if kind == "combo":
+        for opt in f.get("options", []):
+            label, data = opt if isinstance(opt, tuple) else (opt, opt)
+            if data == v:
+                return str(label).strip()
+        return "" if v is None else str(v)
+    if kind == "money":
+        return fmt_money(v) if v else ""
+    if kind == "date":
+        return fmt_date(v) if v else ""
+    if kind == "int":
+        return str(int(v or 0))
+    if kind == "check":
+        return "Có" if v else "Không"
+    return "" if v is None else str(v).strip()
+
+
+class BulkEditDialog(QDialog):
+    """Sửa cùng lúc nhiều dòng đã chọn: tích "Đổi" ở ô muốn đổi, ô không tích giữ nguyên giá trị từng dòng.
+    Lưu thì liệt kê cũ → mới (gộp theo giá trị) và hỏi xác nhận."""
+
+    def __init__(self, title: str, fields: list[dict], rows: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(560)
+        self.fields, self.rows = fields, rows
+        self.widgets: dict[str, QWidget] = {}
+        self.boxes: dict[str, QCheckBox] = {}
+        self._old: dict[str, list[str]] = {}
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint(f"Đang chọn {len(rows)} dòng. Tích \"Đổi\" ở ô muốn đổi cho mọi dòng đã chọn; ô không "
+                           "tích giữ nguyên giá trị riêng của từng dòng."))
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        for f in fields:
+            vals = [r.get(f["key"]) for r in rows]
+            same = all(v == vals[0] for v in vals)
+            w = FormDialog._make(self, f, vals[0] if same else None)
+            self._old[f["key"]] = [field_text(f, v) for v in vals]   # để liệt kê cũ → mới
+            w.setEnabled(False)
+            if not same and isinstance(w, QLineEdit):
+                w.setPlaceholderText("(khác nhau)")
+            box = QCheckBox("Đổi")
+            box.setToolTip("Tích để đổi ô này cho mọi dòng đã chọn")
+            box.toggled.connect(w.setEnabled)
+            row = QHBoxLayout()
+            row.addWidget(box)
+            row.addWidget(w, 1)
+            if not same:
+                row.addWidget(hint("(khác nhau)"))
+            form.addRow(f["label"], row)
+            self.widgets[f["key"]], self.boxes[f["key"]] = w, box
+        lay.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(f"Lưu cho {len(rows)} dòng")
+        bb.button(QDialogButtonBox.Ok).setObjectName("Primary")
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def changes(self) -> dict:
+        """{khóa: giá trị mới} của các ô được tích Đổi."""
+        return {k: widget_value(w) for k, w in self.widgets.items() if self.boxes[k].isChecked()}
+
+    def change_list(self) -> list[tuple[str, str, str]]:
+        out = []
+        for f in self.fields:
+            k = f["key"]
+            if not self.boxes[k].isChecked():
+                continue
+            new = widget_text(self.widgets[k])
+            olds = [o for o in self._old[k] if o != new]
+            if not olds:
+                continue
+            uniq = list(dict.fromkeys(o or "(trống)" for o in olds))
+            old = ", ".join(uniq[:3]) + (f"… ({len(uniq)} giá trị)" if len(uniq) > 3 else "")
+            out.append((f"{f['label']} ({len(olds)} dòng)", old, new))
         return out
+
+    def _accept(self) -> None:
+        if not self.changes():
+            return error(self, "Chưa tích \"Đổi\" ô nào.")
+        for f in self.fields:
+            if f.get("required") and self.boxes[f["key"]].isChecked() and \
+                    widget_value(self.widgets[f["key"]]) in (None, ""):
+                return error(self, f"Chưa nhập {f['label']}.")
+        ch = self.change_list()
+        if not ch:
+            return info(self, "Các dòng đã chọn đã có đúng giá trị này, không có gì thay đổi.")
+        if confirm_changes(self, ch, f"cho {len(self.rows)} dòng đã chọn"):
+            self.accept()
+
+
+def bulk_edit(parent, title: str, fields: list[dict], rows: list[dict], save_one) -> int:
+    """Mở hộp sửa nhiều dòng; save_one(row, changes) lưu từng dòng (raise để báo lỗi dòng đó).
+    Trả số dòng đã lưu."""
+    dlg = BulkEditDialog(title, fields, rows, parent)
+    if dlg.exec() != QDialog.Accepted:
+        return 0
+    ch, ok, errors = dlg.changes(), 0, []
+    for r in rows:
+        try:
+            save_one(r, ch)
+            ok += 1
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{r.get('_nhan') or r.get('Ma')}: {e}")
+    if errors:
+        error(parent, f"Đã lưu {ok} dòng. Không lưu được {len(errors)} dòng:\n" + "\n".join(errors[:12]))
+    return ok
 
 
 def toolbar(*buttons) -> QHBoxLayout:

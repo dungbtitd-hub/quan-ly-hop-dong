@@ -15,7 +15,8 @@ from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_C
                            ST_NEW, ST_SAME_CODE, TSCD_COLS, TSCD_KEYS, AssetError, AssetService)
 from ..core.reports import fmt_date, fmt_money
 from . import style
-from .widgets import (Combo, DataTable, FormDialog, button, confirm, confirm_changes, confirm_delete, error, hint, info, page_title,
+from .filter_box import FilterBox
+from .widgets import (Combo, DataTable, FormDialog, bulk_edit, button, confirm, confirm_changes, confirm_delete, error, hint, info, page_title,
                       run_safely, toolbar)
 
 LINE_COLS = [("STT", "STT", "int"), ("NgayNhanHD", "Ngày HĐ", "date"), ("SoHoaDonGoc", "Số HĐ", "text"),
@@ -322,7 +323,17 @@ class RegisterTab(QWidget):
         for b in (b_del, b_done, b_back):
             b.setEnabled(self.ctx.can("TaiSan", "Xoa"))
         b_exp.setEnabled(self.ctx.can("TaiSan", "Xuat"))
-        lay.addLayout(toolbar(QLabel("Năm"), self.year, QLabel("Trường hợp"), self.case, self.extra, "stretch"))
+        self.box = FilterBox(self.ctx, f"so_{'tscd' if loai_so == 'TSCĐ' else 'ccdc'}",
+                             "Tìm mã, tên, loại, hóa đơn, nguyên giá…", [
+                                 ("Mã", "MaTS"), ("Tên", "TenTS"), ("Loại", "LoaiTS"), ("Nhóm danh mục", "NhomDM"),
+                                 ("Hóa đơn đầu vào", "HoaDon"), ("Ghi chú", "GhiChu"), ("Nguyên giá", "NguyenGia")],
+                             money_keys=("NguyenGia", "ConLai"), date_key="NgayGhiTang", date_label="Ngày ghi tăng",
+                             filters=[{"key": "loai", "label": "Loại", "options": [("Mọi loại", None)]},
+                                      {"key": "nhom", "label": "Nhóm danh mục", "options": [("Mọi nhóm", None)]}])
+        self.box.changed.connect(self.reload)
+        top = toolbar(QLabel("Năm"), self.year, QLabel("Trường hợp"), self.case, self.extra, "stretch")
+        top.addWidget(self.box, 0, Qt.AlignTop)
+        lay.addLayout(top)
         extra = []
         if loai_so == "CCDC":
             b_tpl = button("Tải mẫu kê khai CCDC…", self.save_extra_template)
@@ -333,7 +344,7 @@ class RegisterTab(QWidget):
             extra = [b_tpl, b_ext]
         lay.addLayout(toolbar(b_add, b_edit, b_off, b_undo, b_del, b_done, b_back, b_cls, "stretch", *extra, b_imp,
                               b_exp))
-        self.table = DataTable([])
+        self.table = DataTable([], multi=True)        # chọn nhiều dòng (Ctrl / Shift) để sửa cùng lúc
         self.table.activated_row.connect(lambda _: self.edit())
         lay.addWidget(self.table, 1)
         self.total = hint("")
@@ -353,6 +364,13 @@ class RegisterTab(QWidget):
 
     def reload(self):
         rows = self.svc.register(self.loai_so, self.year.value(), self.case.value())
+        self.box.set_options("loai", [("Mọi loại", None)] + [(x, x) for x in sorted({r["LoaiTS"] for r in rows
+                                                                                       if r.get("LoaiTS")})])
+        self.box.set_options("nhom", [("Mọi nhóm", None)] + [(x, x) for x in sorted({r["NhomDM"] for r in rows
+                                                                                      if r.get("NhomDM")})])
+        loai, nhom = self.box.value("loai"), self.box.value("nhom")
+        rows = [r for r in rows if (not loai or r.get("LoaiTS") == loai) and (not nhom or r.get("NhomDM") == nhom)
+                and self.box.matches(r)]
         for r in rows:
             r["SoLuong"] = _quantity(r["SoLuong"])
         warn = self.svc.duplicate_warnings(self.loai_so)
@@ -449,6 +467,9 @@ class RegisterTab(QWidget):
         r = self._current()
         if r is None:
             return
+        rows = [x for x in self.table.selected() if not x.get("_kieu") and x.get("Ma")]
+        if len(rows) > 1:
+            return self.bulk_edit(rows)
         a = dict(self.ctx.db.get("TaiSan", r["Ma"]))
         if a["MaDongHD"] and confirm(self, "Tài sản này sinh ra từ hóa đơn đầu vào. Muốn đổi phân loại, nhóm hoặc số "
                                            "tháng (VD chuyển sang Chi phí trong kỳ, nhóm sửa chữa xe) thì bấm Có để mở "
@@ -456,6 +477,22 @@ class RegisterTab(QWidget):
                                      "Đổi phân loại?"):
             return self.reclassify()
         self._save(a, r["Ma"])
+
+    def bulk_edit(self, rows: list[dict]):
+        """Sửa cùng lúc nhóm, loại, đơn vị sử dụng, số kỳ, tài khoản… cho các tài sản đã chọn."""
+        keys = ("MaNhomDM", "LoaiTS", "DonViSuDung", "PhanLoai", "SoKy", "DVT", "TKNguyenGia", "TKKhauHao", "GhiChu")
+        by = {f["key"]: f for f in self._fields()}
+        fields = [{k: v for k, v in by[k].items() if k not in ("hint", "required")} for k in keys if k in by]
+        full = [dict(self.ctx.db.get("TaiSan", r["Ma"]), _nhan=f"{r.get('MaTS') or ''} {r.get('TenTS') or ''}")
+                for r in rows]
+
+        def save(r, ch):
+            self.svc.save_asset(dict(ch, LoaiSo=self.loai_so), r["Ma"])
+
+        n = bulk_edit(self, f"Sửa {len(rows)} tài sản đã chọn", fields, full, save)
+        if n:
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], f"Sửa nhiều tài sản sổ {self.loai_so}", f"{n} tài sản")
+            self.reload()
 
     def reclassify(self):
         r = self._current()
@@ -669,7 +706,16 @@ class AssetsPage(QWidget):
         b.setEnabled(self.ctx.can("TaiSan", "Sua"))
         b_x = button("Xuất Excel bảng kê…", self.export_lines)
         b_x.setEnabled(self.ctx.can("TaiSan", "Xuat"))
-        lay.addLayout(toolbar(QLabel("Năm"), self.l_year, self.l_cls, "stretch", b, b_x))
+        self.l_box = FilterBox(self.ctx, "dong_hddv", "Tìm tên hàng, người bán, số hóa đơn, số tiền…", [
+            ("Tên hàng", "TenHang"), ("Người bán", "TenNhaCungCap"), ("Số hóa đơn", "SoHoaDonGoc"),
+            ("Nhóm danh mục", "NhomDM"), ("Thành tiền", "ThanhTien")], money_keys=("ThanhTien", "DonGiaTinh"),
+            date_key="NgayNhanHD", date_label="Ngày hóa đơn", filters=[
+                {"key": "nhom", "label": "Nhóm danh mục", "options": [("Mọi nhóm", None)]},
+                {"key": "canh_bao", "label": "Cảnh báo", "options": FLAG_FILTER}])
+        self.l_box.changed.connect(self.refresh)
+        top = toolbar(QLabel("Năm"), self.l_year, self.l_cls, "stretch", b, b_x)
+        top.addWidget(self.l_box, 0, Qt.AlignTop)
+        lay.addLayout(top)
         lay.addWidget(flag_legend())
         self.lines = DataTable(LINE_COLS, multi=True)
         self.lines.activated_row.connect(lambda _: self.classify(self.lines))
@@ -693,6 +739,11 @@ class AssetsPage(QWidget):
         elif i == 1:
             y = self.l_year.value()
             rows = _label_flags(self.svc.lines(f"{y}-01-01", f"{y}-12-31", self.l_cls.value()))
+            self.l_box.set_options("nhom", [("Mọi nhóm", None)] + [(x, x) for x in sorted({r["NhomDM"] for r in rows
+                                                                                            if r.get("NhomDM")})])
+            nhom, cb = self.l_box.value("nhom"), self.l_box.value("canh_bao")
+            rows = [r for r in rows if (not nhom or r.get("NhomDM") == nhom)
+                    and (not cb or r.get("MaCanhBao") == cb) and self.l_box.matches(r)]
             self.lines.set_rows(rows)
             by = {}
             for r in rows:

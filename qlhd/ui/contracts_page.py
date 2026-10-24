@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QLineEdit,
                                QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core import excel_import
@@ -12,7 +12,8 @@ from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_FILTERS, PA
                               TASK_STATUSES, ValidationError, contract_matches, contract_pay_state, duration_text,
                               end_date)
 from ..core.reports import fmt_date, fmt_money
-from .widgets import (VAT_HINT, Combo, DataTable, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
+from .filter_box import FilterBox
+from .widgets import (VAT_HINT, DataTable, bulk_edit, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
                       page_title,
                       rate_field, require, run_safely, toolbar)
 
@@ -144,17 +145,23 @@ class ContractsPage(QWidget):
         self.ctx = ctx
         lay = QVBoxLayout(self)
         lay.addWidget(page_title("Hợp đồng"))
-        self.filter = Combo([("Tất cả", None), ("Đầu ra", "Đầu ra"), ("Đầu vào", "Đầu vào")])
-        self.filter.currentIndexChanged.connect(self.refresh)
-        self.status = Combo([("Mọi tình trạng", None)] + [(x, x) for x in CONTRACT_STATUSES])
-        self.status.currentIndexChanged.connect(self.refresh)
-        self.paid = Combo([("Mọi tình trạng thanh toán", None)] + list(PAY_FILTERS))
-        self.paid.setToolTip("Lọc theo tiền thu về của hợp đồng đầu ra.")
-        self.paid.currentIndexChanged.connect(self.refresh)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Tìm số HĐ, tên HĐ, đối tác…")
-        self.search.setMinimumWidth(260)
-        self.search.textChanged.connect(self.refresh)
+        # ô tìm kiếm có sẵn kèm bộ lọc đa ngữ cảnh (Lọc ▾)
+        self.box = FilterBox(ctx, "hop_dong", "Tìm số, tên, đối tác, MST, giá trị…", [
+            ("Số hợp đồng", "SoHopDong"), ("Tên hợp đồng", "TenHopDong"), ("Đối tác", "TenDoiTac"),
+            ("MST đối tác", "MaThueDoiTac"), ("Giá trị", "GiaTriTongSauThue"), ("Ghi chú", "GhiChu"),
+            ("Hồ sơ đã lấy về", "HoSoDaLay")], money_keys=("GiaTriTongSauThue", "GiaTriTruocThue"),
+            date_key="NgayKy", date_label="Ngày ký", filters=[
+                {"key": "chieu", "label": "Chiều", "options": [("Tất cả", None), ("Đầu ra", "Đầu ra"),
+                                                                ("Đầu vào", "Đầu vào")]},
+                {"key": "loai", "label": "Loại HĐ", "options": [("Mọi loại", None)]},
+                {"key": "doi_tac", "label": "Đối tác", "options": [("Mọi đối tác", None)]},
+                {"key": "status", "label": "Tình trạng", "options": [("Mọi tình trạng", None)]
+                 + [(x, x) for x in CONTRACT_STATUSES]},
+                {"key": "paid", "label": "Thanh toán", "options": [("Mọi tình trạng thanh toán", None)]
+                 + list(PAY_FILTERS)}])
+        self.box.changed.connect(self.refresh)
+        self.filter, self.status, self.paid = self.box.combo("chieu"), self.box.combo("status"), self.box.combo("paid")
+        self.search = self.box.edit
         can_add = ctx.can("HopDong", "Them")
         self.b_add = button("Thêm hợp đồng", self.add, "Primary")
         self.b_edit = button("Sửa", self.edit)
@@ -173,18 +180,19 @@ class ContractsPage(QWidget):
         self.b_pay = button("Ghi nhận thanh toán", self.add_payment_top)
         self.b_pay.setToolTip("Ghi tiền thu về cho hợp đồng đang chọn (hợp đồng đã xuất hóa đơn)")
         self.b_pay.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
-        lay.addLayout(toolbar(self.b_add, self.b_edit, self.b_del, self.b_inv, self.b_pay, self.b_partner, self.b_imp,
-                              self.b_tpl, "stretch"))
-        lay.addLayout(toolbar(QLabel("Lọc:"), self.filter, self.status, self.paid, "stretch", self.search))
+        top = toolbar(self.b_add, self.b_edit, self.b_del, self.b_inv, self.b_pay, self.b_partner, self.b_imp,
+                      self.b_tpl, "stretch")
+        top.addWidget(self.box, 0, Qt.AlignTop)
+        lay.addLayout(top)
         split = QSplitter(Qt.Vertical)
-        self.table = DataTable(CONTRACT_COLS)
+        self.table = DataTable(CONTRACT_COLS, multi=True)     # chọn nhiều dòng (Ctrl / Shift) để sửa cùng lúc
         self.table.activated_row.connect(lambda _: self.edit())
         self.table.itemSelectionChanged.connect(self.refresh_detail)
         split.addWidget(self.table)
         self.detail = QTabWidget()
         self.tasks = DataTable([("TenNoiDungCV", "Công việc", "text"), ("NgayDuKienHT", "Hạn", "date"),
                                 ("TienDoPT", "Tiến độ %", "int"), ("TinhTrangCV", "Tình trạng", "text"),
-                                ("GhiChuCV", "Ghi chú", "text")])
+                                ("GhiChuCV", "Ghi chú", "text")], multi=True)
         self.tasks.activated_row.connect(lambda _: self.edit_task())
         self.invoices = DataTable([("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"),
                                    ("NgayXuatHD", "Ngày", "date"), ("GiaTriSauThue", "Sau thuế", "money"),
@@ -228,8 +236,16 @@ class ContractsPage(QWidget):
 
     def refresh(self):
         types = {t["Ma"]: t["TenLoaiHD"] for t in self.ctx.cs.contract_types()}
+        self.box.set_options("loai", [("Mọi loại", None)] + [(v, k) for k, v in types.items()])
+        self.box.set_options("doi_tac", [("Mọi đối tác", None)] + [(p["TenDoiTac"], p["Ma"])
+                                                                  for p in self.ctx.cs.partners()])
+        loai, doi_tac = self.box.value("loai"), self.box.value("doi_tac")
         rows = []
-        for hd in self.ctx.cs.contracts(self.filter.value(), self.search.text().strip()):
+        for hd in self.ctx.cs.contracts(self.filter.value()):
+            if loai and hd["MaLoaiHD"] != loai or doi_tac and hd["MaDoiTac"] != doi_tac:
+                continue
+            if not self.box.matches(dict(hd)):
+                continue
             r = dict(hd)
             r.update(self.ctx.cs.summary(hd["Ma"]))
             if not contract_matches(hd, r, self.status.value(), self.paid.value()):
@@ -246,13 +262,7 @@ class ContractsPage(QWidget):
 
     def select_contract(self, ma: str) -> None:
         """Mở trang ở hợp đồng được chọn (từ Tổng quan)."""
-        for w in (self.filter, self.status, self.paid, self.search):
-            w.blockSignals(True)
-        for w in (self.filter, self.status, self.paid):
-            w.setCurrentIndex(0)
-        self.search.clear()
-        for w in (self.filter, self.status, self.paid, self.search):
-            w.blockSignals(False)
+        self.box.reset_silently()
         self.refresh()
         for i in range(self.table.rowCount()):
             r = self.table._row_of(self.table.item(i, 0))
@@ -300,10 +310,38 @@ class ContractsPage(QWidget):
 
     def edit(self):
         r = self.table.current()
-        if not r or not self.ctx.can("HopDong", "Sua"):
+        rows = [x for x in self.table.selected() if not x.get("_kieu")]
+        if not (r or rows) or not self.ctx.can("HopDong", "Sua"):
             return
+        if len(rows) > 1:
+            return self.bulk_edit(rows)
         v = contract_dialog(self.ctx, self, dict(self.ctx.db.get("HopDong", r["Ma"])))
         if v and run_safely(self, self.ctx.cs.save_contract, v, r["Ma"]):
+            self.refresh()
+
+    def bulk_edit(self, rows: list[dict]):
+        """Sửa cùng lúc loại, đối tác, tình trạng… cho các hợp đồng đã chọn."""
+        types = [("(Chưa phân loại)", None)] + [(t["TenLoaiHD"], t["Ma"]) for t in self.ctx.cs.contract_types()]
+        partners = [(p["TenDoiTac"] + (f" – {p['MaSoThue']}" if p["MaSoThue"] else ""), p["Ma"])
+                    for p in self.ctx.cs.partners()]
+        fields = [{"key": "MaLoaiHD", "label": "Loại hợp đồng", "kind": "combo", "options": types},
+                  {"key": "MaDoiTac", "label": "Đối tác", "kind": "combo", "options": partners},
+                  {"key": "TinhTrangHopDong", "label": "Tình trạng", "kind": "combo",
+                   "options": list(CONTRACT_STATUSES)},
+                  {"key": "DonViThoiGian", "label": "Đơn vị thời gian", "kind": "combo",
+                   "options": list(DURATION_UNITS)},
+                  {"key": "NhacTruocNgay", "label": "Nhắc trước khi hết hạn (ngày)", "kind": "int", "max": 3650},
+                  {"key": "GhiChu", "label": "Ghi chú", "kind": "multiline"}]
+        full = [dict(self.ctx.db.get("HopDong", r["Ma"]), _nhan=r["SoHopDong"]) for r in rows]
+
+        def save(r, ch):
+            v = {k: val for k, val in r.items() if k != "_nhan"}
+            v.update(ch)
+            self.ctx.cs.save_contract(v, r["Ma"])
+
+        n = bulk_edit(self, f"Sửa {len(rows)} hợp đồng đã chọn", fields, full, save)
+        if n:
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Sửa nhiều hợp đồng", f"{n} hợp đồng")
             self.refresh()
 
     def delete(self):
@@ -342,6 +380,17 @@ class ContractsPage(QWidget):
     def edit_task(self):
         t = self.tasks.current()
         if not t:
+            return
+        rows = self.tasks.selected()
+        if len(rows) > 1:          # nhiều công việc: đổi tình trạng, tiến độ, hạn cùng lúc
+            fields = [f for f in self._task_fields() if f["key"] != "TenNoiDungCV"]
+
+            def save(r, ch):
+                self.ctx.cs.save_task(dict({k: r[k] for k in ("TenNoiDungCV",)}, **ch), r["Ma"])
+
+            full = [dict(r, _nhan=r["TenNoiDungCV"]) for r in rows]
+            if bulk_edit(self, f"Sửa {len(rows)} công việc đã chọn", fields, full, save):
+                self._reload_keep()
             return
         dlg = FormDialog("Công việc", self._task_fields(), t, self)
         if dlg.exec() == QDialog.Accepted:

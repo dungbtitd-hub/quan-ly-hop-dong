@@ -114,6 +114,12 @@ QPushButton#Primary:hover { background: $accent_hover; border-color: $accent_hov
 QPushButton#Primary:disabled { background: $border_strong; border-color: $border_strong; color: $card; }
 QPushButton#Danger { color: $danger; }
 QPushButton#Danger:hover { background: $danger_soft; border-color: $danger; }
+QFrame#SearchBox { background: $input; border: 1px solid $border_strong; border-radius: 6px; }
+QFrame#SearchBox QLineEdit#SearchEdit { border: none; background: transparent; padding: 4px 2px; }
+QToolButton#FilterButton { border: none; border-left: 1px solid $border; background: $header_bg; padding: 5px 10px;
+                           border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+QToolButton#FilterButton:hover { background: $button_hover; }
+QFrame#FilterPanel { background: $card; border: 1px solid $border_strong; border-radius: 8px; }
 QPushButton#Chip { border-radius: 13px; padding: 4px 12px; color: $muted; }
 QPushButton#Chip:checked { background: $accent_soft; color: $accent; border-color: $accent; font-weight: 600; }
 QPushButton#Link { border: none; background: transparent; color: $accent; padding: 2px 4px; }

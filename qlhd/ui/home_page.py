@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (QBoxLayout, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
@@ -236,6 +236,11 @@ class HomePage(QWidget):
         lay.addWidget(hint("Bấm để bật / tắt từng khung; lựa chọn được nhớ theo tài khoản. Bấm vào từng dòng để mở "
                            "đúng hợp đồng hoặc danh sách liên quan."))
 
+        self._narrow = False
+        self._arrange_timer = QTimer(self)
+        self._arrange_timer.setSingleShot(True)
+        self._arrange_timer.setInterval(0)
+        self._arrange_timer.timeout.connect(self._arrange)
         self.stats = QGridLayout()
         self.stats.setSpacing(14)
         lay.addLayout(self.stats)
@@ -288,13 +293,23 @@ class HomePage(QWidget):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        self._arrange()
+        # không sắp lại bố cục ngay trong lúc Qt đang co giãn (sửa layout giữa chừng có thể làm phần mềm thoát đột ngột)
+        if (self.width() < self.NARROW) != self._narrow:
+            self._arrange_timer.start()
 
-    def _arrange(self):
+    def _per(self) -> int:
+        return 2 if self._narrow else 4
+
+    def _arrange(self, force: bool = False):
         narrow = self.width() < self.NARROW
+        if narrow == self._narrow and not force:
+            return
+        self._narrow = narrow
         self.bottom.setDirection(QBoxLayout.TopToBottom if narrow else QBoxLayout.LeftToRight)
         frames = [self.stats.itemAt(i).widget() for i in range(self.stats.count())]
-        per = 2 if narrow else 4
+        for f in frames:
+            self.stats.removeWidget(f)
+        per = self._per()
         for i, f in enumerate(frames):
             self.stats.addWidget(f, i // per, i % per)
         for c in range(4):
@@ -313,7 +328,7 @@ class HomePage(QWidget):
         frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         if on_click:
             frame.clicked.connect(on_click)
-        self.stats.addWidget(frame, 0, i)
+        self.stats.addWidget(frame, i // self._per(), i % self._per())
 
     def _day(self, iso: str, events: list[str], today: date) -> QFrame:
         d = date.fromisoformat(iso)

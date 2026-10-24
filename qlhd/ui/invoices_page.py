@@ -6,18 +6,19 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
 from ..core.assets import AssetService
-from ..core.contracts import (INVOICE_KINDS, TAX_GROUPS, ValidationError, guess_tax_group, payment_status,
+from ..core.contracts import (INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
                               rate_from_amounts)
 from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import edit_payment, payment_dialog
 from . import style
 from .in_invoice_form import InInvoiceDialog
-from .widgets import (VAT_HINT, Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
+from .filter_box import FilterBox
+from .widgets import (VAT_HINT, Combo, DataTable, bulk_edit, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
                       error, hint, info, rate_field, require,
                       page_title, run_safely, toolbar)
 
@@ -190,10 +191,35 @@ class InvoicesPage(QWidget):
         self.feature = "HoaDonDauRa" if kind == "ra" else "HoaDonDauVao"
         lay = QVBoxLayout(self)
         lay.addWidget(page_title("Hóa đơn đầu ra" if kind == "ra" else "Hóa đơn đầu vào"))
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Tìm số hóa đơn, đối tác, MST, mặt hàng…")
-        self.search.setMinimumWidth(280)
-        self.search.textChanged.connect(self.refresh)
+        # ô tìm kiếm có sẵn kèm bộ lọc đa ngữ cảnh (Lọc ▾)
+        if kind == "ra":
+            self.box = FilterBox(ctx, "hoa_don_ra", "Tìm số hóa đơn, người mua, MST, mặt hàng, số tiền…", [
+                ("Số hóa đơn", "SoHoaDon"), ("Ký hiệu", "KyHieuHD"), ("Người mua", "TenNguoiMua"),
+                ("MST người mua", "MSTNguoiMua"), ("Số HĐ", "SoHopDong"), ("Mặt hàng", "MatHang"),
+                ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue")],
+                money_keys=("GiaTriSauThue", "GiaTriTruocThue", "ConPhaiThu"), date_key="NgayXuatHD",
+                date_label="Ngày lập", filters=[
+                    {"key": "tt", "label": "Thanh toán", "options": [
+                        ("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du"),
+                        ("Đã thu, chưa có số tham chiếu sao kê", "chua_sk")]},
+                    {"key": "hd", "label": "Hợp đồng", "options": [("Mọi hợp đồng", None)]}])
+        else:
+            self.box = FilterBox(ctx, "hoa_don_vao", "Tìm số hóa đơn, người bán, MST, mặt hàng, số tiền…", [
+                ("Số hóa đơn", "SoHoaDonGoc"), ("Ký hiệu", "KyHieuHD"), ("Người bán", "TenNhaCungCap"),
+                ("MST người bán", "MaThueNCC"), ("Số HĐ", "SoHopDong"), ("Mặt hàng", "MatHang"),
+                ("Người mua hàng", "NguoiMuaHang"), ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue")],
+                money_keys=("GiaTriSauThue", "GiaTriTruocThue"), date_key="NgayNhanHD", date_label="Ngày",
+                filters=[
+                    {"key": "co_hd", "label": "Hợp đồng", "options": [
+                        ("Tất cả", None), ("Có hợp đồng", "co"), ("Mua trực tiếp (không HĐ)", "khong")]},
+                    {"key": "thue", "label": "Nhóm thuế", "options": [
+                        ("Mọi nhóm thuế", None), ("Chịu thuế GTGT", "Chịu thuế"),
+                        ("Không chịu thuế GTGT", "Không chịu thuế")]},
+                    {"key": "tt", "label": "Thanh toán", "options": [
+                        ("Tất cả", None), ("Đã trả (có số sao kê)", "da"), ("Chưa có số sao kê", "chua")]},
+                    {"key": "ncc", "label": "Người bán", "options": [("Mọi người bán", None)]}])
+        self.box.changed.connect(self.refresh)
+        self.search = self.box.edit
         add_ok = ctx.can(self.feature, "Them")
         b_add = button("Nhập tay", self.add_manual, "Primary")
         b_file = button("Nhập từ file XML / PDF (chọn nhiều file)…", self.add_from_files)
@@ -217,16 +243,13 @@ class InvoicesPage(QWidget):
             b_pays = button("Thanh toán đã ghi…", self.show_payments)
             b_pay.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
             btns[4:4] = [b_pay, b_pays]
-            self.only = Combo([("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du"),
-                               ("Đã thu, chưa có số tham chiếu sao kê", "chua_sk")])
             b_ref = button("Cập nhật số sao kê…", self.update_refs)
             b_ref.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
             btns.insert(6, b_ref)
-        else:
-            self.only = Combo([("Tất cả", None), ("Có hợp đồng", "co"), ("Mua trực tiếp (không HĐ)", "khong"),
-                               ("Chịu thuế GTGT", "Chịu thuế"), ("Không chịu thuế GTGT", "Không chịu thuế")])
-        self.only.currentIndexChanged.connect(self.refresh)
-        lay.addLayout(toolbar(*btns, "stretch", self.only, self.search))
+        self.only = self.box.combo("tt")
+        top = toolbar(*btns, "stretch")
+        top.addWidget(self.box, 0, Qt.AlignTop)
+        lay.addLayout(top)
         if kind == "ra":
             cols = [("STT", "STT", "int"),
                     ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"), ("NgayXuatHD", "Ngày lập", "date"),
@@ -246,7 +269,7 @@ class InvoicesPage(QWidget):
                     ("GiaTriSauThue", "Sau thuế", "money"),
                     ("NhomThue", "Nhóm thuế", "text"), ("NguoiMuaHang", "Người mua hàng", "text"),
                     ("SoThamChieuSK", "Số sao kê", "text"), ("SoHopDong", "Số HĐ đầu vào", "text")]
-        self.table = DataTable(cols)
+        self.table = DataTable(cols, multi=True)      # chọn nhiều dòng (Ctrl / Shift) để sửa cùng lúc
         self.table.activated_row.connect(lambda _: self.edit())
         lay.addWidget(self.table, 1)
         self.total = QLabel()
@@ -254,36 +277,40 @@ class InvoicesPage(QWidget):
 
     def refresh(self):
         contracts = {r["Ma"]: r["SoHopDong"] for r in self.ctx.db.query("SELECT Ma, SoHopDong FROM HopDong")}
-        k = self.search.text().strip().lower()
         rows = []
         if self.kind == "ra":
-            for inv in self.ctx.cs.out_invoices():
+            invs = self.ctx.cs.out_invoices()
+            used = sorted({i["MaHopDong"] for i in invs if i["MaHopDong"]}, key=lambda m: contracts.get(m, ""))
+            self.box.set_options("hd", [("Mọi hợp đồng", None)] + [(contracts.get(m, m), m) for m in used])
+            tt, hd = self.box.value("tt"), self.box.value("hd")
+            for inv in invs:
+                if hd and inv["MaHopDong"] != hd:
+                    continue
                 r = out_invoice_row(self.ctx, inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "")
                 pays = r.pop("_pays")
-                if self.only.value() == "con" and r["ConPhaiThu"] <= 0 or self.only.value() == "du" and r["ConPhaiThu"] > 0:
+                if tt == "con" and r["ConPhaiThu"] <= 0 or tt == "du" and r["ConPhaiThu"] > 0:
                     continue
-                if self.only.value() == "chua_sk" and not any(
+                if tt == "chua_sk" and not any(
                         p["HinhThuc"] == "Chuyển khoản" and not (p["SoThamChieuSK"] or "").strip() for p in pays):
                     continue
-                if k and k not in " ".join(str(r.get(x) or "") for x in ("SoHoaDon", "KyHieuHD", "TenNguoiMua",
-                                                                          "MSTNguoiMua", "SoHopDong", "MatHang",
-                                                                          "SoThamChieuSK")).lower():
-                    continue
-                rows.append(r)
+                if self.box.matches(r):
+                    rows.append(r)
         else:
-            for inv in self.ctx.cs.in_invoices():
+            invs = self.ctx.cs.in_invoices()
+            self.box.set_options("ncc", [("Mọi người bán", None)] + [
+                (n, n) for n in sorted({i["TenNhaCungCap"] for i in invs if i["TenNhaCungCap"]})])
+            co_hd, thue, tt, ncc = (self.box.value(k) for k in ("co_hd", "thue", "tt", "ncc"))
+            for inv in invs:
                 r = dict(inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "") if inv["MaHopDong"] else "(Mua trực tiếp)"
-                only = self.only.value()
-                if only == "co" and not inv["MaHopDong"] or only == "khong" and inv["MaHopDong"] \
-                        or only in TAX_GROUPS and inv["NhomThue"] != only:
+                paid = bool((inv["SoThamChieuSK"] or "").strip())
+                if co_hd == "co" and not inv["MaHopDong"] or co_hd == "khong" and inv["MaHopDong"] \
+                        or thue and inv["NhomThue"] != thue or ncc and inv["TenNhaCungCap"] != ncc \
+                        or tt == "da" and not paid or tt == "chua" and paid:
                     continue
-                if k and k not in " ".join(str(r.get(x) or "") for x in (
-                        "SoHoaDonGoc", "KyHieuHD", "TenNhaCungCap", "MaThueNCC", "SoHopDong", "MatHang",
-                        "NguoiMuaHang", "SoThamChieuSK")).lower():
-                    continue
-                rows.append(r)
+                if self.box.matches(r):
+                    rows.append(r)
         self.table.set_rows(rows)
         self.total.setText(f"{len(rows)} hóa đơn · Tổng sau thuế {fmt_money(sum(r['GiaTriSauThue'] for r in rows))} đ")
 
@@ -494,10 +521,37 @@ class InvoicesPage(QWidget):
 
     def edit(self):
         r = self.table.current()
-        if not r or not self.ctx.can(self.feature, "Sua"):
+        rows = [x for x in self.table.selected() if not x.get("_kieu")]
+        if not (r or rows) or not self.ctx.can(self.feature, "Sua"):
             return
+        if len(rows) > 1:
+            return self.bulk_edit(rows)
         table = "HoaDonDauRa" if self.kind == "ra" else "HoaDonDauVao"
         if self._save(dict(self.ctx.db.get(table, r["Ma"])), r["Ma"]):
+            self.refresh()
+
+    def bulk_edit(self, rows: list[dict]):
+        """Sửa cùng lúc hợp đồng, nhóm thuế, người mua hàng… cho các hóa đơn đã chọn."""
+        table = "HoaDonDauRa" if self.kind == "ra" else "HoaDonDauVao"
+        full = [dict(self.ctx.db.get(table, r["Ma"])) for r in rows]
+        base = {f["key"]: f for f in self._base_fields(keep=[r["MaHopDong"] for r in full if r["MaHopDong"]])}
+        keys = (["MaHopDong", "TinhChatHD", "TenNguoiMua", "MSTNguoiMua", "GhiChuHDDR"] if self.kind == "ra" else
+                ["MaHopDong", "NhomThue", "NguoiMuaHang", "GhiChuHDDV"])
+        fields = [{k: v for k, v in base[k].items() if k != "hint"} for k in keys]
+        num = "SoHoaDon" if self.kind == "ra" else "SoHoaDonGoc"
+        for r in full:
+            r["_nhan"] = f"Hóa đơn {r['KyHieuHD'] or ''} {r[num]}".strip()
+        fn = self.ctx.cs.save_out_invoice if self.kind == "ra" else self.ctx.cs.save_in_invoice
+
+        def save(r, ch):
+            v = {k: val for k, val in r.items() if k != "_nhan"}
+            v.update(ch)
+            fn(v, r["Ma"])
+
+        n = bulk_edit(self, f"Sửa {len(rows)} hóa đơn đã chọn", fields, full, save)
+        if n:
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Sửa nhiều hóa đơn " + ("đầu ra" if self.kind == "ra"
+                                                                                  else "đầu vào"), f"{n} hóa đơn")
             self.refresh()
 
     def go_contract(self):
