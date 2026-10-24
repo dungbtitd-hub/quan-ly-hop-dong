@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QComplet
 
 from ..core import asset_catalog as dm
 from ..core import ccdc_excel
-from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_COLS, CCDC_KEYS, EXTRA_COLS, ST_IN_FILE,
+from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_COLS, CCDC_KEYS, EXTRA_COLS, FLAGS, ST_IN_FILE,
                            ST_NEW, ST_SAME_CODE, TSCD_COLS, TSCD_KEYS, AssetError, AssetService)
 from ..core.reports import fmt_date, fmt_money
 from . import style
@@ -21,7 +21,26 @@ from .widgets import (Combo, DataTable, FormDialog, button, confirm, confirm_cha
 LINE_COLS = [("STT", "STT", "int"), ("NgayNhanHD", "Ngày HĐ", "date"), ("SoHoaDonGoc", "Số HĐ", "text"),
              ("TenNhaCungCap", "Người bán", "text"), ("TenHang", "Tên hàng hóa, dịch vụ", "text"),
              ("SoLuong", "SL", "text"), ("DonGiaTinh", "Đơn giá", "money"), ("ThanhTien", "Thành tiền chưa thuế", "money"),
-             ("PhanLoai", "Phân loại", "text"), ("NhomDM", "Nhóm danh mục", "text"), ("SoThang", "Số tháng", "int")]
+             ("PhanLoai", "Phân loại", "text"), ("NhomDM", "Nhóm danh mục", "text"), ("SoThang", "Số tháng", "int"),
+             ("NhanCanhBao", "Cảnh báo", "text")]
+FLAG_FILTER = [("Mọi cảnh báo", None)] + [(label, code) for code, (label, _) in FLAGS.items()]
+
+
+def flag_legend() -> QLabel:
+    """Chú thích màu cảnh báo (cùng màu với dòng trong bảng)."""
+    parts = [f'<span style="background:{style.color(tone + "_soft")}; color:{style.color("text")};">'
+             f'&nbsp;■ {label}&nbsp;</span>' for label, tone in FLAGS.values()]
+    lbl = QLabel("Màu dòng: " + " ".join(parts) + " · Di chuột vào dòng để xem lý do.")
+    lbl.setObjectName("Hint")
+    lbl.setWordWrap(True)
+    return lbl
+
+
+def _label_flags(rows: list[dict]) -> list[dict]:
+    for r in rows:
+        r["NhanCanhBao"] = FLAGS[r["MaCanhBao"]][0] if r.get("MaCanhBao") else ""
+        r["SoLuong"] = _quantity(r["SoLuong"])
+    return rows
 MONEY_KEYS = {"NguyenGia", "GiaTriTinhKH", "TrongKy", "LuyKe", "ConLai", "MucKy"}
 INT_KEYS = {"SoKy", "KyConLai", "SoLuong", "SLDaGiam", "SLConLai", "ThangTrongNam"}
 CLASS_CHOICES = [dm.TSCD, dm.CCDC, dm.CHO_PB, dm.CHI_PHI, dm.KHONG_TINH]
@@ -600,7 +619,7 @@ class AssetsPage(QWidget):
         lay = QVBoxLayout(self)
         lay.addWidget(page_title("Tài sản, công cụ dụng cụ"))
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._tab_pending(), "Cần phân loại")
+        self.tabs.addTab(self._tab_pending(), "Cần xem lại")
         self.tabs.addTab(self._tab_lines(), "Dòng hóa đơn đầu vào")
         self.tscd = RegisterTab(self, "TSCĐ")
         self.ccdc = RegisterTab(self, "CCDC")
@@ -616,12 +635,19 @@ class AssetsPage(QWidget):
     def _tab_pending(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addWidget(hint("Các dòng hóa đơn đầu vào phần mềm chưa tự phân loại được (không khớp danh mục, hoặc chi phí "
-                           "trả trước cần số tháng theo chứng từ). Kế toán chọn phân loại, nhóm và thời gian; chưa "
-                           "phân loại xong thì chưa chốt bảng lãi lỗ của năm được."))
+        lay.addWidget(hint("Dòng hóa đơn đầu vào cần kế toán xem lại: phần mềm chưa nhận ra (không khớp danh mục, tên hàng "
+                           "mơ hồ thì chỉ gợi ý, không tự chọn), thiếu số tháng, chưa rõ CCDC hay TSCĐ, nghi phân loại "
+                           "sai hoặc nghi trùng. Phần mềm không tự đổi dữ liệu; kế toán phân loại, hoặc bấm \"Xác nhận "
+                           "đúng\" nếu phân loại đang có là đúng. Chưa xử lý hết thì chưa chốt bảng lãi lỗ được."))
+        self.flag = Combo(FLAG_FILTER)
+        self.flag.currentIndexChanged.connect(self.refresh)
         b = button("Phân loại các dòng đã chọn…", lambda: self.classify(self.pending), "Primary")
         b.setEnabled(self.ctx.can("TaiSan", "Sua"))
-        lay.addLayout(toolbar(b, "stretch"))
+        b_ok = button("Xác nhận đúng", self.confirm_flagged)
+        b_ok.setToolTip("Giữ nguyên phân loại đang có của các dòng đã chọn, thôi cảnh báo")
+        b_ok.setEnabled(self.ctx.can("TaiSan", "Sua"))
+        lay.addLayout(toolbar(QLabel("Xem"), self.flag, "stretch", b_ok, b))
+        lay.addWidget(flag_legend())
         self.pending = DataTable(LINE_COLS, multi=True)
         self.pending.activated_row.connect(lambda _: self.classify(self.pending))
         lay.addWidget(self.pending, 1)
@@ -644,6 +670,7 @@ class AssetsPage(QWidget):
         b_x = button("Xuất Excel bảng kê…", self.export_lines)
         b_x.setEnabled(self.ctx.can("TaiSan", "Xuat"))
         lay.addLayout(toolbar(QLabel("Năm"), self.l_year, self.l_cls, "stretch", b, b_x))
+        lay.addWidget(flag_legend())
         self.lines = DataTable(LINE_COLS, multi=True)
         self.lines.activated_row.connect(lambda _: self.classify(self.lines))
         lay.addWidget(self.lines, 1)
@@ -655,16 +682,17 @@ class AssetsPage(QWidget):
         self.svc.backfill()
         i = self.tabs.currentIndex()
         if i == 0:
-            rows = self.svc.pending_lines()
-            for r in rows:
-                r["SoLuong"] = _quantity(r["SoLuong"])
+            code = self.flag.value()
+            rows = _label_flags(self.svc.review_lines((code,) if code else None))
             self.pending.set_rows(rows)
-            self.pending_info.setText(f"{len(rows)} dòng chờ phân loại." if rows else "Không còn dòng nào chờ phân loại.")
+            by: dict[str, int] = {}
+            for r in rows:
+                by[r["NhanCanhBao"]] = by.get(r["NhanCanhBao"], 0) + 1
+            self.pending_info.setText(f"{len(rows)} dòng cần xem lại · " + " · ".join(f"{k}: {v}" for k, v in by.items())
+                                      if rows else "Không còn dòng nào cần xem lại.")
         elif i == 1:
             y = self.l_year.value()
-            rows = self.svc.lines(f"{y}-01-01", f"{y}-12-31", self.l_cls.value())
-            for r in rows:
-                r["SoLuong"] = _quantity(r["SoLuong"])
+            rows = _label_flags(self.svc.lines(f"{y}-01-01", f"{y}-12-31", self.l_cls.value()))
             self.lines.set_rows(rows)
             by = {}
             for r in rows:
@@ -672,8 +700,33 @@ class AssetsPage(QWidget):
             self.lines_info.setText(f"{len(rows)} dòng · " + " · ".join(f"{k}: {fmt_money(v)} đ" for k, v in by.items()))
         else:
             self.tabs.currentWidget().reload()
-        self.tabs.setTabText(0, f"Cần phân loại ({self.svc.pending_count()})" if self.svc.pending_count()
-                             else "Cần phân loại")
+        n = self.svc.review_count()
+        self.tabs.setTabText(0, f"Cần xem lại ({n})" if n else "Cần xem lại")
+
+    def show_review(self, code: str | None = None):
+        """Mở thẻ Cần xem lại (VD từ Tổng quan, thông báo rà soát sau nâng cấp)."""
+        self.flag.set_value(code)
+        self.tabs.setCurrentIndex(0)
+        self.refresh()
+
+    def confirm_flagged(self):
+        rows = [r for r in self.pending.selected() if not r.get("_kieu")]
+        if not rows:
+            return info(self, "Chọn dòng cần xác nhận (giữ Ctrl / Shift để chọn nhiều dòng).")
+        ok = [r for r in rows if r["MaCanhBao"] in ("nguong", "nghi", "trung")]
+        if not ok:
+            return info(self, "Dòng chưa phân loại, có gợi ý hoặc thiếu số tháng thì phải phân loại (bấm \"Phân loại "
+                              "các dòng đã chọn…\"), không xác nhận được.")
+        if not confirm(self, f"Xác nhận phân loại đang có là đúng cho {len(ok)} dòng?\n\n"
+                             + "\n".join(f"• {r['TenHang']}: {r['PhanLoai']} {r.get('NhomDM') or ''}" for r in ok[:12])
+                             + (f"\n… và {len(ok) - 12} dòng khác" if len(ok) > 12 else "")):
+            return
+        n = self.svc.confirm_lines([r["Ma"] for r in ok])
+        self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xác nhận phân loại dòng hóa đơn đầu vào", f"{n} dòng")
+        win = self.window()
+        if hasattr(win, "update_badges"):
+            win.update_badges()
+        self.refresh()
 
     def classify(self, table: DataTable):
         rows = [r for r in table.selected() if not r.get("_kieu")]

@@ -12,6 +12,8 @@ import unicodedata
 from dataclasses import dataclass, field
 
 NGUONG_TSCD = 30_000_000          # đơn giá từ 30 triệu đồng và dùng trên 1 năm là TSCĐ
+# Nhóm dịch vụ (sửa chữa, thuê ngoài, thuê theo tháng): tên hàng nhắc tới tài sản thì vẫn là chi phí dịch vụ
+SERVICE_GROUPS = ("CP03", "CP10", "CP13")
 
 # Phân loại một dòng hóa đơn
 CHUA_PHAN_LOAI = "Chưa phân loại"
@@ -168,6 +170,7 @@ def normalize(text: str) -> str:
 
 _KEYWORDS = sorted(((normalize(k), n) for n in CATALOG for k in n.tu_khoa if normalize(k).strip()),
                    key=lambda x: -len(x[0]))
+_RAW = {(normalize(k), n.ma): unicodedata.normalize("NFC", k.lower()) for n in CATALOG for k in n.tu_khoa}
 
 
 def find_group(name: str) -> Nhom | None:
@@ -177,6 +180,34 @@ def find_group(name: str) -> Nhom | None:
         if k in n:
             return nhom
     return None
+
+
+def _has_marks(text: str) -> bool:
+    return any(unicodedata.category(c) == "Mn" for c in unicodedata.normalize("NFD", text)) or "đ" in text
+
+
+def rival_groups(name: str, don_gia: int = 0) -> list[Nhom]:
+    """Nhóm khác cũng khớp tên hàng ở một cụm từ riêng (không nằm trong cụm của nhóm khớp nhất) mà dẫn tới phân loại
+    khác: tên hàng mơ hồ (VD "máy tính kèm dịch vụ cài đặt"), không tự chọn được."""
+    n = normalize(name)
+    best, span, out = None, None, []
+    for k, nhom in _KEYWORDS:
+        i = n.find(k)
+        if i < 0:
+            continue
+        if best is None:
+            best, span = nhom, (i, i + len(k))
+            continue
+        if nhom is best or nhom in out:
+            continue
+        raw = _RAW.get((k, nhom.ma), "")
+        if raw and _has_marks(raw) and raw not in unicodedata.normalize("NFC", str(name).lower()):    # trùng chữ khi bỏ dấu (lưu trữ / lưu trú)
+            continue
+        if span[0] <= i and i + len(k) <= span[1]:          # cụm ngắn nằm trong cụm dài đã khớp: không tính
+            continue
+        if default_class(nhom, don_gia) != default_class(best, don_gia):
+            out.append(nhom)
+    return out
 
 
 def allowed_classes(nhom: Nhom, don_gia: int = 0) -> list[str]:
@@ -215,8 +246,9 @@ def default_months(nhom: Nhom, phan_loai: str, don_gia: int) -> int | None:
 @dataclass
 class KetQua:
     phan_loai: str
-    nhom: Nhom | None
+    nhom: Nhom | None          # với "Chưa phân loại": nhóm gợi ý (chưa chọn), để kế toán xác nhận
     so_thang: int | None
+    ly_do: str = ""
 
     @property
     def can_ke_toan(self) -> bool:
@@ -232,8 +264,24 @@ def classify(name: str, don_gia: int, *, co_hop_dong: bool = False) -> KetQua:
         if co_hop_dong:
             return KetQua(CHI_PHI, BY_CODE["CP12"], None)
         return KetQua(CHUA_PHAN_LOAI, None, None)
+    rivals = rival_groups(name, don_gia)
+    service = next((g for g in [nhom, *rivals] if g.ma in SERVICE_GROUPS), None)
+    if rivals and service is not None:      # sửa chữa, thuê, dịch vụ cho một tài sản: là chi phí dịch vụ đó
+        nhom, rivals = service, []
+    if rivals:      # tên hàng khớp nhiều nhóm khác phân loại: không tự chọn, chỉ gợi ý
+        return KetQua(CHUA_PHAN_LOAI, nhom, None, ambiguity_text(nhom, rivals))
     pl = default_class(nhom, don_gia)
     return KetQua(pl, nhom, default_months(nhom, pl, don_gia))
+
+
+def ambiguity_text(nhom: Nhom, rivals: list[Nhom]) -> str:
+    return (f"Tên hàng khớp nhiều nhóm: {nhom.ma} – {nhom.ten}; "
+            + "; ".join(f"{r.ma} – {r.ten}" for r in rivals[:3]) + ".")
+
+
+def near_threshold(don_gia: int) -> bool:
+    """Đơn giá sát ngưỡng 30 triệu (±15%): dễ nhầm CCDC với TSCĐ, cần kế toán xác nhận."""
+    return NGUONG_TSCD * 0.85 <= (don_gia or 0) < NGUONG_TSCD * 1.15
 
 
 def group_options(phan_loai: str | None = None, *, all_groups: bool = False) -> list[tuple[str, str]]:

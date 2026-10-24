@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import QDate, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QDate, QPoint, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QStyle, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
-                               QFormLayout, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+                               QFormLayout, QFrame, QHBoxLayout, QLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -316,6 +316,7 @@ class DataTable(QTableWidget):
             bold = bool(kieu)
             fill = (QBrush(QColor(style.color("group_bg"))) if kieu == "nhom"
                     else QBrush(QColor(style.color("total_bg"))) if kieu
+                    else QBrush(QColor(style.color(f"{row['_mau']}_soft"))) if row.get("_mau")
                     else QBrush(QColor(style.color("warn_soft"))) if row.get("_canh_bao") else None)
             for j, (key, _, kind) in enumerate(self.columns):
                 v = row.get(key)
@@ -331,6 +332,8 @@ class DataTable(QTableWidget):
                 else:
                     item = QTableWidgetItem("" if v is None else str(v))
                 item.setData(Qt.UserRole, i)
+                if row.get("CanhBao"):
+                    item.setToolTip(row["CanhBao"])
                 if fill is not None:
                     item.setBackground(fill)
                 if bold:
@@ -645,3 +648,60 @@ def hint(text: str, name: str = "Hint") -> QLabel:
     lbl.setObjectName(name)
     lbl.setWordWrap(True)
     return lbl
+
+
+class FlowLayout(QLayout):
+    """Xếp các nút liền nhau, hết chỗ thì xuống dòng (VD hàng nút chọn ngữ cảnh, nhãn bộ lọc)."""
+
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        return size
+
+    def _do(self, rect, test: bool) -> int:
+        x, y, line = rect.x(), rect.y(), 0
+        sp = self.spacing()
+        for it in self._items:
+            w = it.sizeHint()
+            if x + w.width() > rect.right() + 1 and line > 0:
+                x, y, line = rect.x(), y + line + sp, 0
+            if not test:
+                it.setGeometry(QRect(QPoint(x, y), w))
+            x += w.width() + sp
+            line = max(line, w.height())
+        return y + line - rect.y()

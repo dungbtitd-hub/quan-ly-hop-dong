@@ -218,6 +218,48 @@ def _in_case(r: dict, a, year: int, case: str) -> bool:
 
 
 # ------------------------------------------------------------------ dịch vụ
+# Cảnh báo dòng hóa đơn đầu vào: mã → (nhãn, màu). Chỉ tô màu để kế toán biết, phần mềm không tự đổi phân loại.
+FLAGS = {
+    "chua_phan_loai": ("Chưa phân loại", "danger"),
+    "goi_y": ("Có gợi ý, chờ xác nhận", "warn"),
+    "thieu_thang": ("Thiếu số tháng", "warn"),
+    "nguong": ("Chưa rõ CCDC hay TSCĐ", "accent"),
+    "nghi": ("Nghi phân loại sai", "warn"),
+    "trung": ("Nghi trùng", "danger"),
+}
+REVIEW_AFTER_UPGRADE = ("goi_y", "nguong", "nghi", "trung")     # rà soát dòng phần mềm đã tự phân loại
+
+
+def line_flag(r: dict, dup: dict | None = None) -> tuple[str | None, str]:
+    """(mã cảnh báo, nội dung) của một dòng đã đọc kèm hóa đơn; (None, "") nếu không có gì cần xem lại."""
+    pl, nhom, unit = r["PhanLoai"], dm.BY_CODE.get(r.get("MaNhomDM") or ""), int(r.get("DonGiaTinh") or 0)
+    if pl == dm.CHUA_PHAN_LOAI:
+        if nhom:
+            kq = dm.classify(r["TenHang"], unit)
+            why = kq.ly_do or "Phần mềm chưa chắc chắn."
+            return "goi_y", f"Gợi ý {nhom.ma} – {nhom.ten}. {why} Chọn nhóm để xác nhận."
+        return "chua_phan_loai", "Không khớp danh mục: chọn phân loại và nhóm."
+    if pl in dm.TAI_SAN and not r.get("SoThang"):
+        return "thieu_thang", "Nhập số tháng khấu hao / phân bổ."
+    if dup is not None:
+        return "trung", (f"Cùng người bán, tên hàng, số tiền với hóa đơn số {dup.get('SoHoaDonGoc')} ngày "
+                         f"{_dmy(dup.get('NgayNhanHD') or '')}: kiểm tra nhập trùng.")
+    if not r.get("TuDong"):
+        return None, ""             # kế toán đã phân loại / xác nhận
+    if pl in (dm.TSCD, dm.CCDC) and dm.near_threshold(unit):
+        return "nguong", (f"Đơn giá {unit:,.0f} đ sát ngưỡng 30 triệu: xác nhận là CCDC hay TSCĐ.").replace(",", ".")
+    kq = dm.classify(r["TenHang"], unit, co_hop_dong=bool(r.get("MaHopDong")))
+    if kq.phan_loai == dm.CHUA_PHAN_LOAI and kq.ly_do:
+        return "nghi", kq.ly_do + " Phân loại đang có do phần mềm tự chọn."
+    if kq.nhom is not None and nhom is not None and kq.nhom.ma != nhom.ma and kq.phan_loai != pl:
+        return "nghi", (f"Theo danh mục hiện tại nên là {kq.nhom.ma} – {kq.nhom.ten} ({kq.phan_loai}), đang là "
+                        f"{nhom.ma} ({pl}).")
+    if pl == dm.CHI_PHI and unit >= dm.NGUONG_TSCD and not r.get("MaHopDong") and nhom is not None \
+            and nhom.ma not in dm.SERVICE_GROUPS:
+        return "nghi", "Chi phí trong kỳ có đơn giá từ 30 triệu, không gắn hợp đồng: kiểm tra có phải tài sản."
+    return None, ""
+
+
 class AssetService:
     def __init__(self, db: Database):
         self.db = db
@@ -328,7 +370,7 @@ class AssetService:
         return line["PhanLoai"] == dm.CHUA_PHAN_LOAI or (line["PhanLoai"] in dm.TAI_SAN and not line["SoThang"])
 
     def _line_rows(self, where: str = "", params=()) -> list[dict]:
-        sql = ("SELECT d.*, h.SoHoaDonGoc, h.KyHieuHD, h.NgayNhanHD, h.TenNhaCungCap, h.MaHopDong "
+        sql = ("SELECT d.*, h.SoHoaDonGoc, h.KyHieuHD, h.NgayNhanHD, h.TenNhaCungCap, h.MaThueNCC, h.MaHopDong "
                "FROM DongHoaDonDauVao d JOIN HoaDonDauVao h ON h.Ma = d.MaHoaDon "
                "WHERE d.DaXoa = 0 AND h.DaXoa = 0")
         if where:
@@ -341,7 +383,41 @@ class AssetService:
             r["DonGiaTinh"] = self.unit_price(r)
             r["CanPhanLoai"] = self.is_pending(r)
             out.append(r)
+        self._flag(out)
         return out
+
+    def _flag(self, rows: list[dict]) -> None:
+        """Gắn cảnh báo cho từng dòng (chỉ tô màu, không đổi dữ liệu): MaCanhBao, CanhBao, _mau."""
+        seen: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r.get("MaThueNCC") or r.get("TenNhaCungCap"), dm.normalize(r["TenHang"]), int(r["ThanhTien"] or 0))
+            other = seen.get(key)
+            dup = other if other and other["MaHoaDon"] != r["MaHoaDon"] and key[2] else None
+            seen.setdefault(key, r)
+            code, text = line_flag(r, dup)
+            r["MaCanhBao"], r["CanhBao"] = code, text
+            r["_mau"] = FLAGS[code][1] if code else None
+
+    def review_lines(self, codes: tuple[str, ...] | None = None) -> list[dict]:
+        """Dòng cần kế toán xem lại: chưa phân loại, có gợi ý chờ xác nhận, thiếu số tháng, sát ngưỡng CCDC/TSCĐ,
+        nghi phân loại sai, nghi trùng."""
+        return [r for r in self._line_rows() if r["MaCanhBao"] and (codes is None or r["MaCanhBao"] in codes)]
+
+    def review_count(self) -> int:
+        return len(self.review_lines())
+
+    def confirm_lines(self, mas: list[str]) -> int:
+        """Kế toán xác nhận phân loại phần mềm tự chọn là đúng: thôi cảnh báo, giữ nguyên phân loại (thành phân loại
+        tay, được ưu tiên khi đồng bộ). Dòng chưa phân loại hoặc thiếu số tháng thì phải phân loại, không xác nhận được."""
+        n = 0
+        for ma in mas:
+            ln = self.db.get("DongHoaDonDauVao", ma)
+            if ln is None or ln["DaXoa"] or self.is_pending(ln):
+                continue
+            self.db.update("DongHoaDonDauVao", ma, {"TuDong": 0}, commit=False)
+            n += 1
+        self.db.conn.commit()
+        return n
 
     def pending_lines(self) -> list[dict]:
         return [r for r in self._line_rows("d.PhanLoai IN ('Chưa phân loại', 'TSCĐ', 'CCDC', 'Chờ phân bổ')")

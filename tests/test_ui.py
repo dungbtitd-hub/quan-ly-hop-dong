@@ -223,7 +223,7 @@ def test_new_layout_home_theme_and_account(qtbot, ctx):
     assert heads == ["CÔNG VIỆC", "TÀI CHÍNH", "DỮ LIỆU"]
     assert win.top_title.text() == "Tổng quan"
     texts = " ".join(lbl.text() for lbl in win.findChildren(QLabel))
-    assert "NHÀ PHÁT TRIỂN" in texts and "0988095867" in texts and "Sắp hết hạn" in texts
+    assert "NHÀ PHÁT TRIỂN" in texts and "0988095867" in texts and "Hợp đồng sắp hết hạn" in texts
     assert win.bell_badge.isVisibleTo(win) and int(win.bell_badge.text()) >= 1
     assert "còn 5 ngày" in reminder_text(ctx, date.today().isoformat())
     win._daily_reminder()
@@ -402,7 +402,7 @@ def test_assets_page_and_profit_tab(qtbot, ctx, tmp_path, monkeypatch):
     page = AssetsPage(ctx)
     qtbot.addWidget(page)
     page.refresh()
-    assert page.pending.rowCount() == 1 and page.tabs.tabText(0) == "Cần phân loại (1)"
+    assert page.pending.rowCount() == 1 and page.tabs.tabText(0) == "Cần xem lại (1)"
     row = page.pending.rows[0]
     dlg = ClassifyDialog([row])
     qtbot.addWidget(dlg)
@@ -906,3 +906,69 @@ def test_font_size_scales_whole_app(qtbot):
     finally:
         style.apply_theme(QApplication.instance(), "sang", "vua")
     assert "font-size: 10pt" in QApplication.instance().styleSheet()
+
+
+def test_alerts_many_contexts_and_telegram(qtbot, ctx, monkeypatch):
+    from datetime import date, timedelta
+
+    from qlhd.core import alerts as al
+    from qlhd.ui import alerts_ui
+
+    hd = ctx.cs.contracts("Đầu ra")[0]
+    ctx.db.execute("UPDATE HopDong SET NgayKetThucDuKien = ?, NgayBatDauDuKien = NULL, "
+                   "TinhTrangHopDong = 'Đang thực hiện' WHERE Ma = ?",
+                   ((date.today() + timedelta(days=3)).isoformat(), hd["Ma"]))
+    items = al.collect(ctx.db)
+    kinds = {a.loai for a in items}
+    assert {"hd_het_han", "thieu_du_lieu"} <= kinds
+    assert any(a.loai == "thieu_du_lieu" and "ngày bắt đầu" in a.chi_tiet for a in items)
+    only = al.collect(ctx.db, types=["thieu_du_lieu"])
+    assert {a.loai for a in only} == {"thieu_du_lieu"}
+    text = al.digest_text(items, "Công ty A")
+    assert "Hợp đồng sắp hết hạn" in text and "Hợp đồng thiếu dữ liệu" in text
+    # chọn ngữ cảnh trên phần mềm, nhớ theo tài khoản
+    dlg = alerts_ui.NotificationsDialog(ctx)
+    qtbot.addWidget(dlg)
+    dlg.picker.boxes["thieu_du_lieu"].setChecked(False)
+    assert "thieu_du_lieu" not in al.AlertSettings(ctx.db).app_types(ctx.user["TenDangNhap"])
+    # Telegram: lưu cài đặt, đến giờ thì gửi, mỗi ngày một lần
+    st = al.AlertSettings(ctx.db)
+    st.set_telegram({"token": "1:abc", "chat": "42", "bat": True, "gio": "08:00", "khi_mo": False,
+                     "loai": ["hd_het_han"]})
+    today = date.today().isoformat()
+    assert not st.due(f"{today} 07:59") and st.due(f"{today} 08:00")
+    st.mark_sent(today)
+    assert not st.due(f"{today} 09:00")
+    sent = []
+    monkeypatch.setattr(al, "_tg_call", lambda token, method, data=None, timeout=12: sent.append((token, data)) or
+                        {"ok": True})
+    assert al.tg_send("1:abc", "42", "x" * 5000) == 2 and sent[0][1]["chat_id"] == "42"
+    assert al.split_message("a\nb", 10) == ["a\nb"]
+
+
+def test_home_contexts_are_selectable_and_remembered(qtbot, ctx):
+    from PySide6.QtWidgets import QLabel
+
+    from qlhd.ui.home_page import HomePage
+
+    page = HomePage(ctx)
+    qtbot.addWidget(page)
+    page.resize(1300, 900)
+    page.show()
+    page.refresh()
+    titles = lambda: {lbl.text() for lbl in page.findChildren(QLabel) if lbl.objectName() == "CardTitle"  # noqa: E731
+                      and lbl.isVisibleTo(page)}
+    qtbot.wait(20)
+    assert "Hợp đồng thiếu dữ liệu" in titles() and page.stats.count() == 8
+    page.chips["canhbao"].setChecked(False)
+    qtbot.wait(20)
+    assert "Hợp đồng thiếu dữ liệu" not in titles()
+    page.period.set_value("nam")
+    again = HomePage(ctx)
+    qtbot.addWidget(again)
+    assert not again.chips["canhbao"].isChecked() and again.period.value() == "nam"
+    if os.environ.get("QLHD_SHOT"):
+        page.chips["canhbao"].setChecked(True)
+        page.resize(1280, 800)
+        qtbot.wait(500)
+        page.grab().save(os.environ["QLHD_SHOT"])

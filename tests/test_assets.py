@@ -391,3 +391,35 @@ def test_remove_fully_depreciated(company):
     assert [r["Ma"] for r in s.fully_depreciated("CCDC", 2027)] == [mid]
     s.restore_to_register(old)
     assert "Bút trình chiếu" in names(2026)
+
+
+def test_unclear_lines_are_only_flagged_never_auto_picked(company):
+    db = company["kt"].db
+    cs, s = ContractService(db), AssetService(db)
+    ma = _xml_invoice(cs, "201", "2025-03-03", [("Laptop và giấy vệ sinh", 1, 12_000_000),
+                                               ("Thay lốp ô tô", 4, 2_000_000), ("Máy chiếu Epson", 1, 29_000_000),
+                                               ("Máy chủ lưu trữ dữ liệu văn phòng", 1, 80_000_000)])
+    lines = {x["TenHang"]: x for x in s.lines_of(ma)}
+    mixed = lines["Laptop và giấy vệ sinh"]
+    assert mixed["PhanLoai"] == dm.CHUA_PHAN_LOAI and mixed["MaNhomDM"]       # chỉ gợi ý nhóm, không tự chọn
+    assert lines["Thay lốp ô tô"]["PhanLoai"] == dm.CHI_PHI and lines["Thay lốp ô tô"]["MaNhomDM"] == "CP03"
+    assert lines["Máy chủ lưu trữ dữ liệu văn phòng"]["PhanLoai"] == dm.TSCD
+    flags = {r["TenHang"]: r["MaCanhBao"] for r in s.review_lines()}
+    assert flags["Laptop và giấy vệ sinh"] == "goi_y" and flags["Máy chiếu Epson"] == "nguong"
+    assert "Thay lốp ô tô" not in flags
+    before = dict(db.get("DongHoaDonDauVao", lines["Máy chiếu Epson"]["Ma"]))
+    assert s.confirm_lines([lines["Máy chiếu Epson"]["Ma"], mixed["Ma"]]) == 1     # dòng chưa phân loại: không xác nhận
+    after = db.get("DongHoaDonDauVao", lines["Máy chiếu Epson"]["Ma"])
+    assert after["PhanLoai"] == before["PhanLoai"] and after["TuDong"] == 0
+    assert "Máy chiếu Epson" not in {r["TenHang"] for r in s.review_lines()}
+
+
+def test_old_auto_classification_is_flagged_after_upgrade_without_changing_it(company):
+    db = company["kt"].db
+    cs, s = ContractService(db), AssetService(db)
+    ma = _xml_invoice(cs, "202", "2025-03-04", [("Sửa chữa máy điều hòa", 1, 3_000_000)])
+    ln = s.lines_of(ma)[0]
+    db.update("DongHoaDonDauVao", ln["Ma"], {"PhanLoai": dm.CCDC, "MaNhomDM": "TB07", "SoThang": 12, "TuDong": 1})
+    r = next(x for x in s.review_lines() if x["Ma"] == ln["Ma"])         # bản cũ tự xếp nhầm vào CCDC
+    assert r["MaCanhBao"] == "nghi" and "CP03" in r["CanhBao"]
+    assert db.get("DongHoaDonDauVao", ln["Ma"])["PhanLoai"] == dm.CCDC    # chỉ cảnh báo, không tự đổi
