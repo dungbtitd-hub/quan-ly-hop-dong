@@ -39,6 +39,19 @@ def payment_status(invoiced: int, paid: int) -> str:
 
 PAY_FILTERS = (("Đã thanh toán đủ", "du"), ("Thanh toán một phần", "mot_phan"), ("Chưa thanh toán", "chua"),
                ("Còn phải thu (đã xuất hóa đơn)", "con_thu"))
+INVOICE_FILTERS = (("Chưa xuất hóa đơn", "chua_xuat"), ("Đã xuất hóa đơn (một phần hoặc đủ)", "da_xuat"),
+                   ("Đã xuất một phần", "xuat_mot_phan"), ("Đã xuất đủ giá trị", "xuat_du"),
+                   ("Còn phải xuất hóa đơn", "con_xuat"))
+
+
+def invoice_filter_ok(s: dict, f: str | None) -> bool:
+    """Lọc hợp đồng theo việc xuất hóa đơn (summary: DaXuatHD, ConPhaiXuat)."""
+    da, con = s["DaXuatHD"], s["ConPhaiXuat"]
+    return (not f or f == "chua_xuat" and da <= 0 or f == "da_xuat" and da > 0
+            or f == "xuat_mot_phan" and da > 0 and con > 0 or f == "xuat_du" and da > 0 and con <= 0
+            or f == "con_xuat" and con > 0)
+
+
 PAY_STATE_LABELS = {"du": "Đã thanh toán đủ", "mot_phan": "Thanh toán một phần", "chua": "Chưa thanh toán"}
 
 

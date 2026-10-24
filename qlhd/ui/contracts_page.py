@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
                                QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core import excel_import
-from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_FILTERS, PAY_METHODS, PAY_STATE_LABELS,
-                              TASK_STATUSES, ValidationError, contract_matches, contract_pay_state, duration_text,
-                              end_date)
+from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, INVOICE_FILTERS, PAY_FILTERS, PAY_METHODS,
+                              PAY_STATE_LABELS, TASK_STATUSES, ValidationError, contract_matches, contract_pay_state,
+                              duration_text, end_date, invoice_filter_ok)
 from ..core.reports import fmt_date, fmt_money
 from .filter_box import FilterBox
 from .widgets import (VAT_HINT, DataTable, bulk_edit, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
@@ -157,6 +157,7 @@ class ContractsPage(QWidget):
                 {"key": "doi_tac", "label": "Đối tác", "options": [("Mọi đối tác", None)]},
                 {"key": "status", "label": "Tình trạng", "options": [("Mọi tình trạng", None)]
                  + [(x, x) for x in CONTRACT_STATUSES]},
+                {"key": "xuat", "label": "Xuất hóa đơn", "options": [("Tất cả", None)] + list(INVOICE_FILTERS)},
                 {"key": "paid", "label": "Thanh toán", "options": [("Mọi tình trạng thanh toán", None)]
                  + list(PAY_FILTERS)}])
         self.box.changed.connect(self.refresh)
@@ -248,7 +249,8 @@ class ContractsPage(QWidget):
                 continue
             r = dict(hd)
             r.update(self.ctx.cs.summary(hd["Ma"]))
-            if not contract_matches(hd, r, self.status.value(), self.paid.value()):
+            if not contract_matches(hd, r, self.status.value(), self.paid.value()) \
+                    or not invoice_filter_ok(r, self.box.value("xuat")):
                 continue
             r["TTThanhToan"] = PAY_STATE_LABELS[contract_pay_state(r)] if hd["ChieuHopDong"] == "Đầu ra" else ""
             r["LoaiHD"] = types.get(hd["MaLoaiHD"], "")

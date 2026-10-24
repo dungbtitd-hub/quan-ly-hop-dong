@@ -423,3 +423,28 @@ def test_old_auto_classification_is_flagged_after_upgrade_without_changing_it(co
     r = next(x for x in s.review_lines() if x["Ma"] == ln["Ma"])         # bản cũ tự xếp nhầm vào CCDC
     assert r["MaCanhBao"] == "nghi" and "CP03" in r["CanhBao"]
     assert db.get("DongHoaDonDauVao", ln["Ma"])["PhanLoai"] == dm.CCDC    # chỉ cảnh báo, không tự đổi
+
+
+def test_recurring_bills_are_not_duplicates_and_confirm_clears_warning(company):
+    db = company["kt"].db
+    cs, s = ContractService(db), AssetService(db)
+    a = _xml_invoice(cs, "301", "2025-04-02", [("Tiền nước sinh hoạt", 1, 144_400)])
+    b = _xml_invoice(cs, "302", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])    # tháng sau, cùng số tiền
+    assert not [r for r in s.review_lines() if r["MaCanhBao"] == "trung"]
+    c = _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])    # cùng ngày: nghi nhập trùng
+    dup = [r for r in s.review_lines() if r["MaCanhBao"] == "trung"]
+    assert [r["MaHoaDon"] for r in dup] == [c]
+    assert s.confirm_lines([dup[0]["Ma"]]) == 1                    # kế toán xác nhận đúng: dòng thôi hiện
+    assert not [r for r in s.review_lines() if r["MaHoaDon"] in (a, b, c)]
+
+
+def test_fixed_asset_depreciation_stops_on_write_off_day(company):
+    s = AssetService(company["kt"].db)
+    ma = s.save_asset({"LoaiSo": "TSCĐ", "TenTS": "Máy chủ", "NgayGhiTang": "2025-01-01", "SoKy": 36,
+                       "NguyenGia": 36_000_000})
+    s.write_off(ma, "2025-03-16", "Thanh lý")
+    a = s.db.get("TaiSan", ma)
+    from qlhd.core.assets import schedule
+    sc = schedule(a)
+    # T1, T2 đủ tháng; T3 chỉ 15 ngày (01–15/3), thôi trích từ ngày 16/3
+    assert [v for _, v in sc.periods] == [1_000_000, 1_000_000, 483_871]

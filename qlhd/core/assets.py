@@ -164,6 +164,11 @@ def schedule(a) -> Schedule:
         later = sum(v for mi, v in sc.periods if mi > g) + sum(v for mi, v in sc.extra.items() if mi > g)
         sc.periods = [(mi, v) for mi, v in sc.periods if mi <= g]
         sc.extra = {mi: v for mi, v in sc.extra.items() if mi <= g}
+        if a["LoaiSo"] == "TSCĐ":       # TT 45/2013 điều 9: thôi trích khấu hao từ ngày tài sản giảm (tính theo ngày)
+            d = date.fromisoformat(str(a["NgayGhiGiam"])[:10])
+            dim = calendar.monthrange(d.year, d.month)[1]
+            part = div_round(m * (d.day - 1), dim)
+            sc.periods = [(mi, min(v, part)) if mi == g else (mi, v) for mi, v in sc.periods]
         if a["LoaiSo"] == "CCDC" and later:      # CCDC hỏng, mất: giá trị còn lại phân bổ hết vào tháng ghi giảm
             sc.extra[g] = sc.extra.get(g, 0) + later
     return sc
@@ -241,11 +246,11 @@ def line_flag(r: dict, dup: dict | None = None) -> tuple[str | None, str]:
         return "chua_phan_loai", "Không khớp danh mục: chọn phân loại và nhóm."
     if pl in dm.TAI_SAN and not r.get("SoThang"):
         return "thieu_thang", "Nhập số tháng khấu hao / phân bổ."
-    if dup is not None:
-        return "trung", (f"Cùng người bán, tên hàng, số tiền với hóa đơn số {dup.get('SoHoaDonGoc')} ngày "
-                         f"{_dmy(dup.get('NgayNhanHD') or '')}: kiểm tra nhập trùng.")
     if not r.get("TuDong"):
-        return None, ""             # kế toán đã phân loại / xác nhận
+        return None, ""             # kế toán đã phân loại / bấm "Xác nhận đúng": thôi cảnh báo
+    if dup is not None:
+        return "trung", (f"Cùng người bán, tên hàng, số tiền, ngày với hóa đơn số {dup.get('SoHoaDonGoc')}: "
+                         "kiểm tra nhập trùng.")
     if pl in (dm.TSCD, dm.CCDC) and dm.near_threshold(unit):
         return "nguong", (f"Đơn giá {unit:,.0f} đ sát ngưỡng 30 triệu: xác nhận là CCDC hay TSCĐ.").replace(",", ".")
     kq = dm.classify(r["TenHang"], unit, co_hop_dong=bool(r.get("MaHopDong")))
@@ -390,7 +395,9 @@ class AssetService:
         """Gắn cảnh báo cho từng dòng (chỉ tô màu, không đổi dữ liệu): MaCanhBao, CanhBao, _mau."""
         seen: dict[tuple, dict] = {}
         for r in rows:
-            key = (r.get("MaThueNCC") or r.get("TenNhaCungCap"), dm.normalize(r["TenHang"]), int(r["ThanhTien"] or 0))
+            # hóa đơn định kỳ (nước, xăng hằng tháng) cùng số tiền nhưng khác ngày thì không phải trùng
+            key = (r.get("MaThueNCC") or r.get("TenNhaCungCap"), dm.normalize(r["TenHang"]), int(r["ThanhTien"] or 0),
+                   r.get("NgayNhanHD"))
             other = seen.get(key)
             dup = other if other and other["MaHoaDon"] != r["MaHoaDon"] and key[2] else None
             seen.setdefault(key, r)

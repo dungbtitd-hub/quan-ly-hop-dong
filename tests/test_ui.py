@@ -502,6 +502,15 @@ def test_contract_filters_and_edit_payment(qtbot, ctx, monkeypatch):
     page.status.set_value("Hoàn thành")
     page.paid.set_value(None)
     assert page.table.rowCount() == 0
+    page.status.set_value(None)
+    xuat = page.box.combo("xuat")
+    page.filter.set_value("Đầu ra")
+    xuat.set_value("xuat_mot_phan")                 # HĐ đầu ra đã xuất 55 / 110 triệu
+    assert [r["SoHopDong"] for r in page.table.rows] == ["01/2026/HĐTV"]
+    xuat.set_value("chua_xuat")
+    assert "01/2026/HĐTV" not in [r["SoHopDong"] for r in page.table.rows]
+    xuat.set_value(None)
+    page.filter.set_value(None)
 
     # sửa lần thanh toán ghi nhầm (30 triệu → 33 triệu) từ màn Hóa đơn đầu ra
     def fake_dialog(_ctx, _parent, ma_hd, values, title="Ghi nhận thanh toán"):
