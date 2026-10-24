@@ -466,6 +466,7 @@ class ContractService:
         """values["_Dong"]: các dòng hàng đọc từ hóa đơn điện tử (nếu có), để phân loại chi phí / CCDC / TSCĐ."""
         v = dict(values)
         lines = v.pop("_Dong", None)
+        loai = v.pop("_LoaiHang", None)          # (phân loại, mã nhóm, số tháng) người dùng ghi trong file Excel
         for f, label in (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Tên người bán"),
                          ("MaThueNCC", "MST người bán"), ("NgayNhanHD", "Ngày hóa đơn")):
             if not v.get(f):
@@ -483,7 +484,10 @@ class ContractService:
             self.db.update("HoaDonDauVao", ma, v)
         else:
             ma = self.db.insert("HoaDonDauVao", v)
-        AssetService(self.db).ensure_lines(ma, lines)
+        svc = AssetService(self.db)
+        svc.ensure_lines(ma, lines)
+        if loai:
+            svc.set_invoice_class(ma, *loai)
         return ma
 
     def delete_in_invoice(self, ma: str) -> None:

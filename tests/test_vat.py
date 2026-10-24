@@ -235,3 +235,42 @@ def test_form_fee_rate(qtbot):
     dlg.widgets["TyLePhiKhac"].setEditText("10%")
     v = dlg.values()
     assert (v["VAT"], v["PhiKhac"], v["GiaTriSauThue"]) == (6_230, 12_460, 143_290)
+
+
+def test_template_item_type_column(tmp_path, company):
+    """Cột Loại hàng hóa: chọn từ danh mục; có ghi thì lấy đúng loại đó, để trống thì phần mềm tự nhận."""
+    from qlhd.core.assets import AssetService
+
+    tpl = in_invoice_excel.write_template(tmp_path / "mau.xlsx")
+    wb = load_workbook(tpl)
+    ws = wb[in_invoice_excel.SHEET]
+    head = [c.value.rstrip(" *") for c in ws[1]]
+    col = head.index(in_invoice_excel.LABELS["LoaiHang"])
+    assert head[col - 1] == "Mặt hàng" and " – " in wb["Danh mục nhóm"]["A2"].value
+    assert any(dv.sqref and ws.cell(1, col + 1).column_letter in str(dv.sqref) for dv in ws.data_validations.dataValidation)
+    base = {"Số hóa đơn": "77", "Ngày hóa đơn": "11/07/2026", "Tên người bán": "Gara Hùng Cường",
+            "Mã số thuế người bán": "0109000001", "Giá trị chưa có thuế": 3_000_000, "Thuế suất": "8%"}
+    rows = [tuple(head)]
+    for so, ten, loai in (("77", "Thay lốp xe ô tô", "CP03 – Sửa chữa xe"), ("78", "Dịch vụ tháng 10", ""),
+                          ("79", "Máy toàn đạc", "TSCĐ TB07"), ("80", "Hàng hóa khác", "abc")):
+        row = [None] * len(head)
+        for k, x in dict(base, **{"Số hóa đơn": so, "Mặt hàng": ten}).items():
+            row[head.index(k)] = x
+        row[col] = loai or None
+        rows.append(tuple(row))
+    items = in_invoice_excel.read_rows(rows, "S")
+    assert items[0].loai_hang.nhom.ma == "CP03" and items[1].loai_hang is None
+    assert items[2].loai_hang.phan_loai == "TSCĐ" and items[3].loai_hang is None
+    assert any("Không hiểu loại hàng" in n for n in items[3].notes)
+    db = company["gd"].db
+    cs, svc = ContractService(db), AssetService(db)
+    for it in items[:3]:
+        v = dict(it.values)
+        if it.loai_hang:
+            v["_LoaiHang"] = (it.loai_hang.phan_loai, it.loai_hang.nhom.ma, it.loai_hang.so_thang)
+        ma = cs.save_in_invoice(v)
+        ln = svc.lines_of(ma)[0]
+        if it.loai_hang:
+            assert (ln["PhanLoai"], ln["MaNhomDM"], ln["TuDong"]) == (it.loai_hang.phan_loai, it.loai_hang.nhom.ma, 0)
+        else:
+            assert ln["TuDong"] == 1

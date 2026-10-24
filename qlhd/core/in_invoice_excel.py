@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from . import asset_catalog as dm
 from . import vat
 from .contracts import TAX_GROUP_TITLES, TAX_GROUPS, ValidationError, guess_tax_group
 from .invoice_match import fold
@@ -23,8 +24,10 @@ COLUMNS = [
     ("NgayNhanHD", "Ngày hóa đơn", True, "date", ("ngay",)),
     ("MaThueNCC", "Mã số thuế người bán", True, "mst", ("ma so thue", "mst")),
     ("TenNhaCungCap", "Tên người bán", True, "text", ("nguoi ban", "nha cung cap", "don vi ban", "ben ban")),
+    ("LoaiHang", "Loại hàng hóa (mã nhóm, VD CP03)", False, "text", ("loai hang", "loai hang hoa", "phan loai",
+                                                                     "nhom danh muc", "ma nhom")),
     ("NguoiMuaHang", "Người mua hàng", False, "text", ("nguoi mua",)),
-    ("NhomThue", "Nhóm thuế GTGT", False, "group", ("nhom",)),
+    ("NhomThue", "Nhóm thuế GTGT", False, "group", ("nhom thue", "nhom")),
     ("ThueSuat", "Thuế suất", False, "rate", ("thue suat",)),
     ("GiaTriTruocThue", "Giá trị chưa có thuế", False, "money",
      ("chua co thue", "chua thue", "truoc thue", "doanh so", "thanh tien")),
@@ -36,7 +39,8 @@ COLUMNS = [
     ("MatHang", "Mặt hàng", False, "text", ("mat hang", "ten hang", "hang hoa", "noi dung", "dien giai")),
     ("GhiChuHDDV", "Ghi chú", False, "text", ("ghi chu",)),
 ]
-TEMPLATE_KEYS = ["SoHoaDonGoc", "KyHieuHD", "NgayNhanHD", "TenNhaCungCap", "MaThueNCC", "MatHang", "GiaTriTruocThue",
+TEMPLATE_KEYS = ["SoHoaDonGoc", "KyHieuHD", "NgayNhanHD", "TenNhaCungCap", "MaThueNCC", "MatHang", "LoaiHang",
+                 "GiaTriTruocThue",
                  "ThueSuat", "VAT", "PhiKhac", "TyLePhiKhac", "GiaTriSauThue", "NhomThue", "NguoiMuaHang", "SoThamChieuSK", "SoHopDong",
                  "GhiChuHDDV"]
 SHEET = "Hóa đơn đầu vào"
@@ -59,11 +63,14 @@ GUIDE = [
     " tổng thanh toán = trước thuế + thuế GTGT + phí. Bảng kê ghi phí thành dòng thứ hai ngay dưới hóa đơn (ô số hóa"
     " đơn, ngày, người bán để trống hoặc gộp ô, mặt hàng 'Phí bảo vệ môi trường') thì phần mềm gộp vào hóa đơn trên."
     " Hóa đơn chỉ có một dòng là hóa đơn không có phí.",
-    "6. Hóa đơn đã có trong phần mềm (cùng MST người bán + ký hiệu + số) hoặc lặp lại trong file sẽ được bỏ qua.",
-    "7. Trong phần mềm: Hóa đơn đầu vào → Nhập từ Excel → chọn file → kiểm tra, chọn hợp đồng → Nhập.",
+    "6. Loại hàng hóa: chọn trong danh sách (mã nhóm – tên nhóm, sheet 'Danh mục nhóm'); có thể ghi kèm phân loại,"
+    " VD 'TSCĐ TB01' hoặc 'CCDC TB05'. Có điền thì phần mềm lấy đúng loại này, coi như kế toán đã phân loại;"
+    " để trống thì phần mềm tự nhận theo tên hàng, chưa rõ thì để chờ kế toán phân loại và cảnh báo.",
+    "7. Hóa đơn đã có trong phần mềm (cùng MST người bán + ký hiệu + số) hoặc lặp lại trong file sẽ được bỏ qua.",
+    "8. Trong phần mềm: Hóa đơn đầu vào → Nhập từ Excel → chọn file → kiểm tra, chọn hợp đồng → Nhập.",
 ]
 EXAMPLE = ["1285718", "C26TAA", date(2026, 4, 30), "CÔNG TY CỔ PHẦN GIAO THÔNG SỐ VIỆT NAM", "0109266456",
-           "Cước đường bộ 30K90317", 94699, "10%", 7576, None, None, 102275, "Chịu thuế", "Nguyễn Văn A", "FT26120123456", "",
+           "Cước đường bộ 30K90317", "CP02 – Phí qua trạm, vé cầu đường, gửi xe, rửa xe", 94699, "10%", 7576, None, None, 102275, "Chịu thuế", "Nguyễn Văn A", "FT26120123456", "",
            "Ví dụ, xóa dòng này trước khi nhập"]
 
 
@@ -99,6 +106,22 @@ def write_template(path: str | Path) -> Path:
             dv = DataValidation(type="list", formula1='"' + ",".join(TAX_GROUPS) + '"', allow_blank=True)
             ws.add_data_validation(dv)
             dv.add(f"{letter}2:{letter}2000")
+        if key == "LoaiHang":
+            ws.column_dimensions[letter].width = 40
+            dv = DataValidation(type="list", formula1=f"'Danh mục nhóm'!$A$2:$A${len(dm.CATALOG) + 1}",
+                                allow_blank=True, showErrorMessage=False)       # vẫn cho gõ "TSCĐ TB01"…
+            ws.add_data_validation(dv)
+            dv.add(f"{letter}2:{letter}2000")
+    cat = wb.create_sheet("Danh mục nhóm")
+    for c, title in enumerate(("Loại hàng hóa (chọn ở cột Loại hàng hóa)", "Phân loại mặc định", "Ví dụ hàng hóa"),
+                              start=1):
+        cat.cell(1, c, title).font = Font(bold=True)
+    for r, n in enumerate(dm.CATALOG, start=2):
+        cat.cell(r, 1, f"{n.ma} – {n.ten}")
+        cat.cell(r, 2, ", ".join(dict.fromkeys(dm.allowed_classes(n, 0) + dm.allowed_classes(n, dm.NGUONG_TSCD))))
+        cat.cell(r, 3, ", ".join(n.tu_khoa[:6]))
+    for col, w in (("A", 70), ("B", 26), ("C", 60)):
+        cat.column_dimensions[col].width = w
     ws.row_dimensions[1].height = 34
     ws.freeze_panes = "A2"
     path = Path(path)
@@ -116,6 +139,7 @@ class ExcelInvoice:
     errors: list[str] = field(default_factory=list)
     so_hop_dong: str = ""
     blank: set = field(default_factory=set)     # các ô để trống trong file
+    loai_hang: object = None                    # dm.KetQua khi cột Loại hàng hóa có ghi và đọc được
 
 
 def _column_key(header) -> str | None:
@@ -329,6 +353,11 @@ def _finish(item: ExcelInvoice, group: str | None) -> ExcelInvoice:
             v["NhomThue"] = guess_tax_group(v["VAT"])
             item.notes.append(f"Nhóm thuế xếp theo tiền thuế ({v['NhomThue']}), kiểm tra lại.")
     item.so_hop_dong = v.pop("SoHopDong", "") or ""
+    loai = v.pop("LoaiHang", "") or ""
+    if loai:
+        kq, note = dm.parse_class_text(loai, v.get("MatHang") or "", int(v.get("GiaTriTruocThue") or 0))
+        item.loai_hang = kq
+        item.notes.append(note)
     for key in ("SoHoaDonGoc", "TenNhaCungCap", "MaThueNCC", "NgayNhanHD"):
         if not v.get(key) and not any(e.startswith(LABELS[key]) for e in item.errors):
             item.errors.append(f"Thiếu {LABELS[key]}")

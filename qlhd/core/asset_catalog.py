@@ -259,3 +259,34 @@ def fixed_asset_kind(ma_nhom: str | None) -> tuple[str, str, str]:
     if ma_nhom == "TB12":
         return "TSCĐ vô hình", "2135", "2143"
     return "Máy móc, thiết bị", "21112", "2141"
+
+
+def parse_class_text(text: str, ten_hang: str, don_gia: int) -> tuple[KetQua | None, str]:
+    """Đọc ô "Loại hàng hóa" người dùng ghi trong file Excel: mã nhóm (VD "CP03 – Sửa chữa…"), có thể kèm
+    phân loại ("TSCĐ", "CCDC"…), hoặc chỉ tên nhóm / phân loại. Trả (kết quả, ghi chú); không hiểu thì (None, lý do)."""
+    t = (text or "").strip()
+    if not t:
+        return None, ""
+    low = normalize(t)
+    pl = next((c for c in (CHO_PB, KHONG_TINH, CHI_PHI, TSCD, CCDC) if normalize(c) in low), None)
+    m = re.search(r"\b([A-Za-z]{2}\d{2})\b", t)
+    nhom = BY_CODE.get(m.group(1).upper()) if m else None
+    if nhom is None:
+        nhom = find_group(t)
+        if nhom is None and pl:
+            g = find_group(ten_hang)
+            nhom = g if g and pl in allowed_classes(g, don_gia) else None
+    if nhom is None:
+        if pl:
+            return None, (f'Loại hàng ghi "{pl}" nhưng chưa rõ nhóm: ghi kèm mã nhóm (VD "{pl} TB05"), '
+                          "hoặc phân loại sau khi nhập.")
+        return None, f'Không hiểu loại hàng "{t}": ghi mã nhóm trong danh mục (VD CP03), hãy phân loại sau khi nhập.'
+    if pl is None or pl not in allowed_classes(nhom, don_gia):
+        if pl:
+            return None, f'Nhóm {nhom.ma} không xếp vào "{pl}" được, hãy phân loại sau khi nhập.'
+        pl = default_class(nhom, don_gia)
+    months = default_months(nhom, pl, don_gia)
+    note = f"Loại hàng theo file: {pl} · {nhom.ma} – {nhom.ten}."
+    if pl in TAI_SAN and not months:
+        note += " Nhập số tháng phân bổ ở thẻ Tài sản, CCDC sau khi nhập."
+    return KetQua(pl, nhom, months), note

@@ -386,6 +386,24 @@ class AssetService:
         self.renumber_ccdc(commit=False)
         self.db.conn.commit()
 
+    def set_invoice_class(self, ma_hd: str, phan_loai: str, ma_nhom: str, so_thang: int | None) -> int:
+        """Phân loại mọi dòng hàng của một hóa đơn theo loại người dùng ghi sẵn (VD cột Loại hàng hóa trong file Excel);
+        dòng phí ngoài VAT giữ phân loại riêng. Dòng nào không xếp được thì để nguyên chờ kế toán."""
+        n = 0
+        for ln in self.lines_of(ma_hd):
+            if ln["GhiChu"] == FEE_NOTE:
+                continue
+            try:
+                if phan_loai in dm.TAI_SAN and not so_thang:      # thiếu số tháng: ghi loại, nhóm; vẫn hiện chờ nhập tháng
+                    self.db.update("DongHoaDonDauVao", ln["Ma"], {"PhanLoai": phan_loai, "MaNhomDM": ma_nhom,
+                                                                 "SoThang": None, "TuDong": 0})
+                else:
+                    self.set_line_class(ln["Ma"], phan_loai, ma_nhom, so_thang)
+                n += 1
+            except AssetError:
+                pass
+        return n
+
     @staticmethod
     def month_warning(phan_loai: str, ma_nhom: str | None, so_thang: int | None) -> str:
         """Cảnh báo (không chặn) khi thời gian nằm ngoài khung."""

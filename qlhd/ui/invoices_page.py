@@ -412,6 +412,8 @@ class InvoicesPage(QWidget):
                 v["MaHopDong"] = m.ma or CHOOSE
                 goi_y = m.goi_y
                 notes.append(m.note)
+            if r.loai_hang is not None:
+                v["_LoaiHang"] = (r.loai_hang.phan_loai, r.loai_hang.nhom.ma, r.loai_hang.so_thang)
             items.append({"path": None, "file": f"{r.sheet} – dòng {r.line}", "values": v, "status": "moi",
                           "errors": list(r.errors), "notes": r.errors + r.notes + notes, "goi_y": goi_y})
         mark_duplicates(self.ctx, "vao", items)
