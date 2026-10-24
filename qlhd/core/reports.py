@@ -38,6 +38,10 @@ RELATIVE_PERIODS = [
     ("thang_truoc", "Tháng trước"), ("quy_truoc", "Quý trước"), ("nam_truoc", "Năm trước"),
 ]
 
+DETAIL_LEVELS = [("gop", "Gộp (chỉ dòng tổng hợp)"), ("hop_dong", "Chi tiết từng hợp đồng"),
+                 ("hoa_don", "Chi tiết đến từng hóa đơn")]
+INVOICE_PERIODS = [(None, "Không chia kỳ"), ("thang", "Tháng"), ("quy", "Quý"), ("nam", "Năm")]
+
 MONEY, TEXT, PCT, INT = "money", "text", "pct", "int"
 
 
@@ -62,6 +66,9 @@ class ReportFilters:
     ky_tuong_doi: str | None = None       # tháng này / quý trước…: tự tính từ – đến lúc xuất (mẫu xuất nhanh)
     tach_nam: bool = True                 # chia báo cáo theo năm ký hợp đồng (mỗi năm một nhóm, có dòng cộng năm)
     nam: int | None = None                # chỉ lấy hợp đồng ký trong năm này (dùng khi tách theo năm)
+    muc_chi_tiet: str = "gop"             # gop / hop_dong (liệt kê từng hợp đồng) / hoa_don (đến từng hóa đơn)
+    nhom_ky_hd: str | None = None         # hóa đơn chia nhóm theo thang / quy / nam (có dòng cộng từng kỳ)
+    chi_cong_ky: bool = False             # hóa đơn: chỉ một dòng cộng cho mỗi kỳ (gộp), không liệt kê từng hóa đơn
 
     @classmethod
     def from_dict(cls, d: dict) -> "ReportFilters":
@@ -87,6 +94,11 @@ class ReportFilters:
             parts.append("Thanh toán: " + self.tt_thanh_toan)
         if self.tt_xuat_hd:
             parts.append("Xuất hóa đơn: " + self.tt_xuat_hd)
+        if self.muc_chi_tiet != "gop":
+            parts.append(dict(DETAIL_LEVELS).get(self.muc_chi_tiet, ""))
+        if self.nhom_ky_hd:
+            parts.append(f"Hóa đơn theo {dict(INVOICE_PERIODS).get(self.nhom_ky_hd, '').lower()}"
+                         + (" (chỉ dòng cộng)" if self.chi_cong_ky else ""))
         return " · ".join(parts)
 
 
@@ -258,13 +270,99 @@ class ContractReports:
             out.append(rep)
         return out
 
+    # ---- đa ngữ cảnh: gộp hoặc chi tiết
+    def _invoice_children(self, c: dict, f: ReportFilters, first: str, second: str | None = None) -> list[dict]:
+        """Dòng chi tiết từng hóa đơn của một hợp đồng (đặt dưới dòng hợp đồng, không cộng vào tổng)."""
+        out = []
+        if c["ChieuHopDong"] == "Đầu ra":
+            for inv in self.db.active("HoaDonDauRa", "MaHopDong = ? AND TinhChatHD != 'Đã hủy'", (c["Ma"],),
+                                      "NgayXuatHD, SoHoaDon"):
+                if f.tu and inv["NgayXuatHD"] < f.tu and f.che_do == "trong_ky" or f.den and inv["NgayXuatHD"] > f.den:
+                    continue
+                paid = self.cs.invoice_paid(inv["Ma"])
+                status = payment_status(inv["GiaTriSauThue"], paid)
+                if f.tt_thanh_toan and (status != f.tt_thanh_toan if f.tt_thanh_toan != "Còn phải thu"
+                                        else inv["GiaTriSauThue"] - paid <= 0):
+                    continue
+                row = {"_kieu": "con", "MaHopDong": c["Ma"], first: f"      • Hóa đơn {inv['SoHoaDon']}",
+                       "DaXuatHD": inv["GiaTriSauThue"], "DaThanhToan": paid, "ConPhaiThu": inv["GiaTriSauThue"] - paid,
+                       "TinhTrangHopDong": status, "TinhTrangThanhToan": status, "NgayKy": inv["NgayXuatHD"],
+                       "LanThuGanNhat": ""}
+                if second:
+                    row[second] = f"ngày {fmt_date(inv['NgayXuatHD'])} · {status.lower()}"
+                out.append(row)
+        else:
+            for inv in self.db.active("HoaDonDauVao", "MaHopDong = ?", (c["Ma"],), "NgayNhanHD, SoHoaDonGoc"):
+                if f.tu and inv["NgayNhanHD"] < f.tu and f.che_do == "trong_ky" or f.den and inv["NgayNhanHD"] > f.den:
+                    continue
+                status = "Đã thanh toán" if inv["SoThamChieuSK"] else "Chưa có sao kê"
+                row = {"_kieu": "con", "MaHopDong": c["Ma"], first: f"      • Hóa đơn {inv['SoHoaDonGoc']}",
+                       "DaXuatHD": inv["GiaTriSauThue"], "NgayKy": inv["NgayNhanHD"], "TinhTrangHopDong": status}
+                if second:
+                    row[second] = f"ngày {fmt_date(inv['NgayNhanHD'])} · {status.lower()}"
+                out.append(row)
+        return out
+
+    def _contract_children(self, contracts: list[dict], f: ReportFilters, first: str,
+                           second: str | None = None) -> list[dict]:
+        """Dòng chi tiết từng hợp đồng (và hóa đơn của nó nếu chọn chi tiết đến hóa đơn) dưới một dòng tổng hợp."""
+        out = []
+        for c in contracts:
+            row = {k: c.get(k) for k in ("GiaTriHD", "DaXuatHD", "ConPhaiXuat", "DaThanhToan", "ConPhaiThu",
+                                         "PhanTramTT", "LanThuGanNhat", "TinhTrangThanhToan")}
+            row.update({"_kieu": "con", "MaHopDong": c["Ma"], first: f"   ↳ {c['SoHopDong']} – {c['TenHopDong']}"})
+            if second:
+                row[second] = f"{c['TenDoiTac']} · ký {fmt_date(c['NgayKy'])}"
+            out.append(row)
+            if f.muc_chi_tiet == "hoa_don":
+                out += self._invoice_children(c, f, first, second)
+        return out
+
+    def _expand(self, rep: Report, f: ReportFilters, contracts: list[dict], key_of, first: str,
+                second: str | None = None) -> Report:
+        """Gộp: giữ dòng tổng hợp. Chi tiết: dưới mỗi dòng tổng hợp liệt kê hợp đồng (và hóa đơn) của nó."""
+        if f.muc_chi_tiet == "gop":
+            return rep
+        rows = []
+        for r in rep.rows:
+            rows.append(r)
+            if r.get("_kieu"):
+                continue
+            rows += self._contract_children([c for c in contracts if key_of(c) == key_of(r)], f, first, second)
+        rep.rows = rows
+        return rep
+
+    def _by_invoice_period(self, rep: Report, f: ReportFilters, date_key: str, sum_keys: list[str],
+                           number_key: str) -> Report:
+        """Hóa đơn chia theo tháng / quý / năm: mỗi kỳ một nhóm có dòng cộng; hoặc chỉ một dòng cộng mỗi kỳ (gộp)."""
+        if not f.nhom_ky_hd:
+            return rep
+        first = rep.columns[0][0]
+        items = [r for r in rep.rows if not r.get("_kieu")]
+        groups: dict[str, list[dict]] = {}
+        for r in items:
+            groups.setdefault(period_label(r[date_key], f.nhom_ky_hd), []).append(r)
+        rows = []
+        for label, part in sorted(groups.items(), key=lambda g: g[1][0][date_key]):
+            sub = _sum(part, sum_keys)
+            if f.chi_cong_ky:
+                rows.append(dict(sub, **{first: label, number_key: f"{len(part)} hóa đơn", date_key: part[0][date_key],
+                                         "_dem": len(part)}))
+                continue
+            rows.append({"_kieu": "nhom", "_nhan": f"{label} ({len(part)} hóa đơn)"})
+            rows += part
+            rows.append(dict(sub, _kieu="cong", **{first: f"Cộng {label.lower()}"}))
+        rep.rows = rows
+        return rep
+
     # 1
     def _ctx_loai_hd(self, f):
         return self._by_direction(f, self._loai_hd)
 
     def _loai_hd(self, f):
         groups: dict[tuple, dict] = {}
-        for c in self.contracts(f):
+        contracts = self.contracts(f)
+        for c in contracts:
             g = groups.setdefault((c["LoaiHD"], c["ChieuHopDong"]), {
                 "LoaiHD": c["LoaiHD"], "Chieu": c["ChieuHopDong"], "SoHD": 0, "GiaTriHD": 0, "DaXuatHD": 0,
                 "ConPhaiXuat": 0, "DaThanhToan": 0, "ConPhaiThu": 0})
@@ -277,17 +375,18 @@ class ContractReports:
         keys = ["SoHD", "GiaTriHD", "DaXuatHD", "ConPhaiXuat", "DaThanhToan", "ConPhaiThu"]
         total = _sum(rows, keys)
         total["LoaiHD"] = "TỔNG CỘNG"
-        return Report("Báo cáo tổng hợp theo loại hợp đồng", [
+        return self._expand(Report("Báo cáo tổng hợp theo loại hợp đồng", [
             ("LoaiHD", "Loại hợp đồng", TEXT), ("Chieu", "Chiều", TEXT), ("SoHD", "Số HĐ", INT),
             ("GiaTriHD", "Tổng giá trị HĐ", MONEY), ("DaXuatHD", "Đã xuất hóa đơn", MONEY),
             ("ConPhaiXuat", "Còn phải xuất", MONEY), ("DaThanhToan", "Đã thanh toán", MONEY),
-            ("ConPhaiThu", "Còn phải thu", MONEY), ("PhanTramTT", "% thanh toán", PCT)], rows, total)
+            ("ConPhaiThu", "Còn phải thu", MONEY), ("PhanTramTT", "% thanh toán", PCT)], rows, total),
+            f, contracts, lambda r: (r["LoaiHD"], r.get("Chieu") or r.get("ChieuHopDong")), "LoaiHD")
 
     def _partner_rows(self, contracts):
         groups: dict[str, dict] = {}
         for c in contracts:
             key = c["MaDoiTac"] or c["TenDoiTac"]
-            g = groups.setdefault(key, {"TenDoiTac": c["TenDoiTac"], "MST": c["MaThueDoiTac"] or "", "SoHD": 0,
+            g = groups.setdefault(key, {"_khoa": key, "TenDoiTac": c["TenDoiTac"], "MST": c["MaThueDoiTac"] or "", "SoHD": 0,
                                         "GiaTriHD": 0, "DaXuatHD": 0, "DaThanhToan": 0, "ConPhaiThu": 0,
                                         "LanThuGanNhat": ""})
             g["SoHD"] += 1
@@ -303,10 +402,12 @@ class ContractReports:
 
     # 2
     def _ctx_chu_dau_tu(self, f):
-        rows = self._partner_rows(self.contracts(f, "Đầu ra"))
+        contracts = self.contracts(f, "Đầu ra")
+        rows = self._partner_rows(contracts)
         total = _sum(rows, ["SoHD", "GiaTriHD", "DaXuatHD", "DaThanhToan", "ConPhaiThu"])
         total["TenDoiTac"] = "TỔNG CỘNG"
-        return Report("Báo cáo theo chủ đầu tư", self.PARTNER_COLS, rows, total)
+        return self._expand(Report("Báo cáo theo chủ đầu tư", self.PARTNER_COLS, rows, total), f, contracts,
+                            lambda r: r.get("_khoa") or r.get("MaDoiTac") or r["TenDoiTac"], "TenDoiTac", "MST")
 
     # 3
     def _ctx_nhom_cdt(self, f):
@@ -315,11 +416,16 @@ class ContractReports:
         all_rows = []
         for g in groups:
             sub = ReportFilters(**{**f.__dict__, "nhom": [g["Ma"]]})
-            members = self._partner_rows(self.contracts(sub, "Đầu ra"))
+            sub_contracts = self.contracts(sub, "Đầu ra")
+            members = self._partner_rows(sub_contracts)
             rows.append({"_kieu": "nhom", "Nhom": g["TenNhom"]})
             for m in members:
                 m["Nhom"] = ""
                 rows.append(m)
+                if f.muc_chi_tiet != "gop":
+                    rows += self._contract_children(
+                        [c for c in sub_contracts if (c["MaDoiTac"] or c["TenDoiTac"]) == m["_khoa"]], f, "TenDoiTac",
+                        "MST")
             st = _sum(members, keys)
             st.update({"_kieu": "cong", "Nhom": f"Cộng nhóm {g['TenNhom']}"})
             rows.append(st)
@@ -333,9 +439,13 @@ class ContractReports:
         return self._by_direction(f, self._hop_dong)
 
     def _hop_dong(self, f):
-        rows = self.contracts(f)
-        for r in rows:
+        contracts = self.contracts(f)
+        rows = []
+        for r in contracts:
             r["NgayKyF"] = r["NgayKy"]
+            rows.append(r)
+            if f.muc_chi_tiet == "hoa_don":
+                rows += self._invoice_children(r, f, "SoHopDong", "TenHopDong")
         keys = ["GiaTriHD", "DaXuatHD", "ConPhaiXuat", "DaThanhToan", "ConPhaiThu"]
         total = _sum(rows, keys)
         total["SoHopDong"] = "TỔNG CỘNG"
@@ -388,13 +498,14 @@ class ContractReports:
             seen.setdefault(r["_nguoi_mua"], r["TenNguoiMua"] + (f" – {r['MSTNguoiMua']}" if r["MSTNguoiMua"] else ""))
         return sorted(((label, key) for key, label in seen.items()), key=lambda x: x[0].lower())
 
-    def _out_report(self, title, rows, sheet="Hóa đơn đầu ra") -> Report:
+    def _out_report(self, title, rows, sheet="Hóa đơn đầu ra", f: ReportFilters | None = None) -> Report:
         total = _sum(rows, self.OUT_SUM)
         total["KyHieuHD"] = "TỔNG CỘNG"
-        return Report(title, self.OUT_COLS, rows, total, sheet=sheet)
+        rep = Report(title, self.OUT_COLS, rows, total, sheet=sheet)
+        return self._by_invoice_period(rep, f, "NgayXuatHD", self.OUT_SUM, "SoHoaDon") if f else rep
 
     def _ctx_hoa_don_ra(self, f):
-        return self._out_report("Báo cáo hóa đơn đầu ra đã xuất", self._out_invoice_rows(f))
+        return self._out_report("Báo cáo hóa đơn đầu ra đã xuất", self._out_invoice_rows(f), f=f)
 
     def _ctx_hoa_don_ra_nguoi_mua(self, f):
         groups: dict[str, list[dict]] = {}
@@ -402,11 +513,11 @@ class ContractReports:
             if not f.nguoi_mua or r["_nguoi_mua"] in f.nguoi_mua:
                 groups.setdefault(r["_nguoi_mua"], []).append(r)
         if not groups:
-            return self._out_report("Hóa đơn đầu ra theo người mua", [])
+            return self._out_report("Hóa đơn đầu ra theo người mua", [], f=f)
         out = []
         for rows in sorted(groups.values(), key=lambda g: g[0]["TenNguoiMua"].lower()):
             name = rows[0]["TenNguoiMua"]
-            out.append(self._out_report(f"Hóa đơn đầu ra – {name}", rows, sheet_name(name)))
+            out.append(self._out_report(f"Hóa đơn đầu ra – {name}", rows, sheet_name(name), f))
         return out
 
     # 6
@@ -450,6 +561,8 @@ class ContractReports:
                 continue
             if f.co_hd_lien_ket is False and inv["MaHopDong"]:
                 continue
+            if f.tt_thanh_toan and bool(inv["SoThamChieuSK"]) != (f.tt_thanh_toan == "Đã thu đủ"):
+                continue          # đầu vào: có số sao kê = đã thanh toán
             out.append(inv)
         return out
 
@@ -459,9 +572,11 @@ class ContractReports:
 
         def g_for(mst, name):
             key = mst or name.lower()
-            return groups.setdefault(key, {"TenNCC": name, "MST": mst or "", "SoHD": 0, "GiaTriHD": 0,
+            return groups.setdefault(key, {"_khoa": key, "TenNCC": name, "MST": mst or "", "SoHD": 0, "GiaTriHD": 0,
                                            "DaNhanHD": 0, "MuaTrucTiep": 0, "TruocThue": 0, "VAT": 0, "SauThue": 0})
-        for c in self.contracts(f, "Đầu vào"):
+        contracts = self.contracts(f, "Đầu vào")
+        direct: dict[str, list] = {}
+        for c in contracts:
             g = g_for(c["MaThueDoiTac"], c["TenDoiTac"])
             g["SoHD"] += 1
             g["GiaTriHD"] += c["GiaTriHD"]
@@ -471,6 +586,7 @@ class ContractReports:
                 g["DaNhanHD"] += inv["GiaTriSauThue"]
             else:
                 g["MuaTrucTiep"] += inv["GiaTriSauThue"]
+                direct.setdefault(g["_khoa"], []).append(inv)
             g["TruocThue"] += inv["GiaTriTruocThue"]
             g["VAT"] += inv["VAT"]
             g["SauThue"] += inv["GiaTriSauThue"]
@@ -478,6 +594,26 @@ class ContractReports:
         keys = ["SoHD", "GiaTriHD", "DaNhanHD", "MuaTrucTiep", "TruocThue", "VAT", "SauThue"]
         total = _sum(rows, keys)
         total["TenNCC"] = "TỔNG CỘNG"
+        if f.muc_chi_tiet != "gop":
+            out = []
+            for r in rows:
+                out.append(r)
+                for c in contracts:
+                    if (c["MaThueDoiTac"] or c["TenDoiTac"].lower()) != r["_khoa"]:
+                        continue
+                    out.append({"_kieu": "con", "MaHopDong": c["Ma"], "TenNCC": f"   ↳ {c['SoHopDong']} – {c['TenHopDong']}",
+                                "GiaTriHD": c["GiaTriHD"], "DaNhanHD": c["DaXuatHD"]})
+                    if f.muc_chi_tiet == "hoa_don":
+                        for ch in self._invoice_children(c, f, "TenNCC", "MST"):
+                            ch["DaNhanHD"] = ch.pop("DaXuatHD")
+                            out.append(ch)
+                if f.muc_chi_tiet == "hoa_don":
+                    for inv in direct.get(r["_khoa"], []):
+                        out.append({"_kieu": "con", "TenNCC": f"      • Hóa đơn {inv['SoHoaDonGoc']} (mua trực tiếp)",
+                                    "MST": f"ngày {fmt_date(inv['NgayNhanHD'])}", "MuaTrucTiep": inv["GiaTriSauThue"],
+                                    "TruocThue": inv["GiaTriTruocThue"], "VAT": inv["VAT"],
+                                    "SauThue": inv["GiaTriSauThue"]})
+            rows = out
         return Report("Báo cáo theo nhà cung cấp", [
             ("TenNCC", "Tên người bán", TEXT), ("MST", "MST", TEXT), ("SoHD", "Số HĐ đầu vào", INT),
             ("GiaTriHD", "Giá trị HĐ", MONEY), ("DaNhanHD", "Đã nhận hóa đơn (theo HĐ)", MONEY),
@@ -514,6 +650,12 @@ class ContractReports:
         """Bảng kê hóa đơn mua vào theo mẫu quản trị: nhóm 1 chịu thuế, nhóm 5 không chịu thuế, dòng 'Số dòng = N'."""
         rows = self._in_rows(f)
         out = rows
+        if f.nhom_ky_hd:            # chia theo kỳ thì xếp lẫn hai nhóm thuế theo ngày
+            total = _sum(rows, self.IN_SUM)
+            total["SoHoaDonGoc"] = f"Số dòng = {len(rows)}"
+            rep = Report("Bảng kê hóa đơn, chứng từ hàng hóa, dịch vụ mua vào", self.IN_COLS, rows, total,
+                         sheet="Bảng kê mua vào")
+            return self._by_invoice_period(rep, f, "NgayNhanHD", self.IN_SUM, "SoHoaDonGoc")
         if f.nhom_thue != "lan":
             out = []
             for g in TAX_GROUPS:
@@ -668,6 +810,15 @@ class ContractReports:
         if f.chieu in (None, "Đầu vào"):
             out.append(report("Báo cáo theo thời gian – đầu vào", in_cols, "Đầu vào"))
         return out
+
+
+def period_label(d: str, ky: str) -> str:
+    y, m = int(d[:4]), int(d[5:7])
+    if ky == "nam":
+        return f"Năm {y}"
+    if ky == "quy":
+        return f"Quý {(m - 1) // 3 + 1}/{y}"
+    return f"Tháng {m:02d}/{y}"
 
 
 def split_periods(tu: str, den: str, ky: str) -> list[tuple[str, str, str]]:
@@ -925,7 +1076,9 @@ def export_xlsx(reports: Report | list[Report], path: str | Path, *, company: st
                     cell.number_format = '0.0"%"'
                 elif kind == "date":
                     cell.number_format = "DD/MM/YYYY"
-                if kieu:
+                if kieu == "con":
+                    cell.font = Font(italic=True, color="555555")
+                elif kieu:
                     cell.font = Font(bold=True)
                     if kieu in ("nhom", "tong"):
                         cell.fill = group_fill

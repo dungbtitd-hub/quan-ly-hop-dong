@@ -313,8 +313,8 @@ class DataTable(QTableWidget):
                 self.setItemDelegateForColumn(j, self._pct)
         for i, row in enumerate(self.rows):
             kieu = row.get("_kieu")
-            bold = bool(kieu)
-            fill = (QBrush(QColor(style.color("group_bg"))) if kieu == "nhom"
+            bold = bool(kieu) and kieu != "con"          # "con": dòng chi tiết dưới dòng tổng hợp
+            fill = (None if kieu == "con" else QBrush(QColor(style.color("group_bg"))) if kieu == "nhom"
                     else QBrush(QColor(style.color("total_bg"))) if kieu
                     else QBrush(QColor(style.color(f"{row['_mau']}_soft"))) if row.get("_mau")
                     else QBrush(QColor(style.color("warn_soft"))) if row.get("_canh_bao") else None)
@@ -340,6 +340,8 @@ class DataTable(QTableWidget):
                     f = item.font()
                     f.setBold(True)
                     item.setFont(f)
+                elif kieu == "con":
+                    item.setForeground(QBrush(QColor(style.color("muted"))))
                 self.setItem(i, j, item)
         self.setSortingEnabled(not any(r.get("_kieu") for r in self.rows))
         hdr = self.horizontalHeader()

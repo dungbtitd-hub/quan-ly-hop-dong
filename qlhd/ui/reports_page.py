@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (QComboBox, QCheckBox, QFileDialog, QGridLayout, Q
                                QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core.contracts import CONTRACT_STATUSES
-from ..core.reports import (CONTEXT_LABELS, CONTEXTS, RELATIVE_PERIODS, TAX_MODES, ContractReports, ReportFilters,
-                            export_xlsx, relative_range)
+from ..core.reports import (CONTEXT_LABELS, CONTEXTS, DETAIL_LEVELS, INVOICE_PERIODS, RELATIVE_PERIODS, TAX_MODES,
+                            ContractReports, ReportFilters, export_xlsx, relative_range)
 from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm_delete, hint, info,
                       page_title, toolbar)
 
@@ -24,18 +24,20 @@ _VALUE = {"tinh_theo", "che_do", "tt_tt", "tt_xuat", "tach_nam"}
 _CONTRACT_REPORT = _DATE | _CONTRACT | _SPLIT | _VALUE
 _PARTNER_REPORT = _DATE | _CONTRACT | _VALUE                              # chỉ hợp đồng đầu ra
 # Ô lọc nào áp dụng cho ngữ cảnh nào; ô không có trong danh sách sẽ mờ đi và không được dùng khi lập báo cáo.
+_DETAIL = {"muc"}                         # gộp / chi tiết từng hợp đồng / đến từng hóa đơn
+_INV_PERIOD = {"ky_hd", "cong_ky"}         # hóa đơn chia theo tháng / quý / năm, hoặc chỉ dòng cộng mỗi kỳ
 RELEVANT = {
     "tong_hop": _CONTRACT_REPORT,
-    "loai_hd": _CONTRACT_REPORT,
-    "hop_dong": _CONTRACT_REPORT,
-    "chu_dau_tu": _PARTNER_REPORT,
-    "nhom_cdt": _PARTNER_REPORT,
-    "hoa_don_ra": _DATE | _CONTRACT | {"tt_tt", "tach_nam"},
-    "hoa_don_ra_nguoi_mua": _DATE | _CONTRACT | {"tt_tt", "tach_nam", "nguoi_mua"},
+    "loai_hd": _CONTRACT_REPORT | _DETAIL,
+    "hop_dong": _CONTRACT_REPORT | _DETAIL,
+    "chu_dau_tu": _PARTNER_REPORT | _DETAIL,
+    "nhom_cdt": _PARTNER_REPORT | _DETAIL,
+    "hoa_don_ra": _DATE | _CONTRACT | {"tt_tt", "tach_nam"} | _INV_PERIOD,
+    "hoa_don_ra_nguoi_mua": _DATE | _CONTRACT | {"tt_tt", "tach_nam", "nguoi_mua"} | _INV_PERIOD,
     "da_thanh_toan": _DATE | _CONTRACT | {"tt_xuat", "tach_nam"},
-    "nha_cung_cap": _DATE | {"loai", "doi_tac", "tinh_trang", "tinh_theo", "che_do", "tach_nam", "lien_ket"},
-    "hoa_don_vao": _DATE | {"tach_nam", "lien_ket", "nhom_thue"},
-    "hoa_don_ra_vao": _DATE | _CONTRACT | {"gop", "tt_tt", "tach_nam", "lien_ket", "nhom_thue"},
+    "nha_cung_cap": _DATE | {"loai", "doi_tac", "tinh_trang", "tinh_theo", "che_do", "tach_nam", "lien_ket"} | _DETAIL,
+    "hoa_don_vao": _DATE | {"tach_nam", "lien_ket", "nhom_thue", "tt_tt"} | _INV_PERIOD,
+    "hoa_don_ra_vao": _DATE | _CONTRACT | {"gop", "tt_tt", "tach_nam", "lien_ket", "nhom_thue"} | _INV_PERIOD,
     "thoi_gian": _DATE | _CONTRACT | _SPLIT | {"ky"},
 }
 # Ô lọc trên màn hình -> trường của ReportFilters
@@ -44,6 +46,7 @@ FILTER_KEYS = {
     "gop": ["gop_ra_vao"], "tach_nam": ["tach_nam"], "loai": ["loai_hd"], "doi_tac": ["doi_tac"], "nhom": ["nhom"],
     "tinh_trang": ["tinh_trang"], "tt_tt": ["tt_thanh_toan"], "tt_xuat": ["tt_xuat_hd"], "lien_ket": ["co_hd_lien_ket"],
     "nhom_thue": ["nhom_thue"], "nguoi_mua": ["nguoi_mua"], "ky": ["ky"], "che_do": ["che_do"],
+    "muc": ["muc_chi_tiet"], "ky_hd": ["nhom_ky_hd"], "cong_ky": ["chi_cong_ky"],
 }
 
 
@@ -60,6 +63,8 @@ def preview_rows(rep) -> list[dict]:
 
 def row_contract(r: dict) -> str | None:
     """Hợp đồng của một dòng báo cáo (dòng hợp đồng, hóa đơn, thanh toán) để mở nhanh; dòng tổng hợp thì không có."""
+    if r.get("_kieu") == "con":                  # dòng chi tiết hợp đồng / hóa đơn dưới dòng tổng hợp
+        return r.get("MaHopDong")
     if r.get("_kieu"):
         return None
     if r.get("MaHopDong"):
@@ -118,11 +123,20 @@ class ReportsPage(QWidget):
         self.luy_ke = QRadioButton("Lũy kế")
         self.luy_ke.setChecked(True)
         self.ky = Combo([("Tháng", "thang"), ("Quý", "quy"), ("Năm", "nam")])
+        self.muc = Combo([(label, key) for key, label in DETAIL_LEVELS])
+        self.muc.setToolTip("Gộp: chỉ dòng tổng hợp (theo loại, chủ đầu tư…). Chi tiết: dưới mỗi dòng liệt kê từng hợp "
+                            "đồng, hoặc đến từng hóa đơn (kèm đã thu, còn phải thu). Kết hợp với bộ lọc Thanh toán để "
+                            "xem hợp đồng / hóa đơn nào chưa thu.")
+        self.ky_hd = Combo([(label, key) for key, label in INVOICE_PERIODS])
+        self.ky_hd.setToolTip("Chia danh sách hóa đơn theo tháng, quý hoặc năm, mỗi kỳ có dòng cộng.")
+        self.cong_ky = QCheckBox("Gộp: chỉ dòng cộng mỗi kỳ")
+        self.cong_ky.setToolTip("Bỏ tích để liệt kê từng hóa đơn trong từng kỳ.")
         for lst in (self.loai, self.doi_tac, self.nhom, self.tinh_trang, self.nguoi_mua):
             lst.setMaximumHeight(90)
         r = 0
         self._labels: dict[str, QLabel] = {}
-        for label, name in (("Kỳ báo cáo", "ky_td"), ("1. Từ ngày", "tu"), ("    Đến ngày", "den"),
+        for label, name in (("Kỳ báo cáo", "ky_td"), ("Mức chi tiết", "muc"), ("Hóa đơn theo kỳ", "ky_hd"),
+                            ("", "cong_ky"), ("1. Từ ngày", "tu"), ("    Đến ngày", "den"),
                             ("2. Tính theo", "tinh_theo"), ("3. Chiều hợp đồng", "chieu"), ("", "gop"),
                             ("", "tach_nam"),
                             ("4. Loại hợp đồng", "loai"), ("5. Chủ đầu tư / NCC", "doi_tac"),
@@ -231,7 +245,8 @@ class ReportsPage(QWidget):
             tinh_trang=self.tinh_trang.values(), tt_thanh_toan=self.tt_tt.value(), tt_xuat_hd=self.tt_xuat.value(),
             co_hd_lien_ket=self.lien_ket.value(), che_do="trong_ky" if self.trong_ky.isChecked() else "luy_ke",
             ky=self.ky.value(), nhom_thue=self.nhom_thue.value(), nguoi_mua=self.nguoi_mua.values(),
-            gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value(), tach_nam=self.tach_nam.isChecked())
+            gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value(), tach_nam=self.tach_nam.isChecked(),
+            muc_chi_tiet=self.muc.value(), nhom_ky_hd=self.ky_hd.value(), chi_cong_ky=self.cong_ky.isChecked())
         default = ReportFilters()
         for widget, keys in FILTER_KEYS.items():
             if widget not in on:
@@ -335,6 +350,9 @@ class ReportsPage(QWidget):
         self.nhom_thue.set_value(f.nhom_thue)
         (self.trong_ky if f.che_do == "trong_ky" else self.luy_ke).setChecked(True)
         self.ky.set_value(f.ky)
+        self.muc.set_value(f.muc_chi_tiet)
+        self.ky_hd.set_value(f.nhom_ky_hd)
+        self.cong_ky.setChecked(f.chi_cong_ky)
         self.preview()
 
     def _del_template(self):

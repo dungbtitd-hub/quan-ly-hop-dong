@@ -176,3 +176,34 @@ def test_advance_before_invoice_then_deducted_per_installment(company):
     assert cs.apply_advances(hd, inv2, 20_000_000) == 20_000_000 and not cs.advances(hd)
     total = sum(p["SoTien"] for p in db.active("ThanhToanHopDong", "MaHopDong = ?", (hd,)))
     assert total == 75_000_000                                                       # không sinh thêm tiền
+
+
+def test_reports_aggregate_or_drill_down_to_contracts_and_invoices(company, tmp_path):
+    d = sample_data(company["kt"].db)
+    cs = d["cs"]
+    cs.save_out_invoice({"KyHieuHD": "C26TAA", "SoHoaDon": "15", "MaHopDong": d["hd"], "NgayXuatHD": "2026-05-02",
+                         "GiaTriTruocThue": 10_000_000, "VAT": 1_000_000})
+    cr = ContractReports(company["kt"].db)
+    base = dict(tach_nam=False, tt_thanh_toan="Còn phải thu")
+    gop = cr.build("chu_dau_tu", ReportFilters(**base))[0]
+    assert [r["TenDoiTac"] for r in gop.rows] == ["Ban QLDA Hà Nội"]          # gộp: chỉ dòng chủ đầu tư
+    ct = cr.build("chu_dau_tu", ReportFilters(**base, muc_chi_tiet="hop_dong"))[0]
+    kids = [r for r in ct.rows if r.get("_kieu") == "con"]
+    assert len(kids) == 1 and "01/2026/HĐTV" in kids[0]["TenDoiTac"] and kids[0]["ConPhaiThu"] == 31_000_000
+    assert ct.total["ConPhaiThu"] == gop.total["ConPhaiThu"]                   # chi tiết không cộng trùng
+    sau = cr.build("chu_dau_tu", ReportFilters(**base, muc_chi_tiet="hoa_don"))[0]
+    inv = [r["TenDoiTac"] for r in sau.rows if "Hóa đơn" in str(r.get("TenDoiTac"))]
+    assert len(inv) == 2                                     # hóa đơn 12 còn 25 triệu, hóa đơn 15 chưa thu
+    hd = cr.build("hop_dong", ReportFilters(tach_nam=False, chieu="Đầu ra", muc_chi_tiet="hoa_don"))[0]
+    assert sum(1 for r in hd.rows if r.get("_kieu") == "con") == 2
+    # hóa đơn theo tháng / quý: liệt kê từng hóa đơn có dòng cộng, hoặc chỉ dòng cộng mỗi kỳ
+    q = cr.build("hoa_don_ra", ReportFilters(tach_nam=False, nhom_ky_hd="thang"))[0]
+    assert [r["_nhan"] for r in q.rows if r.get("_kieu") == "nhom"] == ["Tháng 03/2026 (1 hóa đơn)",
+                                                                         "Tháng 05/2026 (1 hóa đơn)"]
+    g = cr.build("hoa_don_ra", ReportFilters(tach_nam=False, nhom_ky_hd="quy", chi_cong_ky=True))[0]
+    assert [(r["KyHieuHD"], r["GiaTriSauThue"]) for r in g.rows] == [("Quý 1/2026", 55_000_000),
+                                                                      ("Quý 2/2026", 11_000_000)]
+    assert g.total["GiaTriSauThue"] == 66_000_000
+    unpaid_in = cr.build("hoa_don_vao", ReportFilters(tach_nam=False, tt_thanh_toan="Chưa thu", nhom_ky_hd="nam"))[0]
+    assert sum(1 for r in unpaid_in.rows if not r.get("_kieu")) == 2           # đầu vào chưa có sao kê
+    export_xlsx([ct, sau, q, g], tmp_path / "x.xlsx")
