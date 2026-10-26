@@ -5,11 +5,12 @@ import json
 from datetime import date
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QRadioButton,
+from PySide6.QtWidgets import (QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QRadioButton,
                                QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
-from ..core import data_export
+from ..core import data_export, report_fields
 from ..core.contracts import CONTRACT_STATUSES
+from ..core.invoice_match import fold
 from ..core.reports import (CONTEXT_LABELS, CONTEXTS, DETAIL_LEVELS, INVOICE_PERIODS, RELATIVE_PERIODS, TAX_MODES,
                             ContractReports, ReportFilters, export_xlsx, relative_range)
 from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm_delete, hint, info,
@@ -297,7 +298,8 @@ class ReportsPage(QWidget):
 
     def _export(self, reports, default_name: str, pick: bool = True):
         if pick:                   # tự chọn cột cần xuất (nhớ lựa chọn lần trước của từng ngữ cảnh)
-            reports = pick_columns(self, self.ctx, "cot_bao_cao:" + self.context.value(), reports)
+            reports = pick_columns(self, self.ctx, "cot_bao_cao:" + self.context.value(), reports,
+                                   self.filters().resolved().den)
             if reports is None:
                 return
         path, _ = QFileDialog.getSaveFileName(self, "Xuất Excel", f"{default_name}.xlsx", "Excel (*.xlsx)")
@@ -317,9 +319,8 @@ class ReportsPage(QWidget):
         self.preview(reps)
         f = ReportFilters.from_dict(d).resolved()
         stamp = f" {f.tu or ''}_{f.den or ''}".rstrip("_ ") if f.tu or f.den else ""
-        keys = d.get("cot")              # mẫu xuất nhanh: dùng các cột đã chọn khi lưu mẫu
-        if keys:
-            reps = data_export.select_columns(reps, set(keys))
+        if d.get("cot"):                 # mẫu xuất nhanh: dùng các cột, trường đã chọn khi lưu mẫu
+            reps = apply_choice(self.ctx, reps, d["cot"], f.den)
         self._export(reps, name + stamp, pick=False)
 
     def export_data(self):
@@ -413,8 +414,9 @@ class ReportsPage(QWidget):
             info(self, f"Đã lưu nhóm \"{name}\" ({len(members)} chủ đầu tư).")
 
 
-def pick_columns(parent, ctx, key: str, reports):
-    """Hỏi các cột cần xuất (mặc định: lựa chọn lần trước, lần đầu là tất cả). Trả None nếu hủy."""
+def pick_columns(parent, ctx, key: str, reports, den: str | None = None):
+    """Hỏi các cột cần xuất và trường dữ liệu thêm (mặc định: lựa chọn lần trước, lần đầu là tất cả cột có sẵn,
+    không thêm trường). Trả None nếu hủy."""
     cols, seen = [], set()
     for rep in reports:
         for i, c in enumerate(rep.columns):
@@ -425,28 +427,67 @@ def pick_columns(parent, ctx, key: str, reports):
         last = json.loads(ctx.db.setting(key) or "null")
     except ValueError:
         last = None
-    dlg = ColumnsDialog(cols, last, parent)
+    last_cols, last_extra, last_tach = report_fields.parse_choice(last)
+    dlg = ColumnsDialog(cols, last_cols, parent, extras=report_fields.available(reports), extra_checked=last_extra,
+                        tach_tt=last_tach)
     if dlg.exec() != QDialog.Accepted:
         return None
-    keys = dlg.values()
-    ctx.db.set_setting(key, json.dumps(keys))
-    return data_export.select_columns(reports, set(keys))
+    choice = {"cot": dlg.values(), "them": dlg.extra_values(), "tach_tt": dlg.tach_tt()}
+    ctx.db.set_setting(key, json.dumps(choice))
+    return apply_choice(ctx, reports, choice, den)
+
+
+def apply_choice(ctx, reports, choice, den: str | None = None):
+    """Áp lựa chọn cột (kiểu cũ: danh sách cột; kiểu mới: thêm trường dữ liệu) vào các bảng."""
+    keys, extra, tach = report_fields.parse_choice(choice)
+    if keys:
+        reports = data_export.select_columns(reports, set(keys))
+    return report_fields.enrich(ctx.db, reports, extra, tach, den)
 
 
 class ColumnsDialog(QDialog):
-    """Chọn cột cần xuất ra Excel."""
+    """Chọn cột cần xuất ra Excel, và thêm trường lấy từ dữ liệu hợp đồng, hóa đơn, thanh toán."""
 
-    def __init__(self, cols, checked=None, parent=None, title: str = "Chọn cột cần xuất"):
+    def __init__(self, cols, checked=None, parent=None, title: str = "Chọn cột và trường cần xuất", extras=(),
+                 extra_checked=(), tach_tt: bool = False):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(420, 520)
         lay = QVBoxLayout(self)
-        lay.addWidget(hint("Tích các cột muốn có trong file Excel. Lựa chọn được nhớ cho lần xuất sau."))
+        lay.addWidget(hint("Tích các cột muốn có trong file Excel" + (
+            ", và thêm trường lấy từ dữ liệu hợp đồng, hóa đơn, thanh toán" if extras else "")
+            + ". Lựa chọn được nhớ cho lần xuất sau."))
+        body = QHBoxLayout()
+        lay.addLayout(body, 1)
+        left = QVBoxLayout()
+        body.addLayout(left, 1)
+        left.addWidget(QLabel("<b>Cột của báo cáo</b>"))
         self.list = CheckList()
         self.list.set_options(cols, [k for _, k in cols] if checked is None else checked)
-        lay.addWidget(self.list, 1)
-        lay.addLayout(toolbar(button("Chọn tất cả", lambda: self._all(True)),
-                              button("Bỏ chọn tất cả", lambda: self._all(False)), "stretch"))
+        left.addWidget(self.list, 1)
+        left.addLayout(toolbar(button("Chọn tất cả", lambda: self._all(self.list, True)),
+                               button("Bỏ chọn tất cả", lambda: self._all(self.list, False)), "stretch"))
+        self.extra = CheckList()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Tìm trường…")
+        self.tach = QRadioButton("Thêm dòng chi tiết cho từng lần thanh toán")
+        self.gop_tt = QRadioButton("Gộp các lần thanh toán vào một ô (VD: 05/10/2026; 20/10/2026)")
+        if extras:
+            self.resize(900, 600)
+            right = QVBoxLayout()
+            body.addLayout(right, 1)
+            right.addLayout(toolbar(QLabel("<b>Thêm trường từ dữ liệu</b>"), "stretch", self.search))
+            self.extra.set_options([(f"{f.group} · {f.label}", f.key) for f in extras], list(extra_checked))
+            right.addWidget(self.extra, 1)
+            self.search.textChanged.connect(self._filter)
+            right.addLayout(toolbar(button("Bỏ chọn trường thêm", lambda: self._all(self.extra, False)), "stretch"))
+            if any(f.group == report_fields.TT for f in extras):
+                (self.tach if tach_tt else self.gop_tt).setChecked(True)
+                right.addWidget(self.gop_tt)
+                right.addWidget(self.tach)
+        else:
+            self.resize(420, 520)
+            lay.addWidget(hint("Bảng này không có dòng từng hợp đồng / hóa đơn nên không thêm trường được. Muốn thêm, "
+                               "chọn mức chi tiết \"Chi tiết từng hợp đồng\" hoặc \"đến từng hóa đơn\"."))
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Tiếp tục xuất")
         bb.button(QDialogButtonBox.Cancel).setText("Hủy")
@@ -454,9 +495,16 @@ class ColumnsDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
-    def _all(self, on: bool):
-        for i in range(self.list.count()):
-            self.list.item(i).setCheckState(Qt.Checked if on else Qt.Unchecked)
+    @staticmethod
+    def _all(lst, on: bool):
+        for i in range(lst.count()):
+            if not lst.item(i).isHidden():
+                lst.item(i).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _filter(self, text: str):
+        t = fold(text)
+        for i in range(self.extra.count()):
+            self.extra.item(i).setHidden(bool(t) and t not in fold(self.extra.item(i).text()))
 
     def _ok(self):
         if not self.values():
@@ -465,6 +513,12 @@ class ColumnsDialog(QDialog):
 
     def values(self) -> list:
         return self.list.values()
+
+    def extra_values(self) -> list:
+        return self.extra.values()
+
+    def tach_tt(self) -> bool:
+        return self.tach.isChecked()
 
 
 class DataExportDialog(QDialog):

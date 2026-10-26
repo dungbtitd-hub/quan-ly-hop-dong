@@ -447,9 +447,10 @@ class HomePage(QWidget):
                 fl.addWidget(hint("Có thể nhập sai giá trị hợp đồng. Lọc ở Hợp đồng → \"Giá trị HĐ so với hóa đơn\"."))
             if by["tt_trung"] or by["thu_thua"]:
                 n = len(by["tt_trung"]) + len(by["thu_thua"])
-                fl = self._panel("Thu thừa, thanh toán nghi ghi trùng", tagged(QLabel(str(n)), "Pill", "danger"))
+                fl = self._panel("Thu thừa, thanh toán nghi ghi trùng", tagged(QLabel(str(n)), "Pill", "danger"),
+                                 button("Rà soát", lambda: self.open_page.emit("Rà soát trùng lặp"), "Link"))
                 self._alert_rows(fl, by["thu_thua"] + by["tt_trung"], "")
-                fl.addWidget(hint("Bấm từng dòng để mở hợp đồng; lần thanh toán nghi trùng tô đỏ ở thẻ Thanh toán."))
+                fl.addWidget(hint("Bấm \"Rà soát\" để lọc, chọn và xóa / sửa hàng loạt; bấm từng dòng để mở hợp đồng."))
         if "phanloai" in shown and can_ts:
             fl = self._panel("Hóa đơn đầu vào cần kế toán xem lại",
                              button("Mở danh sách", self.open_review.emit, "Link"))

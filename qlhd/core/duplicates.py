@@ -2,7 +2,7 @@
 Có bản ghi giống thì không tự thêm: phần mềm hiện danh sách để nhân viên rà soát, xác nhận mới được thêm."""
 from __future__ import annotations
 
-
+import json
 
 class DuplicateWarning(Exception):
     """Bản ghi định thêm giống bản ghi đã có: cần nhân viên rà soát, xác nhận mới thêm.
@@ -21,6 +21,7 @@ def fmt_date(s) -> str:
 def fmt_money(v: int) -> str:
     return f"{int(v or 0):,}".replace(",", ".")
 
+IGNORE_PREFIX = "khong_trung:"      # nhóm đã rà soát, đánh dấu "không trùng" (theo loại dữ liệu)
 CONFIRM_KEY = "_DaRaSoatTrung"      # đặt True trong values khi nhân viên đã rà soát và xác nhận không phải trùng
 LIMIT = 8
 
@@ -36,6 +37,28 @@ def _digits(s) -> str:
 
 def _money(v) -> str:
     return f"{fmt_money(int(v or 0))} đ"
+
+
+def signature(ids) -> str:
+    return ",".join(sorted(ids))
+
+
+def ignored(db, kind: str) -> set[str]:
+    try:
+        return set(json.loads(db.setting(IGNORE_PREFIX + kind) or "[]"))
+    except ValueError:
+        return set()
+
+
+def ignored_ids(db, kind: str) -> set[str]:
+    """Mọi bản ghi thuộc nhóm đã đánh dấu không trùng (để cảnh báo, tính tạm ứng bỏ qua)."""
+    return {m for sig in ignored(db, kind) for m in sig.split(",") if m}
+
+
+def set_ignored(db, kind: str, keys, on: bool = True) -> None:
+    cur = ignored(db, kind)
+    cur = cur | set(keys) if on else cur - set(keys)
+    db.set_setting(IGNORE_PREFIX + kind, json.dumps(sorted(cur)) if cur else None)
 
 
 def payments(db, v: dict, ma: str | None = None) -> list[str]:
@@ -91,7 +114,7 @@ def overpaid_items(db) -> list[dict]:
             " FROM HoaDonDauRa i JOIN HopDong h ON h.Ma = i.MaHopDong WHERE i.DaXoa = 0 AND h.DaXoa = 0"
             " AND i.TinhChatHD != 'Đã hủy'"):
         if int(r["Da"] or 0) > int(r["GiaTriSauThue"] or 0):
-            out.append({"loai": "hoa_don", "MaHopDong": r["MaHopDong"], "SoHopDong": r["SoHopDong"],
+            out.append({"loai": "hoa_don", "MaHopDong": r["MaHopDong"], "SoHopDong": r["SoHopDong"], "MaHDDauRa": r["Ma"],
                         "nhan": f"Hóa đơn {r['SoHoaDon']}", "GiaTri": int(r["GiaTriSauThue"] or 0),
                         "Da": int(r["Da"])})
     for r in db.query(
@@ -209,13 +232,14 @@ def duplicate_payments(db) -> list[dict]:
     hoặc cùng hợp đồng + ngày + số tiền. Mỗi phần tử: lần ghi sau, kèm lần ghi trước giống nó."""
     seen: dict = {}
     out = []
+    skip = ignored_ids(db, "thanh_toan")
     for r in db.query("SELECT t.*, h.SoHopDong, h.TenHopDong FROM ThanhToanHopDong t JOIN HopDong h ON h.Ma = t.MaHopDong"
                       " WHERE t.DaXoa = 0 AND h.DaXoa = 0 ORDER BY t.NgayTao, t.Ma"):
         keys = [("hd", r["MaHopDong"], (r["NgayThanhToan"] or "")[:10], int(r["SoTien"] or 0))]
         if _norm(r["SoThamChieuSK"]):
             keys.append(("sk", _norm(r["SoThamChieuSK"]), int(r["SoTien"] or 0)))
         first = next((seen[k] for k in keys if k in seen), None)
-        if first is not None:
+        if first is not None and not (r["Ma"] in skip and first["Ma"] in skip):
             out.append({**dict(r), "TrungVoi": first["Ma"]})
         for k in keys:
             seen.setdefault(k, dict(r))

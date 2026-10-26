@@ -1132,3 +1132,48 @@ def test_duplicate_dialog_and_data_export_dialog(qtbot, ctx, monkeypatch):
     assert "SoThamChieuSK" in de.cols.values()
     assert "thu_chi" not in [x.key for x in de.sets]                            # thu chi khóa: không xuất
     assert dupl.CONFIRM_KEY not in dict(ctx.db.get("ThanhToanHopDong", ctx.cs.payments(d["hd"])[-1]["Ma"]))
+
+
+def test_dup_review_page_and_extra_fields_dialog(qtbot, ctx, monkeypatch):
+    from qlhd.core import duplicates as dupl
+    from qlhd.core import report_fields as rf
+    from qlhd.core.reports import ContractReports, ReportFilters
+    from qlhd.ui import dup_review_page as page_mod
+    from qlhd.ui.reports_page import ColumnsDialog, apply_choice
+    hd = next(h["Ma"] for h in ctx.cs.contracts() if h["SoHopDong"] == "01/2026/HĐTV")
+    ctx.cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-03-10", "SoTien": 30_000_000,
+                         "SoThamChieuSK": "FT123", dupl.CONFIRM_KEY: True})
+    page = page_mod.DupReviewPage(ctx)
+    qtbot.addWidget(page)
+    page.refresh()
+    assert page.kind == "thanh_toan" and len(page.groups) == 1
+    assert "(1)" in page.tabs.tabText(0)
+    assert len(page.checked()) == 1 and not page.checked()[0]["Goc"]      # bản nghi trùng tích sẵn, bản gốc không
+    n = len(ctx.cs.payments(hd))
+    monkeypatch.setattr(page_mod, "confirm_delete", lambda *a, **k: False)
+    page.delete_checked()
+    assert len(ctx.cs.payments(hd)) == n                                  # không đồng ý: không xóa
+    monkeypatch.setattr(page_mod, "confirm", lambda *a, **k: True)
+    page.table.selectRow(1)
+    page.mark_ignored()
+    assert page.groups == [] and dupl.ignored(ctx.db, "thanh_toan")
+    page.show_ignored.setChecked(True)
+    assert len(page.groups) == 1 and page.checked() == []                 # nhóm đã đánh dấu: không tích sẵn
+    page.table.selectRow(1)
+    page.mark_ignored()                                                   # bỏ đánh dấu
+    assert not dupl.ignored(ctx.db, "thanh_toan")
+    monkeypatch.setattr(page_mod, "confirm_delete", lambda *a, **k: True)
+    page.delete_checked()
+    assert len(ctx.cs.payments(hd)) == n - 1 and page.groups == []
+    for i in range(page.tabs.count()):                                    # mọi ngữ cảnh mở được
+        if page.tabs.isTabEnabled(i):
+            page.tabs.setCurrentIndex(i)
+    reps = ContractReports(ctx.db).build("hoa_don_ra", ReportFilters(tach_nam=False))
+    cd = ColumnsDialog([("Số hóa đơn", "SoHoaDon")], None, extras=rf.available(reps), extra_checked=["x_tt_ngay"],
+                       tach_tt=True)
+    qtbot.addWidget(cd)
+    assert cd.extra_values() == ["x_tt_ngay"] and cd.tach_tt()
+    cd.search.setText("tham chieu")
+    assert any(not cd.extra.item(i).isHidden() for i in range(cd.extra.count()))
+    out = apply_choice(ctx, reps, {"cot": ["SoHoaDon"], "them": ["x_tt_ngay", "x_tt_ref"], "tach_tt": False})
+    assert [c[0] for c in out[0].columns] == ["KyHieuHD", "SoHoaDon", "x_tt_ngay", "x_tt_ref"]

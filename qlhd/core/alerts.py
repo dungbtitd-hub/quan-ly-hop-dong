@@ -126,14 +126,14 @@ def _collect(db: Database, today: str, types: set) -> list[Alert]:
         for r in dupl.overpaid_items(db):
             out.append(Alert("thu_thua", "danger", f"{r['nhan']} – HĐ {r['SoHopDong']}" if r["loai"] == "hoa_don"
                              else r["nhan"], f"Giá trị {fmt_money(r['GiaTri'])} đ, đã thu {fmt_money(r['Da'])} đ: "
-                             "kiểm tra lần thanh toán ghi thừa / ghi trùng", f"Thừa {fmt_money(r['Da'] - r['GiaTri'])} đ",
+                             "kiểm tra lần thanh toán ghi thừa / ghi trùng ở Rà soát trùng lặp", f"Thừa {fmt_money(r['Da'] - r['GiaTri'])} đ",
                              r["MaHopDong"], r["Da"] - r["GiaTri"]))
     if "tt_trung" in types:
         for r in dupl.duplicate_payments(db):
             out.append(Alert("tt_trung", "danger", f"Thanh toán HĐ {r['SoHopDong']} ngày {fmt_date(r['NgayThanhToan'])}",
                              "Giống một lần thanh toán đã ghi trước" + (f" (sao kê {r['SoThamChieuSK']})"
                                                                         if r["SoThamChieuSK"] else "")
-                             + ": mở hợp đồng → thẻ Thanh toán để xóa lần thừa", f"{fmt_money(r['SoTien'])} đ",
+                             + ": mở Rà soát trùng lặp (hoặc hợp đồng → thẻ Thanh toán) để xóa lần thừa", f"{fmt_money(r['SoTien'])} đ",
                              r["MaHopDong"], int(r["SoTien"] or 0)))
     if types & {"hd_chua_xuat", "tam_ung", "thieu_du_lieu", "hd_lech_gia_tri"}:
         for hd in db.active("HopDong", "TinhTrangHopDong != 'Hủy'", order="NgayKy"):

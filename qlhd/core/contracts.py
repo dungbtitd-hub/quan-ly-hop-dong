@@ -438,13 +438,16 @@ class ContractService:
         value = hd["GiaTriTongSauThue"]
         # tạm ứng chưa khấu trừ; lần ghi trùng một lần thanh toán đã có (cùng ngày + số tiền, hoặc cùng sao kê +
         # số tiền) không tính là tạm ứng: nó được nhắc ở "Thanh toán nghi ghi trùng"
+        # (trừ lần đã rà soát, đánh dấu "không trùng")
+        ok = sorted(dupl.ignored_ids(self.db, "thanh_toan"))
         adv = self.db.one(
             "SELECT COALESCE(SUM(SoTien), 0) s FROM ThanhToanHopDong t WHERE DaXoa = 0 AND MaHopDong = ?"
-            " AND MaHDDauRa IS NULL" + cond_p + " AND NOT EXISTS (SELECT 1 FROM ThanhToanHopDong q WHERE q.DaXoa = 0"
+            " AND MaHDDauRa IS NULL" + cond_p + f" AND (t.Ma IN ({','.join('?' * len(ok)) or 'NULL'}) OR NOT EXISTS ("
+            "SELECT 1 FROM ThanhToanHopDong q WHERE q.DaXoa = 0"
             " AND q.Ma != t.Ma AND q.MaHopDong = t.MaHopDong AND q.SoTien = t.SoTien"
             " AND (substr(q.NgayThanhToan, 1, 10) = substr(t.NgayThanhToan, 1, 10)"
             " OR (COALESCE(t.SoThamChieuSK, '') != '' AND q.SoThamChieuSK = t.SoThamChieuSK))"
-            " AND (q.NgayTao < t.NgayTao OR (q.NgayTao = t.NgayTao AND q.Ma < t.Ma)))", pp)["s"]
+            " AND (q.NgayTao < t.NgayTao OR (q.NgayTao = t.NgayTao AND q.Ma < t.Ma))))", pp + ok)["s"]
         return {
             "TamUngConLai": adv,                     # tạm ứng chưa khấu trừ vào hóa đơn nào
             "GiaTriHD": value, "DaXuatHD": invoiced, "ConPhaiXuat": max(value - invoiced, 0),

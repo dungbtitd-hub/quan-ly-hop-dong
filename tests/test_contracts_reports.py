@@ -338,6 +338,97 @@ def test_data_export_every_dataset_and_columns(company, tmp_path):
     assert [c[0] for c in rep[0].columns] == ["SoHopDong", "SoTien"]
 
 
+def test_report_extra_fields_payment_date_and_ref(company, tmp_path):
+    """Mọi ngữ cảnh có dòng hợp đồng / hóa đơn đều thêm được ngày thanh toán, số tham chiếu và trường khác."""
+    from qlhd.core import report_fields as rf
+    from qlhd.core.reports import CONTEXTS
+    db = company["kt"].db
+    sample_data(db)
+    cr = ContractReports(db)
+    keys = ["x_tt_ngay", "x_tt_ref", "x_tt_so_lan", "x_hd_ngay_ky", "x_hdr_so", "x_hdv_ref"]
+    for ctx_key, _ in CONTEXTS:          # không ngữ cảnh nào lỗi khi thêm trường
+        for muc in ("gop", "hop_dong", "hoa_don"):
+            reps = cr.build(ctx_key, ReportFilters(tach_nam=False, muc_chi_tiet=muc))
+            for tach in (False, True):
+                export_xlsx(rf.enrich(db, reps, keys, tach), tmp_path / f"{ctx_key}_{muc}_{tach}.xlsx")
+    out = rf.enrich(db, cr.build("hoa_don_ra", ReportFilters(tach_nam=False)), keys)[0]
+    assert "x_tt_ngay" in [c[0] for c in out.columns]
+    row = next(r for r in out.rows if r.get("SoHoaDon") == "12")
+    assert row["x_tt_ngay"] == "10/03/2026" and row["x_tt_ref"] == "FT123" and row["x_tt_so_lan"] == 1
+    assert row["x_hd_ngay_ky"] == "2026-01-15"
+    hd = rf.enrich(db, cr.build("hop_dong", ReportFilters(tach_nam=False, chieu="Đầu ra")), keys)[0]
+    row = next(r for r in hd.rows if r.get("SoHopDong") == "01/2026/HĐTV")
+    assert row["x_tt_ngay"] == "10/03/2026; 05/04/2026" and row["x_tt_so_lan"] == 2
+    assert row["x_tt_ref"] == "FT123; (không có)"
+    split = rf.enrich(db, cr.build("hop_dong", ReportFilters(tach_nam=False, chieu="Đầu ra")), keys, True)[0]
+    kids = [r for r in split.rows if r.get("_tt")]
+    assert [k["x_tt_ngay"] for k in kids] == ["10/03/2026", "05/04/2026"]
+    parent = next(r for r in split.rows if r.get("SoHopDong") == "01/2026/HĐTV")
+    assert "x_tt_ngay" not in parent and parent["x_tt_so_lan"] == 2
+    # chi tiết đến hóa đơn: lần trả cho hóa đơn nằm dưới hóa đơn, tạm ứng nằm dưới hợp đồng
+    det = rf.enrich(db, cr.build("hop_dong", ReportFilters(tach_nam=False, chieu="Đầu ra", muc_chi_tiet="hoa_don")),
+                    keys, True)[0]
+    assert len([r for r in det.rows if r.get("_tt")]) == 2
+    upto = rf.enrich(db, cr.build("hop_dong", ReportFilters(tach_nam=False, chieu="Đầu ra")), keys,
+                     den="2026-03-31")[0]
+    assert next(r for r in upto.rows if r.get("SoHopDong") == "01/2026/HĐTV")["x_tt_so_lan"] == 1
+    vin = rf.enrich(db, cr.build("hoa_don_vao", ReportFilters(tach_nam=False)), ["x_hd_ngay_ky", "x_tt_ngay"])[0]
+    r88 = next(r for r in vin.rows if r.get("SoHoaDonGoc") == "88")
+    assert r88["x_hd_ngay_ky"] == "2026-02-01" and "x_tt_ngay" not in r88
+    gop = cr.build("loai_hd", ReportFilters(tach_nam=False, muc_chi_tiet="gop"))
+    assert rf.available(gop) == []                      # chỉ dòng gộp: không có trường để thêm
+    assert {f.group for f in rf.available(cr.build("hoa_don_ra", ReportFilters()))} >= {rf.TT, rf.HD, rf.HDR}
+    assert rf.parse_choice(["a"]) == (["a"], [], False)
+    assert rf.parse_choice({"cot": ["a"], "them": ["x_tt_ngay"], "tach_tt": True}) == (["a"], ["x_tt_ngay"], True)
+
+
+def test_dup_review_groups_ignore_and_overpaid(company):
+    """Rà soát dữ liệu đã có: nhóm bản gốc + bản nghi trùng; đánh dấu không trùng thì thôi cảnh báo, tính lại tạm ứng."""
+    from qlhd.core import dup_review as dr
+    from qlhd.core import duplicates as dupl
+    d = sample_data(company["kt"].db)
+    cs, db, hd = d["cs"], company["kt"].db, d["hd"]
+    ok = {dupl.CONFIRM_KEY: True}
+    cs.save_payment({"MaHopDong": hd, "MaHDDauRa": d["inv"], "NgayThanhToan": "2026-03-10", "SoTien": 30_000_000,
+                     "SoThamChieuSK": "FT123", **ok})
+    adv = cs.summary(hd)["TamUngConLai"]
+    cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-04-05", "SoTien": 5_000_000, **ok})   # tạm ứng ghi 2 lần
+    assert cs.summary(hd)["TamUngConLai"] == adv
+    groups = dr.scan(db, "thanh_toan")
+    assert len(groups) == 2
+    for g in groups:
+        assert g.rows[0]["Goc"] and len(g.suspects()) == 1 and g.suspects()[0]["LyDo"]
+    assert dr.counts(db)["thanh_toan"] == 2 and dr.counts(db)["thu_thua"] >= 1
+    thua = dr.scan(db, "thu_thua")
+    inv_g = next(g for g in thua if g.extra["loai"] == "hoa_don")
+    assert inv_g.extra["thua"] == 5_000_000 and [r["Goc"] for r in inv_g.rows] == [True, False]
+    adv_g = next(g for g in groups if g.rows[0]["SoTien"] == 5_000_000)
+    dr.set_ignored(db, "thanh_toan", [adv_g.key])        # tạm ứng 2 lần là thật: không trùng
+    assert len(dr.scan(db, "thanh_toan")) == 1 and len(dr.scan(db, "thanh_toan", show_ignored=True)) == 2
+    assert cs.summary(hd)["TamUngConLai"] == adv + 5_000_000
+    assert len(dupl.duplicate_payments(db)) == 1
+    assert len(dr.scan(db, "thanh_toan", tu="2026-04-01")) == 0
+    assert len(dr.scan(db, "thanh_toan", ma_hd=d["hdv"])) == 0
+    cs.delete_payment(next(g for g in dr.scan(db, "thanh_toan")).suspects()[0]["Ma"])
+    assert dr.scan(db, "thanh_toan") == [] and not [g for g in dr.scan(db, "thu_thua") if g.extra["loai"] == "hoa_don"]
+    # một lần nữa trùng thêm vào nhóm đã đánh dấu: nhóm hiện lại
+    cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-04-05", "SoTien": 5_000_000, **ok})
+    assert len(dr.scan(db, "thanh_toan")) == 1
+    # các loại khác
+    cs.save_out_invoice({"KyHieuHD": "C26TBB", "SoHoaDon": "0012", "MaHopDong": hd, "NgayXuatHD": "2026-03-05",
+                         "GiaTriTruocThue": 50_000_000, "VAT": 5_000_000, **ok})
+    assert len(dr.scan(db, "hoa_don_ra")) == 1
+    cs.save_in_invoice({"SoHoaDonGoc": "88", "TenNhaCungCap": "Công ty Vật tư X", "MaThueNCC": "0200000002",
+                        "NgayNhanHD": "2026-02-11", "GiaTriTruocThue": 1, "VAT": 0, **ok})
+    assert len(dr.scan(db, "hoa_don_vao")) == 1
+    cs.save_partner({"TenDoiTac": "ban qlda  hà nội", **ok})
+    assert len(dr.scan(db, "doi_tac")) == 1
+    cs.save_contract({"SoHopDong": "02/2026/HĐTV", "TenHopDong": "Thiết kế trường học", "ChieuHopDong": "Đầu ra",
+                      "MaDoiTac": d["cdt"], "GiaTriTruocThue": 1, "NgayKy": "2026-05-01", "ThoiGianThucHien": 3, **ok})
+    assert len(dr.scan(db, "hop_dong")) == 1
+    assert dr.scan(db, "thu_chi") == []                  # thu chi chưa mở khóa
+
+
 def test_relative_period_until_today():
     from datetime import date
     from qlhd.core.reports import relative_range

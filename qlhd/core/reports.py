@@ -201,6 +201,7 @@ class ContractReports:
                 s["GiaTriHD"] = hd["GiaTriTongSauThue"]
             row = dict(hd)
             row.update(s)
+            row["_hd"] = hd["Ma"]          # khóa để thêm trường dữ liệu khi xuất (report_fields)
             row["LoaiHD"] = types.get(hd["MaLoaiHD"], "(Chưa phân loại)")
             if f.tt_xuat_hd and s["TinhTrangXuatHD"] != f.tt_xuat_hd:
                 continue
@@ -295,7 +296,8 @@ class ContractReports:
                 if f.tt_thanh_toan and (status != f.tt_thanh_toan if f.tt_thanh_toan != "Còn phải thu"
                                         else inv["GiaTriSauThue"] - paid <= 0):
                     continue
-                row = {"_kieu": "con", "MaHopDong": c["Ma"], first: f"      • Hóa đơn {inv['SoHoaDon']}",
+                row = {"_kieu": "con", "MaHopDong": c["Ma"], "_hd": c["Ma"], "_hdr": inv["Ma"],
+                       first: f"      • Hóa đơn {inv['SoHoaDon']}",
                        "DaXuatHD": inv["GiaTriSauThue"], "DaThanhToan": paid, "ConPhaiThu": inv["GiaTriSauThue"] - paid,
                        "TinhTrangHopDong": status, "TinhTrangThanhToan": status, "NgayKy": inv["NgayXuatHD"],
                        "LanThuGanNhat": ""}
@@ -307,7 +309,8 @@ class ContractReports:
                 if f.tu and inv["NgayNhanHD"] < f.tu and f.che_do == "trong_ky" or f.den and inv["NgayNhanHD"] > f.den:
                     continue
                 status = "Đã thanh toán" if inv["SoThamChieuSK"] else "Chưa có sao kê"
-                row = {"_kieu": "con", "MaHopDong": c["Ma"], first: f"      • Hóa đơn {inv['SoHoaDonGoc']}",
+                row = {"_kieu": "con", "MaHopDong": c["Ma"], "_hd": c["Ma"], "_hdv": inv["Ma"],
+                       first: f"      • Hóa đơn {inv['SoHoaDonGoc']}",
                        "DaXuatHD": inv["GiaTriSauThue"], "NgayKy": inv["NgayNhanHD"], "TinhTrangHopDong": status}
                 if second:
                     row[second] = f"ngày {fmt_date(inv['NgayNhanHD'])} · {status.lower()}"
@@ -321,7 +324,7 @@ class ContractReports:
         for c in contracts:
             row = {k: c.get(k) for k in ("GiaTriHD", "DaXuatHD", "ConPhaiXuat", "DaThanhToan", "ConPhaiThu",
                                          "PhanTramTT", "LanThuGanNhat", "TinhTrangThanhToan")}
-            row.update({"_kieu": "con", "MaHopDong": c["Ma"], first: f"   ↳ {c['SoHopDong']} – {c['TenHopDong']}"})
+            row.update({"_kieu": "con", "MaHopDong": c["Ma"], "_hd": c["Ma"], first: f"   ↳ {c['SoHopDong']} – {c['TenHopDong']}"})
             if second:
                 row[second] = f"{c['TenDoiTac']} · ký {fmt_date(c['NgayKy'])}"
             out.append(row)
@@ -498,7 +501,7 @@ class ContractReports:
                          "GiaTriTruocThue": inv["GiaTriTruocThue"], "VAT": inv["VAT"],
                          "GiaTriSauThue": inv["GiaTriSauThue"], "DaThu": paid,
                          "ConPhaiThu": inv["GiaTriSauThue"] - paid, "TinhTrang": status,
-                         "_nguoi_mua": buyer_key(name, mst)})
+                         "_nguoi_mua": buyer_key(name, mst), "_hd": c["Ma"], "_hdr": inv["Ma"]})
         rows.sort(key=lambda r: (r["NgayXuatHD"], r["SoHoaDon"]))
         return rows
 
@@ -548,7 +551,8 @@ class ContractReports:
                 luy_ke += p["SoTien"]
                 r = {"SoHopDong": c["SoHopDong"], "TenDoiTac": c["TenDoiTac"], "NgayThanhToan": p["NgayThanhToan"],
                      "SoTien": p["SoTien"], "HinhThuc": p["HinhThuc"], "SoThamChieuSK": p["SoThamChieuSK"] or "",
-                     "SoHoaDon": invoices.get(p["MaHDDauRa"], ""), "LuyKe": luy_ke}
+                     "SoHoaDon": invoices.get(p["MaHDDauRa"], ""), "LuyKe": luy_ke,
+                     "_hd": c["Ma"], "_tt": p["Ma"], "_hdr": p["MaHDDauRa"]}
                 rows.append(r)
                 detail.append(r)
             rows.append({"_kieu": "cong", "SoHopDong": "Cộng hợp đồng", "SoTien": sum(p["SoTien"] for p in pays)})
@@ -614,7 +618,7 @@ class ContractReports:
                 for c in contracts:
                     if (c["MaThueDoiTac"] or c["TenDoiTac"].lower()) != r["_khoa"]:
                         continue
-                    out.append({"_kieu": "con", "MaHopDong": c["Ma"], "TenNCC": f"   ↳ {c['SoHopDong']} – {c['TenHopDong']}",
+                    out.append({"_kieu": "con", "MaHopDong": c["Ma"], "_hd": c["Ma"], "TenNCC": f"   ↳ {c['SoHopDong']} – {c['TenHopDong']}",
                                 "GiaTriHD": c["GiaTriHD"], "DaNhanHD": c["DaXuatHD"]})
                     if f.muc_chi_tiet == "hoa_don":
                         for ch in self._invoice_children(c, f, "TenNCC", "MST"):
@@ -622,7 +626,8 @@ class ContractReports:
                             out.append(ch)
                 if f.muc_chi_tiet == "hoa_don":
                     for inv in direct.get(r["_khoa"], []):
-                        out.append({"_kieu": "con", "TenNCC": f"      • Hóa đơn {inv['SoHoaDonGoc']} (mua trực tiếp)",
+                        out.append({"_kieu": "con", "_hdv": inv["Ma"],
+                                    "TenNCC": f"      • Hóa đơn {inv['SoHoaDonGoc']} (mua trực tiếp)",
                                     "MST": f"ngày {fmt_date(inv['NgayNhanHD'])}", "MuaTrucTiep": inv["GiaTriSauThue"],
                                     "TruocThue": inv["GiaTriTruocThue"], "VAT": inv["VAT"],
                                     "SauThue": inv["GiaTriSauThue"]})
@@ -655,7 +660,7 @@ class ContractReports:
                          "GiaTriSauThue": i["GiaTriSauThue"], "KyHieuHD": i["KyHieuHD"] or "",
                          "NguoiMuaHang": i["NguoiMuaHang"] or "", "SoThamChieuSK": i["SoThamChieuSK"] or "",
                          "SoHopDong": contracts.get(i["MaHopDong"], "") if i["MaHopDong"] else "(Mua trực tiếp)",
-                         "_nhom": nhom})
+                         "_nhom": nhom, "_hdv": i["Ma"], "_hd": i["MaHopDong"]})
         rows.sort(key=lambda r: (r["NgayNhanHD"], r["SoHoaDonGoc"]))
         return rows
 
@@ -691,12 +696,12 @@ class ContractReports:
             rows.append({"Loai": "Đầu ra", "KyHieuHD": r["KyHieuHD"], "So": r["SoHoaDon"], "Ngay": r["NgayXuatHD"],
                          "DoiTac": r["TenNguoiMua"], "MST": r["MSTNguoiMua"], "MatHang": r["MatHang"],
                          "SoHopDong": r["SoHopDong"], "TruocThue": r["GiaTriTruocThue"], "ThueSuat": r["ThueSuat"],
-                         "VAT": r["VAT"], "SauThue": r["GiaTriSauThue"]})
+                         "VAT": r["VAT"], "SauThue": r["GiaTriSauThue"], "_hd": r["_hd"], "_hdr": r["_hdr"]})
         for r in self._in_rows(f):
             rows.append({"Loai": "Đầu vào", "KyHieuHD": r["KyHieuHD"], "So": r["SoHoaDonGoc"], "Ngay": r["NgayNhanHD"],
                          "DoiTac": r["TenNhaCungCap"], "MST": r["MaThueNCC"], "MatHang": r["MatHang"],
                          "SoHopDong": r["SoHopDong"], "TruocThue": r["GiaTriTruocThue"], "ThueSuat": r["ThueSuat"],
-                         "VAT": r["VAT"], "SauThue": r["GiaTriSauThue"]})
+                         "VAT": r["VAT"], "SauThue": r["GiaTriSauThue"], "_hd": r["_hd"], "_hdv": r["_hdv"]})
         rows.sort(key=lambda r: (r["Ngay"], r["Loai"], r["So"]))
         keys = ["TruocThue", "VAT", "SauThue"]
         for loai in ("Đầu ra", "Đầu vào"):
@@ -722,12 +727,13 @@ class ContractReports:
                                " ORDER BY NgayDuKienHT", ids):
             n_bg = self.db.one("SELECT COUNT(*) n FROM LichSuBanGiao WHERE DaXoa = 0 AND MaCongViec = ?", (t["Ma"],))["n"]
             n_nt = self.db.one("SELECT COUNT(*) n FROM LichSuNghiemThu WHERE DaXoa = 0 AND MaCongViec = ?", (t["Ma"],))["n"]
-            tasks.append(dict(t, SoHopDong=no[t["MaHopDong"]], SoLanBanGiao=n_bg, SoLanNghiemThu=n_nt))
+            tasks.append(dict(t, SoHopDong=no[t["MaHopDong"]], SoLanBanGiao=n_bg, SoLanNghiemThu=n_nt, _hd=t["MaHopDong"],
+                              _cv=t["Ma"]))
         out.append(Report("Công việc của hợp đồng", [
             ("SoHopDong", "Số HĐ", TEXT), ("TenNoiDungCV", "Công việc", TEXT), ("NgayDuKienHT", "Hạn hoàn thành", "date"),
             ("TienDoPT", "Tiến độ %", INT), ("TinhTrangCV", "Tình trạng", TEXT), ("SoLanBanGiao", "Số lần bàn giao", INT),
             ("SoLanNghiemThu", "Số lần nghiệm thu", INT), ("GhiChuCV", "Ghi chú", TEXT)], tasks, sheet="Công việc"))
-        inv = [dict(r, SoHopDong=no[r["MaHopDong"]]) for r in self.db.query(
+        inv = [dict(r, SoHopDong=no[r["MaHopDong"]], _hd=r["MaHopDong"], _hdr=r["Ma"]) for r in self.db.query(
             f"SELECT * FROM HoaDonDauRa WHERE DaXoa = 0 AND MaHopDong IN ({marks}) ORDER BY NgayXuatHD", ids)]
         out.append(Report("Hóa đơn đầu ra của hợp đồng", [
             ("SoHopDong", "Số HĐ", TEXT), ("KyHieuMauSo", "Mẫu số", TEXT), ("KyHieuHD", "Ký hiệu", TEXT),
@@ -737,13 +743,14 @@ class ContractReports:
             ("TinhChatHD", "Tính chất", TEXT), ("GhiChuHDDR", "Ghi chú", TEXT)], inv,
             dict(_sum(inv, ["GiaTriTruocThue", "VAT", "GiaTriSauThue"]), SoHopDong="TỔNG CỘNG"), sheet="Hóa đơn đầu ra"))
         invoices = {r["Ma"]: r["SoHoaDon"] for r in inv}
-        pays = [dict(r, SoHopDong=no[r["MaHopDong"]], SoHoaDon=invoices.get(r["MaHDDauRa"], "")) for r in self.db.query(
+        pays = [dict(r, SoHopDong=no[r["MaHopDong"]], SoHoaDon=invoices.get(r["MaHDDauRa"], ""), _hd=r["MaHopDong"],
+                     _tt=r["Ma"], _hdr=r["MaHDDauRa"]) for r in self.db.query(
             f"SELECT * FROM ThanhToanHopDong WHERE DaXoa = 0 AND MaHopDong IN ({marks}) ORDER BY NgayThanhToan", ids)]
         out.append(Report("Thanh toán của hợp đồng", [
             ("SoHopDong", "Số HĐ", TEXT), ("NgayThanhToan", "Ngày tiền về", "date"), ("SoTien", "Số tiền", MONEY),
             ("HinhThuc", "Hình thức", TEXT), ("SoThamChieuSK", "Số sao kê", TEXT), ("SoHoaDon", "Số hóa đơn", TEXT),
             ("GhiChu", "Ghi chú", TEXT)], pays, dict(_sum(pays, ["SoTien"]), SoHopDong="TỔNG CỘNG"), sheet="Thanh toán"))
-        vin = [dict(r, SoHopDong=no[r["MaHopDong"]]) for r in self.db.query(
+        vin = [dict(r, SoHopDong=no[r["MaHopDong"]], _hd=r["MaHopDong"], _hdv=r["Ma"]) for r in self.db.query(
             f"SELECT * FROM HoaDonDauVao WHERE DaXoa = 0 AND MaHopDong IN ({marks}) ORDER BY NgayNhanHD", ids)]
         out.append(Report("Hóa đơn đầu vào của hợp đồng", [
             ("SoHopDong", "Số HĐ", TEXT)] + [c for c in self.IN_COLS if c[0] != "SoHopDong"] + [

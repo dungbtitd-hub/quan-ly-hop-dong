@@ -27,6 +27,7 @@ from .finance_page import FinancePage
 from .home_page import HomePage, reminder_text
 from .invoices_page import InvoicesPage
 from .reports_page import ReportsPage
+from .dup_review_page import DupReviewPage
 from .splash import AboutDialog
 from .sync_page import SyncPage
 from .widgets import confirm, info
@@ -151,7 +152,9 @@ class MainWindow(QMainWindow):
                            ("Hóa đơn đầu vào", "invoice_in", lambda: InvoicesPage(ctx, "vao"),
                             ctx.can("HoaDonDauVao")),
                            ("Tài sản, CCDC", "box", lambda: AssetsPage(ctx), ctx.can("TaiSan")),
-                           ("Báo cáo", "report", lambda: ReportsPage(ctx), ctx.can("BaoCao"))]),
+                           ("Báo cáo", "report", lambda: ReportsPage(ctx), ctx.can("BaoCao")),
+                           ("Rà soát trùng lặp", "search", lambda: DupReviewPage(ctx),
+                            any(ctx.can(f) for f in ("HopDong", "HoaDonDauRa", "HoaDonDauVao")))]),
             ("TÀI CHÍNH", [("Thu chi (đã khóa)", "lock", self.finance_page, self.finance_page is not None)]),
             ("DỮ LIỆU", [("Đồng bộ", "sync", self.sync_page, ctx.can("DongBo")),
                          ("Danh mục", "catalog", lambda: CatalogPage(ctx), ctx.can("DanhMuc")),
