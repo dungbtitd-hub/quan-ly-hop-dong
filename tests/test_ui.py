@@ -937,13 +937,14 @@ def test_alerts_many_contexts_and_telegram(qtbot, ctx, monkeypatch):
     from qlhd.ui import alerts_ui
 
     hd = ctx.cs.contracts("Đầu ra")[0]
-    ctx.db.execute("UPDATE HopDong SET NgayKetThucDuKien = ?, NgayBatDauDuKien = NULL, "
+    ctx.db.execute("UPDATE HopDong SET NgayKetThucDuKien = ?, NgayBatDauDuKien = NULL, GiaTriTongSauThue = 0, "
                    "TinhTrangHopDong = 'Đang thực hiện' WHERE Ma = ?",
                    ((date.today() + timedelta(days=3)).isoformat(), hd["Ma"]))
     items = al.collect(ctx.db)
     kinds = {a.loai for a in items}
     assert {"hd_het_han", "thieu_du_lieu"} <= kinds
-    assert any(a.loai == "thieu_du_lieu" and "ngày bắt đầu" in a.chi_tiet for a in items)
+    assert any(a.loai == "thieu_du_lieu" and "giá trị hợp đồng" in a.chi_tiet for a in items)
+    assert not any("ngày bắt đầu" in a.chi_tiet or "MST" in a.chi_tiet for a in items)   # không bắt buộc: không nhắc
     only = al.collect(ctx.db, types=["thieu_du_lieu"])
     assert {a.loai for a in only} == {"thieu_du_lieu"}
     text = al.digest_text(items, "Công ty A")
@@ -1101,3 +1102,33 @@ def test_filter_box_and_bulk_edit_many_rows(qtbot, ctx, monkeypatch):
     qtbot.addWidget(dlg)
     dlg._accept()
     assert errs and dlg.result() == 0
+
+
+def test_duplicate_dialog_and_data_export_dialog(qtbot, ctx, monkeypatch):
+    from qlhd.core import duplicates as dupl
+    from qlhd.ui import widgets
+    from qlhd.ui.reports_page import ColumnsDialog, DataExportDialog
+    d = {"hd": next(h["Ma"] for h in ctx.cs.contracts() if h["SoHopDong"] == "01/2026/HĐTV")}
+    p = {"MaHopDong": d["hd"], "NgayThanhToan": "2026-03-10", "SoTien": 30_000_000, "SoThamChieuSK": "FT123"}
+    n = len(ctx.cs.payments(d["hd"]))
+    monkeypatch.setattr(widgets, "confirm_duplicate", lambda parent, e: False)
+    assert widgets.run_safely(None, ctx.cs.save_payment, dict(p)) is None      # mặc định: không thêm
+    assert len(ctx.cs.payments(d["hd"])) == n
+    monkeypatch.setattr(widgets, "confirm_duplicate", lambda parent, e: True)
+    assert widgets.run_safely(None, ctx.cs.save_payment, dict(p))              # đã rà soát: thêm
+    assert len(ctx.cs.payments(d["hd"])) == n + 1
+    dlg = widgets.DuplicateDialog([("Lần thanh toán", ["giống"]), ("Dòng 2", ["giống"])])
+    qtbot.addWidget(dlg)
+    assert not dlg.ok.isEnabled() and dlg.chosen() == []
+    dlg.agree.setChecked(True)
+    assert dlg.ok.isEnabled()
+    cd = ColumnsDialog([("A", "a"), ("B", "b")], ["b"])
+    qtbot.addWidget(cd)
+    assert cd.values() == ["b"]
+    de = DataExportDialog(ctx)
+    qtbot.addWidget(de)
+    de.kind.set_value("thanh_toan")
+    assert de.ky.value() == "den_nay" and not de.tu.isEnabled() and de.den.value()
+    assert "SoThamChieuSK" in de.cols.values()
+    assert "thu_chi" not in [x.key for x in de.sets]                            # thu chi khóa: không xuất
+    assert dupl.CONFIRM_KEY not in dict(ctx.db.get("ThanhToanHopDong", ctx.cs.payments(d["hd"])[-1]["Ma"]))

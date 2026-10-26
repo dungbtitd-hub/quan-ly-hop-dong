@@ -417,7 +417,7 @@ class HomePage(QWidget):
              None, lambda: self.open_page.emit("Hóa đơn đầu vào")),
             ("Hóa đơn cần xem lại phân loại", str(n_review), "Chưa phân loại, chưa rõ nhóm, nghi sai, nghi trùng",
              "warn" if n_review else None, self.open_review.emit),
-            ("Hợp đồng thiếu dữ liệu", str(len(by["thieu_du_lieu"])), "Thiếu ngày thực hiện, giá trị, loại, MST…",
+            ("Hợp đồng thiếu dữ liệu", str(len(by["thieu_du_lieu"])), "Thiếu thời gian thực hiện hoặc giá trị",
              "warn" if by["thieu_du_lieu"] else None, open_hd),
         ]
         if not can_ts:
@@ -445,6 +445,11 @@ class HomePage(QWidget):
                                  tagged(QLabel(str(len(by["hd_lech_gia_tri"]))), "Pill", "danger"))
                 self._alert_rows(fl, by["hd_lech_gia_tri"], "")
                 fl.addWidget(hint("Có thể nhập sai giá trị hợp đồng. Lọc ở Hợp đồng → \"Giá trị HĐ so với hóa đơn\"."))
+            if by["tt_trung"] or by["thu_thua"]:
+                n = len(by["tt_trung"]) + len(by["thu_thua"])
+                fl = self._panel("Thu thừa, thanh toán nghi ghi trùng", tagged(QLabel(str(n)), "Pill", "danger"))
+                self._alert_rows(fl, by["thu_thua"] + by["tt_trung"], "")
+                fl.addWidget(hint("Bấm từng dòng để mở hợp đồng; lần thanh toán nghi trùng tô đỏ ở thẻ Thanh toán."))
         if "phanloai" in shown and can_ts:
             fl = self._panel("Hóa đơn đầu vào cần kế toán xem lại",
                              button("Mở danh sách", self.open_review.emit, "Link"))

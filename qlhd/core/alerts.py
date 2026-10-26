@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from .assets import AssetService
+from . import duplicates as dupl
 from .contracts import OPEN_STATUSES, VALUE_FLAGS, ContractService
 from .db import Database
 from .reports import fmt_date, fmt_money
@@ -17,14 +18,19 @@ from .reports import fmt_date, fmt_money
 # mã → (tên ngữ cảnh, mô tả ngắn)
 ALERT_TYPES = {
     "hd_het_han": ("Hợp đồng sắp hết hạn / quá hạn", "Theo số ngày nhắc trước của từng hợp đồng"),
+    "hd_cap_nhat_tt": ("Hợp đồng cần cập nhật tình trạng",
+                       "Đã xuất đủ hóa đơn (và thanh toán) mà tình trạng vẫn chưa hoàn thành"),
     "cv_qua_han": ("Công việc quá hạn", "Chưa hoàn thành, đã qua ngày dự kiến"),
     "cv_sap_han": ("Công việc sắp đến hạn", "Trong 7 ngày tới"),
     "hd_chua_thu": ("Hóa đơn đầu ra chưa thu đủ", "Còn phải thu, kèm số ngày từ khi xuất"),
     "hd_chua_xuat": ("Hợp đồng chưa xuất đủ hóa đơn", "Đã nghiệm thu / hoàn thành mà còn giá trị chưa xuất"),
     "hd_lech_gia_tri": ("Giá trị hợp đồng lệch hóa đơn",
                         "Hóa đơn vượt giá trị HĐ, hoặc thanh toán toàn bộ / lần cuối mà tổng lệch (có thể nhập sai)"),
+    "thu_thua": ("Thu thừa", "Tiền thu vào nhiều hơn giá trị hóa đơn hoặc giá trị hợp đồng (có thể ghi trùng)"),
+    "tt_trung": ("Thanh toán nghi ghi trùng",
+                 "Hai lần thanh toán cùng số sao kê và số tiền, hoặc cùng hợp đồng, ngày và số tiền"),
     "tam_ung": ("Tạm ứng chưa khấu trừ", "Đã nhận tạm ứng, chưa trừ vào hóa đơn nào"),
-    "thieu_du_lieu": ("Hợp đồng thiếu dữ liệu", "Thiếu ngày thực hiện, giá trị, loại, MST đối tác…"),
+    "thieu_du_lieu": ("Hợp đồng thiếu dữ liệu", "Đang thực hiện mà thiếu thời gian thực hiện hoặc giá trị hợp đồng"),
     "hddv_xem_lai": ("Hóa đơn đầu vào cần xem lại", "Chưa phân loại, gợi ý chờ xác nhận, nghi sai, nghi trùng…"),
 }
 DEFAULT_TYPES = tuple(ALERT_TYPES)
@@ -48,18 +54,13 @@ class Alert:
 
 
 def missing_fields(hd) -> list[str]:
-    """Các dữ liệu quan trọng hợp đồng còn thiếu (để quản lý bổ sung)."""
+    """Dữ liệu quan trọng hợp đồng đang thực hiện còn thiếu: chỉ những mục bắt buộc. Ngày bắt đầu để trống là tính
+    từ ngày ký; loại hợp đồng, MST đối tác (cá nhân, hộ kinh doanh có thể không có) không bắt buộc nên không nhắc."""
     out = []
-    if not hd["NgayBatDauDuKien"]:
-        out.append("ngày bắt đầu")
     if not hd["NgayKetThucDuKien"]:
-        out.append("ngày kết thúc / thời gian thực hiện")
+        out.append("thời gian thực hiện (ngày kết thúc)")
     if not hd["GiaTriTongSauThue"]:
         out.append("giá trị hợp đồng")
-    if not hd["MaLoaiHD"]:
-        out.append("loại hợp đồng")
-    if not hd["MaThueDoiTac"]:
-        out.append("MST đối tác")
     return out
 
 
@@ -85,6 +86,12 @@ def _collect(db: Database, today: str, types: set) -> list[Alert]:
                              f"Hợp đồng {r['SoHopDong']} – {r['TenHopDong']}",
                              f"{r['TenDoiTac']} · kết thúc {fmt_date(r['NgayKetThucDuKien'])}", r["ConLaiText"],
                              r["Ma"], thu_tu=r["ConLai"]))
+    if "hd_cap_nhat_tt" in types:
+        for r in cs.status_outdated():
+            out.append(Alert("hd_cap_nhat_tt", "warn", f"Hợp đồng {r['SoHopDong']} – {r['TenHopDong']}",
+                             ("Đã xuất đủ hóa đơn và đã thu đủ" if r["DaThuDu"] else "Đã xuất đủ hóa đơn")
+                             + f" mà tình trạng vẫn là \"{r['TinhTrangHopDong']}\": sửa thành Đã nghiệm thu / "
+                             "Hoàn thành", "Cập nhật tình trạng", r["Ma"]))
     if "cv_qua_han" in types:
         for r in cs.overdue_tasks(today):
             out.append(Alert("cv_qua_han", "danger", r["TenNoiDungCV"],
@@ -115,6 +122,19 @@ def _collect(db: Database, today: str, types: set) -> list[Alert]:
                              f"{r['TenDoiTac']} · xuất {fmt_date(r['NgayXuatHD'])} · "
                              + ("chưa thu" if not r["Da"] else f"đã thu {fmt_money(r['Da'])} đ"),
                              f"{fmt_money(left)} đ · {age} ngày", r["MaHopDong"], left, thu_tu=-age))
+    if "thu_thua" in types:
+        for r in dupl.overpaid_items(db):
+            out.append(Alert("thu_thua", "danger", f"{r['nhan']} – HĐ {r['SoHopDong']}" if r["loai"] == "hoa_don"
+                             else r["nhan"], f"Giá trị {fmt_money(r['GiaTri'])} đ, đã thu {fmt_money(r['Da'])} đ: "
+                             "kiểm tra lần thanh toán ghi thừa / ghi trùng", f"Thừa {fmt_money(r['Da'] - r['GiaTri'])} đ",
+                             r["MaHopDong"], r["Da"] - r["GiaTri"]))
+    if "tt_trung" in types:
+        for r in dupl.duplicate_payments(db):
+            out.append(Alert("tt_trung", "danger", f"Thanh toán HĐ {r['SoHopDong']} ngày {fmt_date(r['NgayThanhToan'])}",
+                             "Giống một lần thanh toán đã ghi trước" + (f" (sao kê {r['SoThamChieuSK']})"
+                                                                        if r["SoThamChieuSK"] else "")
+                             + ": mở hợp đồng → thẻ Thanh toán để xóa lần thừa", f"{fmt_money(r['SoTien'])} đ",
+                             r["MaHopDong"], int(r["SoTien"] or 0)))
     if types & {"hd_chua_xuat", "tam_ung", "thieu_du_lieu", "hd_lech_gia_tri"}:
         for hd in db.active("HopDong", "TinhTrangHopDong != 'Hủy'", order="NgayKy"):
             if "thieu_du_lieu" in types and hd["TinhTrangHopDong"] in OPEN_STATUSES:

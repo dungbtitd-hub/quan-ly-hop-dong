@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from . import vat
 from .assets import AssetService
 from .db import Database
+from . import duplicates as dupl
 
 CONTRACT_STATUSES = ("Chưa bắt đầu", "Đang thực hiện", "Đã nghiệm thu", "Hoàn thành", "Tạm dừng", "Hủy")
 TASK_STATUSES = ("Chưa làm", "Đang làm", "Đã bàn giao", "Đã nghiệm thu", "Hoàn thành")
@@ -27,6 +28,10 @@ DEFAULT_REMIND_DAYS = 30
 
 class ValidationError(Exception):
     pass
+
+
+class DuplicateWarning(ValidationError, dupl.DuplicateWarning):
+    """Thêm mới mà giống dữ liệu đã có: chưa thêm, chờ nhân viên rà soát xác nhận (values[dupl.CONFIRM_KEY] = True)."""
 
 
 def payment_status(invoiced: int, paid: int) -> str:
@@ -60,14 +65,14 @@ VALUE_TOLERANCE = 10          # đồng: chênh lệch do làm tròn VAT không 
 VALUE_FLAGS = {
     "vuot": "Tổng hóa đơn vượt giá trị hợp đồng",
     "toan_bo": "Hóa đơn thanh toán toàn bộ / lần cuối nhưng tổng hóa đơn lệch giá trị hợp đồng",
-    "chua_ro_dot": "Tổng hóa đơn chưa bằng giá trị hợp đồng, các hóa đơn chưa ghi đợt thanh toán",
+    "chua_ro_dot": "Tổng hóa đơn chưa bằng giá trị hợp đồng, hóa đơn chưa ghi đợt thanh toán",
 }
 VALUE_FILTERS = (("Lệch giá trị hóa đơn (mọi trường hợp)", "lech"), ("Hóa đơn vượt giá trị HĐ", "vuot"),
                  ("Thanh toán toàn bộ / lần cuối nhưng lệch", "toan_bo"),
                  ("Chưa ghi đợt thanh toán, tổng lệch", "chua_ro_dot"), ("Khớp hoặc chưa đủ dữ kiện", "khop"))
 
 
-def value_flag(direction: str, value: int, invoiced: int, installments: list) -> str | None:
+def value_flag(direction: str, value: int, invoiced: int, installments: list, status: str | None = None) -> str | None:
     """Giá trị hợp đồng có thể đã nhập sai: so với tổng hóa đơn và đợt thanh toán ghi trên hóa đơn.
     installments: đợt của từng hóa đơn (không tính hóa đơn đã hủy). Một hóa đơn duy nhất chưa ghi đợt được coi
     là thanh toán toàn bộ. Trả về mã trong VALUE_FLAGS hoặc None."""
@@ -77,8 +82,12 @@ def value_flag(direction: str, value: int, invoiced: int, installments: list) ->
         return "vuot"
     if direction != "Đầu ra":
         return None
-    if any(d in FULL_INSTALLMENTS for d in installments) or installments == [None] or installments == [""]:
+    if any(d in FULL_INSTALLMENTS for d in installments):
         return "toan_bo"
+    if installments in ([None], [""]):
+        # một hóa đơn chưa ghi đợt: hợp đồng đã xong thì coi là thanh toán toàn bộ (lệch là cảnh báo);
+        # đang thực hiện thì có thể còn đợt sau: chỉ tô màu ở trang Hợp đồng, không cảnh báo
+        return "toan_bo" if status in ("Đã nghiệm thu", "Hoàn thành") else "chua_ro_dot"
     if installments and not any(installments):
         return "chua_ro_dot"
     return None
@@ -231,6 +240,15 @@ class ContractService:
     def __init__(self, db: Database):
         self.db = db
 
+    def _guard(self, what: str, check, v: dict, ma: str | None) -> None:
+        """Chỉ khi thêm mới: có bản ghi giống thì dừng lại, trừ khi nhân viên đã rà soát xác nhận."""
+        confirmed = v.pop(dupl.CONFIRM_KEY, False)
+        if ma or confirmed:
+            return
+        found = check(self.db, v, ma)
+        if found:
+            raise DuplicateWarning(what, found)
+
     # ---- danh mục
     def contract_types(self) -> list[sqlite3.Row]:
         return self.db.active("LoaiHopDong", order="TenLoaiHD")
@@ -267,6 +285,7 @@ class ContractService:
                               (v["MaSoThue"], ma or ""))
             if dup:
                 raise ValidationError(f"Mã số thuế đã có ở đối tác \"{dup['TenDoiTac']}\".")
+        self._guard("Đối tác", dupl.partners, v, ma)
         if ma:
             self.db.update("DoiTac", ma, v, commit=False)
             p = self.db.get("DoiTac", ma)          # hợp đồng lưu kèm tên, MST đối tác: cập nhật theo
@@ -365,6 +384,7 @@ class ContractService:
             " AND Ma != ?", (v["SoHopDong"], v.get("MaThueDoiTac") or v["TenDoiTac"], ma or ""))
         if dup:
             raise ValidationError("Đã có hợp đồng cùng Số hợp đồng với đối tác này.")
+        self._guard("Hợp đồng", dupl.contracts, v, ma)
         if ma:
             self.db.update("HopDong", ma, v)
             return ma
@@ -416,8 +436,15 @@ class ContractService:
         paid = self.db.one("SELECT COALESCE(SUM(SoTien), 0) s, MAX(NgayThanhToan) d FROM ThanhToanHopDong"
                            " WHERE DaXoa = 0 AND MaHopDong = ?" + cond_p, pp)
         value = hd["GiaTriTongSauThue"]
-        adv = self.db.one("SELECT COALESCE(SUM(SoTien), 0) s FROM ThanhToanHopDong WHERE DaXoa = 0 AND MaHopDong = ?"
-                          " AND MaHDDauRa IS NULL" + cond_p, pp)["s"]
+        # tạm ứng chưa khấu trừ; lần ghi trùng một lần thanh toán đã có (cùng ngày + số tiền, hoặc cùng sao kê +
+        # số tiền) không tính là tạm ứng: nó được nhắc ở "Thanh toán nghi ghi trùng"
+        adv = self.db.one(
+            "SELECT COALESCE(SUM(SoTien), 0) s FROM ThanhToanHopDong t WHERE DaXoa = 0 AND MaHopDong = ?"
+            " AND MaHDDauRa IS NULL" + cond_p + " AND NOT EXISTS (SELECT 1 FROM ThanhToanHopDong q WHERE q.DaXoa = 0"
+            " AND q.Ma != t.Ma AND q.MaHopDong = t.MaHopDong AND q.SoTien = t.SoTien"
+            " AND (substr(q.NgayThanhToan, 1, 10) = substr(t.NgayThanhToan, 1, 10)"
+            " OR (COALESCE(t.SoThamChieuSK, '') != '' AND q.SoThamChieuSK = t.SoThamChieuSK))"
+            " AND (q.NgayTao < t.NgayTao OR (q.NgayTao = t.NgayTao AND q.Ma < t.Ma)))", pp)["s"]
         return {
             "TamUngConLai": adv,                     # tạm ứng chưa khấu trừ vào hóa đơn nào
             "GiaTriHD": value, "DaXuatHD": invoiced, "ConPhaiXuat": max(value - invoiced, 0),
@@ -426,7 +453,8 @@ class ContractService:
             "LanThuGanNhat": paid["d"] or "",
             "TinhTrangThanhToan": payment_status(invoiced, paid["s"]),
             "TinhTrangXuatHD": invoicing_status(value, invoiced),
-            "LechGiaTri": value_flag(hd["ChieuHopDong"], value, invoiced, self._installments(hd, cond_i, pi)),
+            "LechGiaTri": value_flag(hd["ChieuHopDong"], value, invoiced, self._installments(hd, cond_i, pi),
+                                     hd["TinhTrangHopDong"]),
         }
 
     def _installments(self, hd, cond_i: str, params) -> list:
@@ -453,6 +481,8 @@ class ContractService:
     def save_task(self, values: dict, ma: str | None = None) -> str:
         if not (values.get("TenNoiDungCV") or "").strip():
             raise ValidationError("Chưa nhập nội dung công việc.")
+        values = dict(values)
+        self._guard("Công việc", dupl.tasks, values, ma)
         if ma:
             self.db.update("CongViec", ma, values)
             return ma
@@ -482,6 +512,7 @@ class ContractService:
                           " AND Ma != ?", (v.get("KyHieuHD") or "", v["SoHoaDon"], ma or ""))
         if dup:
             raise ValidationError("Hóa đơn (ký hiệu + số) này đã có.")
+        self._guard("Hóa đơn đầu ra", dupl.out_invoices, v, ma)
         if ma:
             self.db.update("HoaDonDauRa", ma, v)
             return ma
@@ -532,6 +563,7 @@ class ContractService:
             raise ValidationError("Số tiền phải lớn hơn 0.")
         if v.get("HinhThuc") not in PAY_METHODS:
             v["HinhThuc"] = "Chuyển khoản"
+        self._guard("Lần thanh toán", dupl.payment_checks, v, ma)
         if ma:
             self.db.update("ThanhToanHopDong", ma, v)
             return ma
@@ -590,6 +622,7 @@ class ContractService:
                           (v["MaThueNCC"], v.get("KyHieuHD") or "", v["SoHoaDonGoc"], ma or ""))
         if dup:
             raise ValidationError("Hóa đơn đầu vào (MST + ký hiệu + số) này đã có.")
+        self._guard("Hóa đơn đầu vào", dupl.in_invoices, v, ma)
         if ma:
             self.db.update("HoaDonDauVao", ma, v)
         else:
@@ -629,8 +662,11 @@ class ContractService:
         default = self.remind_days()
         t = date.fromisoformat(today)
         out = []
+        done = {r["Ma"] for r in self.status_outdated()}
         for hd in self.db.active("HopDong", f"TinhTrangHopDong IN ({','.join('?' * len(OPEN_STATUSES))})"
                                  " AND NgayKetThucDuKien IS NOT NULL", OPEN_STATUSES, "NgayKetThucDuKien"):
+            if hd["Ma"] in done:        # đã xuất đủ hóa đơn: nhắc cập nhật tình trạng thay cho nhắc hết hạn
+                continue
             left = (date.fromisoformat(hd["NgayKetThucDuKien"][:10]) - t).days
             before = hd["NhacTruocNgay"] if hd["NhacTruocNgay"] else default
             if left <= before:
@@ -639,6 +675,17 @@ class ContractService:
                 r["ConLaiText"] = ("Hết hạn hôm nay" if left == 0 else f"Còn {left} ngày" if left > 0
                                    else f"Quá hạn {-left} ngày")
                 out.append(r)
+        return out
+
+    def status_outdated(self) -> list[dict]:
+        """Hợp đồng đầu ra đã xuất đủ hóa đơn theo giá trị mà tình trạng vẫn là chưa bắt đầu / đang thực hiện /
+        tạm dừng: cần cập nhật thành Đã nghiệm thu hoặc Hoàn thành."""
+        out = []
+        for hd in self.db.active("HopDong", f"ChieuHopDong = 'Đầu ra' AND GiaTriTongSauThue > 0 AND TinhTrangHopDong IN"
+                                 f" ({','.join('?' * len(OPEN_STATUSES))})", OPEN_STATUSES, "NgayKy"):
+            s = self.summary(hd["Ma"])
+            if s["DaXuatHD"] >= s["GiaTriHD"] - VALUE_TOLERANCE:
+                out.append({**dict(hd), **s, "DaThuDu": s["DaThanhToan"] >= s["DaXuatHD"]})
         return out
 
     def overdue_tasks(self, today: str) -> list[dict]:

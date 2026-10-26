@@ -6,7 +6,7 @@ import pytest
 
 from qlhd.core import asset_catalog as dm
 from qlhd.core.assets import CCDC_KEYS, TSCD_KEYS, AssetError, AssetService, register_row
-from qlhd.core.contracts import ContractService
+from qlhd.core.contracts import ContractService, DuplicateWarning
 from qlhd.core.finance import FinanceStore
 from qlhd.core.profit import ProfitError, ProfitService
 from qlhd.core.sync import SyncService
@@ -93,13 +93,13 @@ def _line(ten, sl, gia, tchat="1"):
             f"<DGia>{gia}</DGia><ThTien>{sl * gia}</ThTien><TSuat>10%</TSuat></HHDVu>")
 
 
-def _xml_invoice(cs, so, ngay, lines):
+def _xml_invoice(cs, so, ngay, lines, ok_dup=False):
     xml = XML.format(so=so, ngay=ngay, lines="".join(_line(*x) for x in lines), tong=sum(x[1] * x[2] for x in lines))
     d = parse_invoice(xml.encode())
     return cs.save_in_invoice({"SoHoaDonGoc": d["SoHoaDon"], "KyHieuHD": d["KyHieuHD"],
                                "TenNhaCungCap": d["TenNguoiBan"], "MaThueNCC": d["MSTNguoiBan"],
                                "NgayNhanHD": d["NgayLap"], "GiaTriTruocThue": d["GiaTriTruocThue"],
-                               "MatHang": d["MatHang"], "_Dong": d["Dong"]})
+                               "MatHang": d["MatHang"], "_Dong": d["Dong"], "_DaRaSoatTrung": ok_dup})
 
 
 def test_invoice_lines_are_classified_and_feed_registers(company):
@@ -431,7 +431,9 @@ def test_recurring_bills_are_not_duplicates_and_confirm_clears_warning(company):
     a = _xml_invoice(cs, "301", "2025-04-02", [("Tiền nước sinh hoạt", 1, 144_400)])
     b = _xml_invoice(cs, "302", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])    # tháng sau, cùng số tiền
     assert not [r for r in s.review_lines() if r["MaCanhBao"] == "trung"]
-    c = _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])    # cùng ngày: nghi nhập trùng
+    with pytest.raises(DuplicateWarning):             # cùng người bán, ngày, số tiền: không tự thêm
+        _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])
+    c = _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)], ok_dup=True)   # đã rà soát
     dup = [r for r in s.review_lines() if r["MaCanhBao"] == "trung"]
     assert [r["MaHoaDon"] for r in dup] == [c]
     assert s.confirm_lines([dup[0]["Ma"]]) == 1                    # kế toán xác nhận đúng: dòng thôi hiện

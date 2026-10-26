@@ -5,9 +5,10 @@ import json
 from datetime import date
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QCheckBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QRadioButton,
+from PySide6.QtWidgets import (QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QRadioButton,
                                QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
+from ..core import data_export
 from ..core.contracts import CONTRACT_STATUSES
 from ..core.reports import (CONTEXT_LABELS, CONTEXTS, DETAIL_LEVELS, INVOICE_PERIODS, RELATIVE_PERIODS, TAX_MODES,
                             ContractReports, ReportFilters, export_xlsx, relative_range)
@@ -184,7 +185,11 @@ class ReportsPage(QWidget):
         b_export = button("Xuất Excel…", self.export, "Primary")
         b_export.setEnabled(ctx.can("BaoCao", "Xuat"))
         self.note = hint("")
-        rl.addLayout(toolbar(button("Xem trước", self.preview), b_export, "stretch"))
+        b_data = button("Xuất dữ liệu tùy chọn…", self.export_data)
+        b_data.setToolTip("Xuất bất kỳ dữ liệu nào đang quản lý (hợp đồng, thanh toán, hóa đơn, công việc, tài sản, "
+                          "đối tác, thu chi…), tự chọn cột và khoảng ngày")
+        b_data.setEnabled(ctx.can("BaoCao", "Xuat"))
+        rl.addLayout(toolbar(button("Xem trước", self.preview), b_export, b_data, "stretch"))
         rl.addWidget(self.note)
         self.tabs = QTabWidget()
         rl.addWidget(self.tabs, 1)
@@ -290,7 +295,11 @@ class ReportsPage(QWidget):
                 table.activated_row.connect(lambda r: row_contract(r) and self.open_contract.emit(row_contract(r)))
             self.tabs.addTab(table, rep.sheet)
 
-    def _export(self, reports, default_name: str):
+    def _export(self, reports, default_name: str, pick: bool = True):
+        if pick:                   # tự chọn cột cần xuất (nhớ lựa chọn lần trước của từng ngữ cảnh)
+            reports = pick_columns(self, self.ctx, "cot_bao_cao:" + self.context.value(), reports)
+            if reports is None:
+                return
         path, _ = QFileDialog.getSaveFileName(self, "Xuất Excel", f"{default_name}.xlsx", "Excel (*.xlsx)")
         if path:
             export_xlsx(reports, path, company=self.ctx.company, user=self.ctx.user["HoTen"])
@@ -308,7 +317,13 @@ class ReportsPage(QWidget):
         self.preview(reps)
         f = ReportFilters.from_dict(d).resolved()
         stamp = f" {f.tu or ''}_{f.den or ''}".rstrip("_ ") if f.tu or f.den else ""
-        self._export(reps, name + stamp)
+        keys = d.get("cot")              # mẫu xuất nhanh: dùng các cột đã chọn khi lưu mẫu
+        if keys:
+            reps = data_export.select_columns(reps, set(keys))
+        self._export(reps, name + stamp, pick=False)
+
+    def export_data(self):
+        DataExportDialog(self.ctx, self).exec()
 
     # ---- mẫu báo cáo
     def _template_names(self) -> list[str]:
@@ -338,6 +353,10 @@ class ReportsPage(QWidget):
         data = dict(self.filters().__dict__, context=self.context.value(), xuat_nhanh=v["xuat_nhanh"])
         if data["ky_tuong_doi"]:
             data["tu"] = data["den"] = None
+        try:                              # cột đã chọn ở lần xuất gần nhất của ngữ cảnh này
+            data["cot"] = json.loads(self.ctx.db.setting("cot_bao_cao:" + self.context.value()) or "null")
+        except ValueError:
+            data["cot"] = None
         self.ctx.db.set_setting(TEMPLATE_PREFIX + v["ten"], json.dumps(data, ensure_ascii=False))
         self.refresh()
         self.templates.set_value(v["ten"])
@@ -392,3 +411,154 @@ class ReportsPage(QWidget):
             self.ctx.cs.save_group(name, members)
             self.refresh()
             info(self, f"Đã lưu nhóm \"{name}\" ({len(members)} chủ đầu tư).")
+
+
+def pick_columns(parent, ctx, key: str, reports):
+    """Hỏi các cột cần xuất (mặc định: lựa chọn lần trước, lần đầu là tất cả). Trả None nếu hủy."""
+    cols, seen = [], set()
+    for rep in reports:
+        for i, c in enumerate(rep.columns):
+            if c[0] not in seen:
+                seen.add(c[0])
+                cols.append((c[1] + (" (luôn xuất)" if i == 0 else ""), c[0]))
+    try:
+        last = json.loads(ctx.db.setting(key) or "null")
+    except ValueError:
+        last = None
+    dlg = ColumnsDialog(cols, last, parent)
+    if dlg.exec() != QDialog.Accepted:
+        return None
+    keys = dlg.values()
+    ctx.db.set_setting(key, json.dumps(keys))
+    return data_export.select_columns(reports, set(keys))
+
+
+class ColumnsDialog(QDialog):
+    """Chọn cột cần xuất ra Excel."""
+
+    def __init__(self, cols, checked=None, parent=None, title: str = "Chọn cột cần xuất"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(420, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint("Tích các cột muốn có trong file Excel. Lựa chọn được nhớ cho lần xuất sau."))
+        self.list = CheckList()
+        self.list.set_options(cols, [k for _, k in cols] if checked is None else checked)
+        lay.addWidget(self.list, 1)
+        lay.addLayout(toolbar(button("Chọn tất cả", lambda: self._all(True)),
+                              button("Bỏ chọn tất cả", lambda: self._all(False)), "stretch"))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Tiếp tục xuất")
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _all(self, on: bool):
+        for i in range(self.list.count()):
+            self.list.item(i).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _ok(self):
+        if not self.values():
+            return info(self, "Chọn ít nhất một cột.")
+        self.accept()
+
+    def values(self) -> list:
+        return self.list.values()
+
+
+class DataExportDialog(QDialog):
+    """Xuất dữ liệu tùy chọn: chọn loại dữ liệu, các cột, khoảng ngày (hoặc toàn bộ đến hôm nay)."""
+
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.setWindowTitle("Xuất dữ liệu tùy chọn")
+        self.resize(520, 640)
+        lay = QVBoxLayout(self)
+        self.sets = [d for d in data_export.DATASETS
+                     if (ctx.finance is not None if d.finance else ctx.can(d.quyen))]
+        self.kind = Combo([(d.label, d.key) for d in self.sets])
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        self.ky = Combo([(label, key) for key, label in RELATIVE_PERIODS], "den_nay")
+        self.ky.currentIndexChanged.connect(self._ky_changed)
+        year = date.today().year
+        self.tu, self.den = DateEdit(f"{year}-01-01", optional=True), DateEdit(None, optional=True)
+        form = QGridLayout()
+        for r, (label, w) in enumerate((("Dữ liệu", self.kind), ("Kỳ", self.ky), ("Từ ngày", self.tu),
+                                        ("Đến ngày", self.den))):
+            form.addWidget(QLabel(label), r, 0)
+            form.addWidget(w, r, 1)
+        lay.addLayout(form)
+        self.date_note = hint("")
+        lay.addWidget(self.date_note)
+        lay.addWidget(QLabel("Các cột cần xuất:"))
+        self.cols = CheckList()
+        lay.addWidget(self.cols, 1)
+        lay.addLayout(toolbar(button("Chọn tất cả", lambda: self._all(True)),
+                              button("Bỏ chọn tất cả", lambda: self._all(False)), "stretch"))
+        if not any(d.finance for d in self.sets):
+            lay.addWidget(hint("Phiếu thu chi chỉ xuất được khi đăng nhập Giám đốc / Quản lý và đã mở khóa Thu chi."))
+        bb = QDialogButtonBox()
+        ok = bb.addButton("Xuất Excel…", QDialogButtonBox.AcceptRole)
+        ok.setObjectName("Primary")
+        bb.addButton("Đóng", QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self.export)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._kind_changed()
+        self._ky_changed()
+
+    def ds(self):
+        return data_export.BY_KEY[self.kind.value()]
+
+    def _all(self, on: bool):
+        for i in range(self.cols.count()):
+            self.cols.item(i).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _kind_changed(self, *_):
+        if not self.sets:
+            return
+        ds = self.ds()
+        try:
+            last = json.loads(self.ctx.db.setting("cot_du_lieu:" + ds.key) or "null")
+        except ValueError:
+            last = None
+        self.cols.set_options([(c[1], c[0]) for c in ds.columns], [c[0] for c in ds.columns] if last is None else last)
+        has_date = ds.date_key is not None
+        for w in (self.ky, self.tu, self.den):
+            w.setEnabled(has_date)
+        if has_date:
+            label = next((c[1] for c in ds.columns if c[0] == ds.date_key), ds.date_key)
+            self.date_note.setText(f"Lọc theo cột \"{label}\". Kỳ \"Từ trước đến nay\" xuất toàn bộ đến hôm nay.")
+        else:
+            self.date_note.setText("Dữ liệu này không lọc theo ngày: xuất toàn bộ.")
+        self._ky_changed()
+
+    def _ky_changed(self, *_):
+        key = self.ky.value()
+        on = self.ky.isEnabled()
+        self.tu.setEnabled(on and not key)
+        self.den.setEnabled(on and not key)
+        if key:
+            tu, den = relative_range(key, date.today())
+            self.tu.set_value(tu or None)
+            self.den.set_value(den)
+
+    def export(self):
+        if not self.sets:
+            return
+        ds, keys = self.ds(), self.cols.values()
+        if not keys:
+            return info(self, "Chọn ít nhất một cột.")
+        tu, den = (self.tu.value(), self.den.value()) if ds.date_key else (None, None)
+        fdb = self.ctx.finance.fdb if ds.finance and self.ctx.finance is not None else None
+        rep = data_export.build(self.ctx.db, ds.key, keys, tu, den, fdb=fdb)
+        self.ctx.db.set_setting("cot_du_lieu:" + ds.key, json.dumps(keys))
+        path, _ = QFileDialog.getSaveFileName(self, "Xuất Excel", f"{ds.label}.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        export_xlsx(rep, path, company=self.ctx.company, user=self.ctx.user["HoTen"],
+                    password=None)
+        self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xuất dữ liệu tùy chọn", f"{ds.label}: {len(rep.rows)} dòng")
+        info(self, f"Đã xuất {len(rep.rows)} dòng {ds.label.lower()}:\n{path}")

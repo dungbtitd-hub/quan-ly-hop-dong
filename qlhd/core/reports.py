@@ -33,7 +33,7 @@ TAX_MODES = [
     ("Không chịu thuế", "Chỉ hóa đơn không chịu thuế GTGT"),
 ]
 RELATIVE_PERIODS = [
-    (None, "Tự chọn (từ ngày – đến ngày)"),
+    (None, "Tự chọn (từ ngày – đến ngày)"), ("den_nay", "Từ trước đến nay (toàn bộ đến hôm nay)"),
     ("thang_nay", "Tháng này"), ("quy_nay", "Quý này"), ("nam_nay", "Năm nay"),
     ("thang_truoc", "Tháng trước"), ("quy_truoc", "Quý trước"), ("nam_truoc", "Năm trước"),
 ]
@@ -79,7 +79,7 @@ class ReportFilters:
         if not self.ky_tuong_doi:
             return self
         tu, den = relative_range(self.ky_tuong_doi, today or date.today())
-        return ReportFilters(**{**self.__dict__, "tu": tu, "den": den})
+        return ReportFilters(**{**self.__dict__, "tu": tu or None, "den": den})
 
     def describe(self) -> str:
         parts = []
@@ -862,7 +862,10 @@ def _month_end(y: int, m: int) -> date:
 
 
 def relative_range(key: str, today: date) -> tuple[str, str]:
-    """Khoảng ngày của kỳ tương đối: thang_nay / quy_nay / nam_nay / thang_truoc / quy_truoc / nam_truoc."""
+    """Khoảng ngày của kỳ tương đối: thang_nay / quy_nay / nam_nay / thang_truoc / quy_truoc / nam_truoc;
+    den_nay: từ đầu (không giới hạn) đến hôm nay."""
+    if key == "den_nay":
+        return "", today.isoformat()
     ky, when = key.split("_")
     if when == "truoc":
         if ky == "thang":

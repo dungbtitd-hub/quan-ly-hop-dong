@@ -60,6 +60,8 @@ def test_excel_template_auto_vat(tmp_path, company):
     assert got == [(100_000_000, "10%", 10_000_000, 110_000_000), (100_000_000, "8%", 8_000_000, 108_000_000),
                    (50_000_000, "8%", 4_000_000, 54_000_000), (50_000_000, "10%", 5_000_000, 55_000_000)]
     assert rows[0].errors[0].startswith("Tự tính") and rows[4].status == "Lỗi"
+    for r in rows:                      # cùng đối tác, cùng tên hợp đồng mẫu: đã rà soát, vẫn lưu
+        r.force = True
     import_rows(db, rows)
     saved = {h["SoHopDong"]: h for h in db.active("HopDong")}
     assert saved["V2"]["GiaTriTruocThue"] == 100_000_000 and saved["V2"]["ThueSuat"] == "8%"
@@ -268,6 +270,7 @@ def test_template_item_type_column(tmp_path, company):
         v = dict(it.values)
         if it.loai_hang:
             v["_LoaiHang"] = (it.loai_hang.phan_loai, it.loai_hang.nhom.ma, it.loai_hang.so_thang)
+        v["_DaRaSoatTrung"] = True              # các dòng mẫu cùng người bán, ngày, số tiền
         ma = cs.save_in_invoice(v)
         ln = svc.lines_of(ma)[0]
         if it.loai_hang:

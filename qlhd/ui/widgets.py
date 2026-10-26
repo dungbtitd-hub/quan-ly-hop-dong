@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QStyle, QCheckBox, QComboBox, 
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
                                QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ..core import duplicates as dupl
 from ..core.reports import fmt_date, fmt_money
 from . import style
 from .icons import icon, icon_for_text
@@ -82,6 +83,72 @@ def confirm_delete(parent, what: str, details=(), *, permanent: bool = True, cou
     return DeleteDialog(what, details, permanent=permanent, count=count, parent=parent).exec() == QDialog.Accepted
 
 
+class DuplicateDialog(QDialog):
+    """Dữ liệu định thêm giống dữ liệu đã có: không tự thêm. Liệt kê bản ghi giống kèm lý do; chỉ thêm khi người nhập
+    tích đã rà soát. Mặc định là Không thêm. items: [(nhãn, [lý do…])] (nhập nhiều dòng thì tích từng dòng)."""
+
+    def __init__(self, items, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nghi trùng dữ liệu đã có")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        many = len(items) > 1
+        head = QLabel(f"Có {len(items)} mục giống dữ liệu đã có trong phần mềm, chưa được thêm." if many
+                      else f"{items[0][0]} giống dữ liệu đã có trong phần mềm, chưa được thêm.")
+        head.setWordWrap(True)
+        head.setStyleSheet("font-weight:600;")
+        lay.addWidget(head)
+        self.list = QListWidget()
+        for label, reasons in items:
+            it = QListWidgetItem(f"{label}\n" + "\n".join(f"   • {x}" for x in reasons[:6]))
+            if many:
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(Qt.Unchecked)
+            self.list.addItem(it)
+        self.list.setWordWrap(True)
+        lay.addWidget(self.list, 1)
+        lay.addWidget(hint("Kiểm tra lại: nếu đúng là đã nhập rồi thì bấm Không thêm. Chỉ thêm khi chắc chắn đây là "
+                           "dữ liệu khác (VD hai lần thanh toán riêng biệt cùng số tiền)."
+                           + (" Tích những mục muốn thêm." if many else "")))
+        self.agree = QCheckBox("Tôi đã rà soát, đây không phải dữ liệu trùng")
+        lay.addWidget(self.agree)
+        bb = QDialogButtonBox()
+        self.ok = bb.addButton("Vẫn thêm", QDialogButtonBox.AcceptRole)
+        cancel = bb.addButton("Không thêm", QDialogButtonBox.RejectRole)
+        self.ok.setEnabled(False)
+        self.ok.setAutoDefault(False)
+        cancel.setDefault(True)
+        self.agree.toggled.connect(self.ok.setEnabled)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def chosen(self) -> list[int]:
+        if self.list.count() == 1:
+            return [0]
+        return [i for i in range(self.list.count()) if self.list.item(i).checkState() == Qt.Checked]
+
+
+def confirm_duplicate(parent, e) -> bool:
+    """Hỏi một mục nghi trùng (DuplicateWarning): True nếu người nhập rà soát và chọn vẫn thêm."""
+    return DuplicateDialog([(e.what, e.matches)], parent).exec() == QDialog.Accepted
+
+
+def review_duplicates(parent, items) -> int:
+    """Nhập nhiều dòng: items [(nhãn, lý do, hàm lưu, dữ liệu)]. Lưu các dòng được tích sau rà soát; trả số đã lưu."""
+    if not items:
+        return 0
+    dlg = DuplicateDialog([(label, reasons) for label, reasons, _, _ in items], parent)
+    if dlg.exec() != QDialog.Accepted:
+        return 0
+    n = 0
+    for i in dlg.chosen():
+        _, _, fn, v = items[i]
+        if run_safely(parent, fn, dict(v, **{dupl.CONFIRM_KEY: True})) is not None:
+            n += 1
+    return n
+
+
 def ask_secret(parent, title: str, label: str) -> str | None:
     text, ok = QInputDialog.getText(parent, title, label, QLineEdit.Password)
     return text if ok else None
@@ -103,11 +170,17 @@ def copy_text(text: str) -> None:
 
 def run_safely(parent, fn, *args, **kwargs):
     """Chạy một thao tác, hiện lỗi nghiệp vụ thành hộp thoại thay vì làm dừng phần mềm."""
-    try:
-        return fn(*args, **kwargs)
-    except Exception as e:  # noqa: BLE001
-        error(parent, str(e))
-        return None
+    while True:
+        try:
+            return fn(*args, **kwargs)
+        except dupl.DuplicateWarning as e:     # giống dữ liệu đã có: rà soát xác nhận mới thêm
+            values = next((a for a in args if isinstance(a, dict)), None)
+            if values is None or not confirm_duplicate(parent, e):
+                return None
+            args = tuple(dict(a, **{dupl.CONFIRM_KEY: True}) if a is values else a for a in args)
+        except Exception as e:  # noqa: BLE001
+            error(parent, str(e))
+            return None
 
 
 # ---------------------------------------------------------------- ô nhập

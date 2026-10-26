@@ -11,13 +11,14 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
 
 from ..core import finance as fin
 from ..core import finance_import
-from ..core.finance import FinanceError, FinanceStore
+from ..core.duplicates import CONFIRM_KEY as DUP_OK
+from ..core.finance import FinanceDuplicate, FinanceError, FinanceStore
 from ..core.reports import FinanceReports, export_xlsx, fmt_date, fmt_money, period_range
 from .profit_page import ProfitTab
 from . import style
 from .widgets import (Combo, DataTable, DateEdit, bulk_edit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
                       confirm_changes, confirm_delete,
-                      copy_text, error, hint, info, page_title, run_safely, toolbar)
+                      confirm_duplicate, copy_text, error, hint, info, page_title, run_safely, toolbar)
 
 ENTRY_COLS = [("Ngay", "Ngày", "date"), ("SoPhieu", "Số phiếu / Số HĐ", "text"), ("PhanLoai", "Phân loại", "text"),
               ("NoiDung", "Nội dung", "text"), ("TenDuAn", "Dự án", "text"), ("KhoanMuc", "Khoản mục", "text"),
@@ -195,7 +196,12 @@ class VoucherDialog(QDialog):
             if self.editing:
                 self.store.update_voucher(self.editing, v)
             else:
-                self.saved_ids.append(self.store.add_voucher(v))
+                try:
+                    self.saved_ids.append(self.store.add_voucher(v))
+                except FinanceDuplicate as e:   # giống phiếu đã có: rà soát xác nhận mới thêm
+                    if not confirm_duplicate(self, e):
+                        return
+                    self.saved_ids.append(self.store.add_voucher(dict(v, **{DUP_OK: True})))
         except FinanceError as e:
             return error(self, str(e))
         if v.get("PhanLoaiChi"):

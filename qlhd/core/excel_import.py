@@ -10,7 +10,9 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import vat
-from .contracts import CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, ContractService, ValidationError
+from . import duplicates as dupl
+from .contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, ContractService, DuplicateWarning,
+                        ValidationError)
 from .db import Database
 
 RATE_OPTIONS = ("10%", "8%", "5%", "0%", "KCT", "KKKNT")
@@ -392,7 +394,17 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
     """Lưu các dòng hợp lệ, trả về số lượng đã lưu theo từng sheet."""
     cs = ContractService(db)
     types = {t["TenLoaiHD"].lower(): t["Ma"] for t in cs.contract_types()}
-    saved = {"Hợp đồng": 0, "Hóa đơn đầu ra": 0, "Thanh toán": 0, "loi": []}
+    saved = {"Hợp đồng": 0, "Hóa đơn đầu ra": 0, "Thanh toán": 0, "loi": [], "trung": []}
+
+    def keep(r, label, fn, v, e):
+        """Giống dữ liệu đã có: không lưu, để người nhập rà soát (saved["trung"]: nhãn, lý do, hàm lưu, dữ liệu)."""
+        r.status, r.errors = "Nghi trùng", e.matches
+        saved["trung"].append((f"{label} dòng {r.line}", e.matches, fn, v))
+
+    def confirmed(r, v):
+        if r.force:                  # đã tích "Vẫn lưu" ở màn xem trước
+            v[dupl.CONFIRM_KEY] = True
+        return v
     by_no: dict[str, str] = {}
     for r in rows:
         if r.sheet != "Hợp đồng" or not r.ok:
@@ -407,8 +419,10 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
                                                   "Chủ đầu tư" if v["ChieuHopDong"] == "Đầu ra" else "Nhà cung cấp")
         v["TinhTrangHopDong"] = v["TinhTrangHopDong"] or "Chưa bắt đầu"
         try:
-            by_no[v["SoHopDong"].lower()] = cs.save_contract(v)
+            by_no[v["SoHopDong"].lower()] = cs.save_contract(confirmed(r, v))
             saved["Hợp đồng"] += 1
+        except DuplicateWarning as e:
+            keep(r, "Hợp đồng", cs.save_contract, v, e)
         except ValidationError as e:
             r.status, r.errors = "Lỗi", [str(e)]
             saved["loi"].append(f"Hợp đồng dòng {r.line}: {e}")
@@ -430,8 +444,10 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
             if not ma_hd:
                 raise ValidationError("Không tìm thấy hợp đồng")
             v["MaHopDong"] = ma_hd
-            inv_by_no[invoice_no(v["SoHoaDon"])] = cs.save_out_invoice(v)
+            inv_by_no[invoice_no(v["SoHoaDon"])] = cs.save_out_invoice(confirmed(r, v))
             saved["Hóa đơn đầu ra"] += 1
+        except DuplicateWarning as e:
+            keep(r, "Hóa đơn", cs.save_out_invoice, v, e)
         except ValidationError as e:
             r.status, r.errors = "Lỗi", [str(e)]
             saved["loi"].append(f"Hóa đơn dòng {r.line}: {e}")
@@ -453,8 +469,10 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
                     ma_inv = hit[0]["Ma"] if hit else None
                 v["MaHDDauRa"] = ma_inv
             v["HinhThuc"] = v["HinhThuc"] or "Chuyển khoản"
-            cs.save_payment(v)
+            cs.save_payment(confirmed(r, v))
             saved["Thanh toán"] += 1
+        except DuplicateWarning as e:
+            keep(r, "Thanh toán", cs.save_payment, v, e)
         except ValidationError as e:
             r.status, r.errors = "Lỗi", [str(e)]
             saved["loi"].append(f"Thanh toán dòng {r.line}: {e}")

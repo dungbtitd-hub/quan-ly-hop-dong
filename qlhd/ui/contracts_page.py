@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
 
 from ..core import excel_import
 from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, INVOICE_FILTERS, PAY_FILTERS, PAY_METHODS,
-                              PAY_STATE_LABELS, TASK_STATUSES, VALUE_FILTERS, VALUE_FLAGS, ValidationError, contract_matches, contract_pay_state,
+                              DuplicateWarning, PAY_STATE_LABELS, TASK_STATUSES, VALUE_FILTERS, VALUE_FLAGS, ValidationError, contract_matches, contract_pay_state,
                               duration_text, end_date, invoice_filter_ok, value_filter_ok)
 from ..core.reports import fmt_date, fmt_money
 from .filter_box import FilterBox
-from .widgets import (VAT_HINT, DataTable, bulk_edit, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
+from ..core.duplicates import CONFIRM_KEY as DUP_OK, duplicate_payments
+from .widgets import (VAT_HINT, DataTable, bulk_edit, confirm_duplicate, review_duplicates, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
                       page_title,
                       rate_field, require, run_safely, toolbar)
 
@@ -102,11 +103,21 @@ def partner_dialog(ctx, parent, values: dict | None = None, ma: str | None = Non
               {"key": "DienThoai", "label": "Điện thoại"}]
     dlg = FormDialog("Đối tác", fields, values, parent)
     while dlg.exec() == QDialog.Accepted:
-        try:
-            return ctx.cs.save_partner(dlg.values(), ma)
-        except ValidationError as e:
-            error(parent, str(e))
+        v = dlg.values()
+        while True:
+            try:
+                return ctx.cs.save_partner(v, ma)
+            except DuplicateWarning as e:          # cùng tên đối tác đã có: rà soát xác nhận mới thêm
+                if not confirm_duplicate(parent, e):
+                    break
+                v = dict(v, **{DUP_OK: True})
+            except ValidationError as e:
+                error(parent, str(e))
+                break
     return None
+
+
+PAY_CHOOSE = "__chon_hoa_don__"
 
 
 def payment_dialog(ctx, parent, ma_hd: str, values: dict | None = None,
@@ -115,6 +126,11 @@ def payment_dialog(ctx, parent, ma_hd: str, values: dict | None = None,
     invoices = [("(Tạm ứng – hợp đồng chưa xuất hóa đơn)" if not out else "(Tạm ứng / theo hợp đồng, chưa gắn hóa đơn)",
                  None)] + [(f"{i['KyHieuHD'] or ''} số {i['SoHoaDon']} – {fmt_money(i['GiaTriSauThue'])}", i["Ma"])
                            for i in out]
+    values = dict(values or {})
+    must_pick = bool(out) and "MaHDDauRa" not in values     # HĐ đã có hóa đơn: phải tự chọn, không mặc định tạm ứng
+    if must_pick:
+        invoices.insert(0, ("— Chọn hóa đơn được thanh toán (hoặc tạm ứng) —", PAY_CHOOSE))
+        values["MaHDDauRa"] = PAY_CHOOSE
     fields = [{"key": "NgayThanhToan", "label": "Ngày tiền về", "kind": "date"},
               {"key": "SoTien", "label": "Số tiền", "kind": "money", "required": True},
               {"key": "HinhThuc", "label": "Hình thức", "kind": "combo", "options": list(PAY_METHODS)},
@@ -122,7 +138,10 @@ def payment_dialog(ctx, parent, ma_hd: str, values: dict | None = None,
               {"key": "SoThamChieuSK", "label": "Số tham chiếu sao kê"},
               {"key": "GhiChu", "label": "Ghi chú"}]
     dlg = FormDialog(title, fields, values, parent,
-                     validate=lambda v: require(v["SoTien"] > 0, "Số tiền phải lớn hơn 0."))
+                     validate=lambda v: (require(v["SoTien"] > 0, "Số tiền phải lớn hơn 0."),
+                                         require(v.get("MaHDDauRa") != PAY_CHOOSE,
+                                                 "Chọn hóa đơn được thanh toán, hoặc chọn tạm ứng nếu tiền về trước "
+                                                 "khi xuất hóa đơn.")))
     if dlg.exec() != QDialog.Accepted:
         return None
     v = dlg.values()
@@ -319,7 +338,10 @@ class ContractsPage(QWidget):
             rows = [dict(r, SoHoaDon=r["SoHoaDonGoc"], NgayXuatHD=r["NgayNhanHD"], TinhChatHD="Đầu vào")
                     for r in self.ctx.db.active("HoaDonDauVao", "MaHopDong = ?", (ma,))]
             self.invoices.set_rows(rows)
-        self.payments.set_rows(self.ctx.cs.payments(ma))
+        dups = {r["Ma"]: r["TrungVoi"] for r in duplicate_payments(self.ctx.db) if r["MaHopDong"] == ma}
+        self.payments.set_rows([dict(p, _mau="danger", CanhBao="Nghi ghi trùng: giống một lần thanh toán đã ghi trước "
+                                     "(cùng số sao kê và số tiền, hoặc cùng ngày và số tiền). Kiểm tra và xóa lần thừa.")
+                                if p["Ma"] in dups else dict(p) for p in self.ctx.cs.payments(ma)])
 
     def add(self):
         v = contract_dialog(self.ctx, self)
@@ -613,7 +635,12 @@ class ContractsPage(QWidget):
                    f"{res['Thanh toán']} lần thanh toán.")
             if res["loi"]:
                 msg += "\n\nKhông lưu được:\n" + "\n".join(res["loi"][:20])
+            if res["trung"]:
+                msg += f"\n\n{len(res['trung'])} dòng giống dữ liệu đã có chưa được lưu, mời rà soát ở bước sau."
             info(self, msg)
+            n = review_duplicates(self, res["trung"])
+            if n:
+                info(self, f"Đã lưu thêm {n} dòng sau khi rà soát.")
             self.refresh()
 
 

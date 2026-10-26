@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import crypto
+from . import duplicates as dupl
 from .db import SYNC_COLS, Database, Store, new_id, now_iso
 
 FILE_MAGIC = b"QLHDTC1\n"
@@ -114,6 +115,10 @@ DEFAULT_CATEGORIES = {
 
 class FinanceError(Exception):
     pass
+
+
+class FinanceDuplicate(FinanceError, dupl.DuplicateWarning):
+    """Phiếu thu chi giống phiếu đã có: chưa thêm, chờ người nhập rà soát xác nhận."""
 
 
 class FinanceDB(Store):
@@ -471,6 +476,10 @@ class FinanceStore:
 
     def add_voucher(self, values: dict) -> str:
         v = self._validate(values)
+        if not v.pop(dupl.CONFIRM_KEY, False):
+            found = dupl.vouchers(self.fdb, v)
+            if found:
+                raise FinanceDuplicate("Phiếu " + v["LoaiThuChi"].lower(), found)
         v.setdefault("SoPhieu", None)
         if not v["SoPhieu"]:
             v["SoPhieu"] = self.next_voucher_no(v["LoaiThuChi"], v["NgayPhatSinh"])
@@ -485,6 +494,7 @@ class FinanceStore:
         current.update(values)
         v = self._validate(current)
         v["NguoiSua"] = self.username
+        v.pop(dupl.CONFIRM_KEY, None)
         self.fdb.update("PhieuThuChi", ma, v)
         self.save()
 

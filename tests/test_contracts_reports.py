@@ -214,7 +214,11 @@ def test_contract_value_mismatch_flag_and_fix(company):
     from qlhd.core.contracts import value_filter_ok
     d = sample_data(company["kt"].db)
     cs, hd = d["cs"], d["hd"]
-    # một hóa đơn chưa ghi đợt = thanh toán toàn bộ: 55 triệu lệch giá trị HĐ 110 triệu
+    # một hóa đơn chưa ghi đợt, HĐ đang thực hiện: có thể còn đợt sau, chỉ tô màu, không cảnh báo
+    assert cs.summary(hd)["LechGiaTri"] == "chua_ro_dot"
+    assert al.collect(cs.db, "2026-05-01", ["hd_lech_gia_tri"]) == []
+    # hợp đồng đã hoàn thành: một hóa đơn chưa ghi đợt = thanh toán toàn bộ, 55 triệu lệch giá trị HĐ 110 triệu
+    cs.db.update("HopDong", hd, {"TinhTrangHopDong": "Hoàn thành"})
     assert cs.summary(hd)["LechGiaTri"] == "toan_bo"
     assert value_filter_ok("toan_bo", "lech") and not value_filter_ok("toan_bo", "khop")
     assert [a.loai for a in al.collect(cs.db, "2026-05-01", ["hd_lech_gia_tri"])] == ["hd_lech_gia_tri"]
@@ -243,7 +247,7 @@ def test_new_alert_type_is_on_for_old_saved_choices(company):
     db = company["kt"].db
     db.set_setting("thong_bao_loai:kt", '["hd_het_han"]')       # lựa chọn lưu ở bản cũ
     st = al.AlertSettings(db)
-    assert st.app_types("kt") == ["hd_het_han", "hd_lech_gia_tri"]
+    assert st.app_types("kt") == ["hd_het_han", "hd_cap_nhat_tt", "hd_lech_gia_tri", "thu_thua", "tt_trung"]
     st.set_app_types("kt", ["hd_het_han"])                       # bỏ chọn ở bản mới thì giữ nguyên
     assert st.app_types("kt") == ["hd_het_han"]
 
@@ -262,3 +266,106 @@ def test_report_payment_filter_skips_contracts_without_invoices(company):
     assert "05/2026/MB" not in nos(tt_thanh_toan="Chưa thu")        # hợp đồng đầu vào không có tiền thu về
     assert nos(tt_thanh_toan="Thu một phần") == {"01/2026/HĐTV"}
     assert "09/2026" in nos(tt_xuat_hd="Chưa xuất", tt_thanh_toan="Đã thu đủ")   # chưa xuất: bỏ qua lọc thu
+
+
+def test_duplicate_payment_needs_review_and_overpay_warns(company):
+    from qlhd.core import duplicates as dupl
+    from qlhd.core.alerts import collect
+    from qlhd.core.contracts import DuplicateWarning
+    d = sample_data(company["kt"].db)
+    cs = d["cs"]
+    p = {"MaHopDong": d["hd"], "MaHDDauRa": d["inv"], "NgayThanhToan": "2026-03-10", "SoTien": 30_000_000,
+         "HinhThuc": "Chuyển khoản", "SoThamChieuSK": "FT123"}
+    with pytest.raises(DuplicateWarning) as e:       # giống hệt lần đã ghi: không tự thêm
+        cs.save_payment(dict(p))
+    assert any("cùng số tham chiếu" in m for m in e.value.matches)
+    assert any("Thu thừa" in m for m in e.value.matches)   # 30 + 30 > hóa đơn 55 triệu
+    n = len(cs.payments(d["hd"]))
+    cs.save_payment(dict(p, **{dupl.CONFIRM_KEY: True}))     # nhân viên rà soát xác nhận mới thêm
+    assert len(cs.payments(d["hd"])) == n + 1
+    assert [r["SoTien"] for r in dupl.duplicate_payments(cs.db)] == [30_000_000]
+    kinds = {a.loai for a in collect(cs.db, "2026-05-01", ["tt_trung", "thu_thua"])}
+    assert kinds == {"tt_trung", "thu_thua"}
+    # lần thu khác (khác ngày, khác sao kê, không vượt) vẫn thêm bình thường
+    cs.save_payment(dict(p, NgayThanhToan="2026-04-20", SoThamChieuSK="FT999", SoTien=1_000_000,
+                         MaHDDauRa=None))
+
+
+def test_duplicate_checks_other_data(company):
+    from qlhd.core.contracts import DuplicateWarning
+    d = sample_data(company["kt"].db)
+    cs = d["cs"]
+    cs.save_task({"MaHopDong": d["hd"], "TenNoiDungCV": "Khảo sát"})
+    with pytest.raises(DuplicateWarning):
+        cs.save_task({"MaHopDong": d["hd"], "TenNoiDungCV": "khảo  sát"})
+    with pytest.raises(DuplicateWarning):
+        cs.save_partner({"TenDoiTac": "ban qlda  hà nội", "VaiTroDoiTac": "Chủ đầu tư"})
+    with pytest.raises(DuplicateWarning):             # cùng số, cùng tiền nhưng khác ký hiệu
+        cs.save_out_invoice({"KyHieuHD": "C26TBB", "SoHoaDon": "0012", "MaHopDong": d["hd"],
+                             "NgayXuatHD": "2026-03-05", "GiaTriTruocThue": 50_000_000, "VAT": 5_000_000})
+    with pytest.raises(DuplicateWarning):
+        cs.save_contract({"ThoiGianThucHien": 6, "SoHopDong": "02/2026/HĐTV", "TenHopDong": "Thiết kế trường học",
+                          "ChieuHopDong": "Đầu ra", "MaDoiTac": d["cdt"], "NgayKy": "2026-02-01"})
+    with pytest.raises(DuplicateWarning):
+        cs.save_in_invoice({"KyHieuHD": "K26X", "SoHoaDonGoc": "88", "TenNhaCungCap": "Công ty Vật tư X",
+                            "MaThueNCC": "0200000002", "NgayNhanHD": "2026-02-11", "GiaTriTruocThue": 1})
+    # sửa bản ghi đã có không bị hỏi
+    t = cs.tasks(d["hd"])[0]
+    cs.save_task(dict(t, GhiChuCV="sửa"), t["Ma"])
+
+
+def test_data_export_every_dataset_and_columns(company, tmp_path):
+    from qlhd.core import data_export as dx
+    db = company["kt"].db
+    sample_data(db)
+    for ds in dx.DATASETS:
+        if ds.finance:
+            continue
+        rep = dx.build(db, ds.key)
+        assert [c[0] for c in rep.columns] == [c[0] for c in ds.columns]
+        export_xlsx(rep, tmp_path / f"{ds.key}.xlsx")
+    pay = dx.build(db, "thanh_toan", ["NgayThanhToan", "SoTien", "SoThamChieuSK"], None, "2026-12-31")
+    assert [c[0] for c in pay.columns] == ["NgayThanhToan", "SoTien", "SoThamChieuSK"]
+    assert pay.total["SoTien"] == 35_000_000
+    assert len(dx.build(db, "thanh_toan", None, "2026-04-01", None).rows) == 1
+    with pytest.raises(ValueError):
+        dx.build(db, "thanh_toan", ["KhongCo"])          # không có cột nào hợp lệ
+    with pytest.raises(ValueError):
+        dx.build(db, "thu_chi")                           # thu chi cần mở khóa
+    hd = dx.build(db, "hop_dong", ["SoHopDong", "DaThanhToan"])
+    assert {r["SoHopDong"]: r["DaThanhToan"] for r in hd.rows}["01/2026/HĐTV"] == 35_000_000
+    rep = dx.select_columns(ContractReports(db).build("da_thanh_toan", ReportFilters(tach_nam=False)), {"SoTien"})
+    assert [c[0] for c in rep[0].columns] == ["SoHopDong", "SoTien"]
+
+
+def test_relative_period_until_today():
+    from datetime import date
+    from qlhd.core.reports import relative_range
+    assert relative_range("den_nay", date(2026, 10, 26)) == ("", "2026-10-26")
+    f = ReportFilters(ky_tuong_doi="den_nay").resolved(date(2026, 10, 26))
+    assert f.tu is None and f.den == "2026-10-26"
+
+
+def test_fully_invoiced_contract_asks_status_update_not_expiry(company):
+    from qlhd.core import alerts as al
+    d = sample_data(company["kt"].db)
+    cs, hd = d["cs"], d["hd"]
+    cs.db.update("HopDong", hd, {"NgayKetThucDuKien": "2026-04-01"})          # đã quá hạn
+    mine = lambda: [a.loai for a in al.collect(cs.db, "2026-05-01", ["hd_het_han", "hd_cap_nhat_tt"])  # noqa: E731
+                    if a.ma_hd == hd]
+    assert mine() == ["hd_het_han"]
+    cs.save_out_invoice({"KyHieuHD": "C26TAA", "SoHoaDon": "20", "MaHopDong": hd, "NgayXuatHD": "2026-04-20",
+                         "GiaTriTruocThue": 50_000_000, "VAT": 5_000_000, "DotThanhToan": "Lần cuối"})
+    assert mine() == ["hd_cap_nhat_tt"]                                        # xuất đủ: nhắc cập nhật tình trạng
+    cs.db.update("HopDong", hd, {"TinhTrangHopDong": "Hoàn thành"})
+    assert mine() == []
+
+
+def test_duplicate_payment_is_not_counted_as_advance(company):
+    from qlhd.core import duplicates as dupl
+    d = sample_data(company["kt"].db)
+    cs, hd = d["cs"], d["hd"]
+    before = cs.summary(hd)["TamUngConLai"]
+    cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-03-10", "SoTien": 30_000_000, "SoThamChieuSK": "FT123",
+                     dupl.CONFIRM_KEY: True})                                    # ghi lại lần đã có, không gắn hóa đơn
+    assert cs.summary(hd)["TamUngConLai"] == before

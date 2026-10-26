@@ -10,7 +10,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFi
 
 from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
 from ..core.assets import AssetService
-from ..core.contracts import (INSTALLMENTS, INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
+from ..core.duplicates import CONFIRM_KEY as DUP_OK
+from ..core.contracts import (DuplicateWarning, INSTALLMENTS, INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
                               rate_from_amounts)
 from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
@@ -20,7 +21,7 @@ from .in_invoice_form import InInvoiceDialog
 from .filter_box import FilterBox
 from .widgets import (VAT_HINT, Combo, DataTable, bulk_edit, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
                       error, hint, info, rate_field, require,
-                      page_title, run_safely, toolbar)
+                      page_title, run_safely, toolbar, confirm_duplicate, review_duplicates)
 
 
 CHOOSE = "__chon_hop_dong__"
@@ -410,8 +411,14 @@ class InvoicesPage(QWidget):
         while dlg.exec() == QDialog.Accepted:
             v = dlg.values()
             v.pop("_LoaiHD", None)
+            data = dict(v, _Dong=values.get("_Dong")) if self.kind == "vao" else v
             try:
-                saved = fn(dict(v, _Dong=values.get("_Dong")) if self.kind == "vao" else v, ma)
+                try:
+                    saved = fn(dict(data), ma)
+                except DuplicateWarning as e:     # giống hóa đơn đã có: rà soát xác nhận mới thêm
+                    if not confirm_duplicate(parent or self, e):
+                        continue
+                    saved = fn(dict(data, **{DUP_OK: True}), ma)
             except ValidationError as e:
                 error(parent or self, str(e))
                 continue
@@ -916,14 +923,17 @@ class BatchInvoiceDialog(QDialog):
             return error(self, "Chưa chọn hợp đồng cho các hóa đơn:\n" + "\n".join(missing[:15]) +
                          "\n\nChọn đúng hợp đồng ở cột Hợp đồng (dòng tô vàng), hoặc bỏ tích dòng đó.")
         fn = self.ctx.cs.save_out_invoice if self.kind == "ra" else self.ctx.cs.save_in_invoice
-        saved, errors = 0, []
+        saved, errors, dups = 0, [], []
         for i in rows:
             try:
                 fn(self._collect(i))
                 saved += 1
                 self.items[i]["status"] = "da_co"
+            except DuplicateWarning as e:       # không tự thêm: gom lại để rà soát sau
+                dups.append((self.items[i]["file"], e.matches, fn, self._collect(i)))
             except ValidationError as e:
                 errors.append(f"{self.items[i]['file']}: {e}")
+        saved += review_duplicates(self, dups)
         self.ctx.db.log(self.ctx.user["TenDangNhap"] if self.ctx.user else None,
                         "Nhập nhiều hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào"),
                         f"{saved} hóa đơn" + (f" từ {self.source}" if self.source else ""))
