@@ -1130,6 +1130,9 @@ def test_duplicate_dialog_and_data_export_dialog(qtbot, ctx, monkeypatch):
     de.kind.set_value("thanh_toan")
     assert de.ky.value() == "den_nay" and not de.tu.isEnabled() and de.den.value()
     assert "SoThamChieuSK" in de.cols.values()
+    assert de.preview.columnCount() == len(de.cols.values())                    # xem trước theo cột đang chọn
+    de.cols.set_all(False)
+    assert de.preview.columnCount() == 0
     assert "thu_chi" not in [x.key for x in de.sets]                            # thu chi khóa: không xuất
     assert dupl.CONFIRM_KEY not in dict(ctx.db.get("ThanhToanHopDong", ctx.cs.payments(d["hd"])[-1]["Ma"]))
 
@@ -1174,7 +1177,16 @@ def test_dup_review_page_and_extra_fields_dialog(qtbot, ctx, monkeypatch):
     qtbot.addWidget(cd)
     assert cd.extra_values() == ["x_tt_ngay"] and cd.tach_tt()
     cd.search.setText("tham chieu")
-    assert any(not cd.extra.item(i).isHidden() for i in range(cd.extra.count()))
+    assert "x_tt_ref" in cd.extra.visible() and "x_tt_ngay" not in cd.extra.visible()
+    from qlhd.ui.reports_page import report_preview
+    pv = ColumnsDialog([("Ký hiệu", "KyHieuHD"), ("Số hóa đơn", "SoHoaDon")], None, extras=rf.available(reps),
+                       extra_checked=["x_tt_ref"], preview=report_preview(ctx, reps))
+    qtbot.addWidget(pv)
+    heads = [pv.preview.horizontalHeaderItem(j).text() for j in range(pv.preview.columnCount())]
+    assert "Số tham chiếu sao kê" in heads and pv.preview.rowCount() >= 1        # xem trước có cột vừa thêm
+    pv.extra.set_values(["x_tt_ngay"])
+    heads = [pv.preview.horizontalHeaderItem(j).text() for j in range(pv.preview.columnCount())]
+    assert "Ngày thanh toán" in heads and "Số tham chiếu sao kê" not in heads
     out = apply_choice(ctx, reps, {"cot": ["SoHoaDon"], "them": ["x_tt_ngay", "x_tt_ref"], "tach_tt": False})
     assert [c[0] for c in out[0].columns] == ["KyHieuHD", "SoHoaDon", "x_tt_ngay", "x_tt_ref"]
 
@@ -1197,3 +1209,32 @@ def test_invoice_form_multi_rate_fills_totals(qtbot, ctx):
     rd.table.cellWidget(0, 1).set_value(200_000)
     rd._auto(rd.table.cellWidget(0, 0), rd.table.cellWidget(0, 1), rd.table.cellWidget(0, 2))
     assert rd.lines()[0] == {"ThueSuat": "10%", "TruocThue": 200_000, "VAT": 20_000}
+
+
+def test_every_page_filter_option_is_selectable_without_hang(qtbot, ctx, monkeypatch):
+    """Chọn từng giá trị của mọi ô lọc trên mọi trang: không được lặp vô hạn
+    (lỗi cũ: lọc theo loại hợp đồng / đối tác / người bán làm treo phần mềm)."""
+    import sys
+    from PySide6.QtWidgets import QComboBox, QDialog, QMessageBox
+    from qlhd.ui.main_window import MainWindow
+
+    monkeypatch.setattr(QDialog, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    ctx.cs.save_contract_type("Loại chưa có hợp đồng")
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *a: errors.append(a[1]))
+    win = MainWindow(ctx)
+    qtbot.addWidget(win)
+    for page in win.pages:
+        if hasattr(page, "refresh"):
+            page.refresh()
+        for combo in page.findChildren(QComboBox):
+            if combo.isEditable() or not combo.isEnabled():
+                continue
+            for i in range(min(combo.count(), 6)):
+                combo.setCurrentIndex(i)
+                assert not errors, (type(page).__name__, combo.itemText(i), errors[0])
+            combo.setCurrentIndex(0)
+    page = win.contracts_page
+    page.box.combo("loai").setCurrentIndex(1)
+    assert page.box.value("loai") is not None

@@ -172,6 +172,8 @@ QTabBar::tab:selected { color: $accent; border-bottom-color: $accent; font-weigh
 QTabBar::tab:hover:!selected { color: $text; }
 QGroupBox { background: $card; border: 1px solid $border; border-radius: 10px; margin-top: 14px; padding: 12px 10px 10px; }
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; font-weight: 700; }
+QGroupBox#Soft { background: $accent_soft; border: none; margin-top: 4px; padding: 6px 8px; }
+QWidget#CheckGrid { background: transparent; }
 QSplitter::handle { background: transparent; }
 QProgressBar { background: $border; border: none; border-radius: 4px; height: 8px; text-align: center; }
 QProgressBar::chunk { background: $success; border-radius: 4px; }

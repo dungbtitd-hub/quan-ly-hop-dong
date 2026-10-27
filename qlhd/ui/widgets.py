@@ -244,12 +244,15 @@ class Combo(QComboBox):
         self.set_options(options, value)
 
     def set_options(self, options, value=None) -> None:
-        self.blockSignals(True)
+        # Giữ nguyên trạng thái chặn tín hiệu của nơi gọi: nếu nơi gọi đã chặn
+        # (VD FilterBox.set_options trong refresh) thì không được mở chặn ở đây,
+        # nếu không set_value sẽ phát tín hiệu -> refresh lại -> lặp vô hạn.
+        was_blocked = self.blockSignals(True)
         self.clear()
         for opt in options:
             label, data = opt if isinstance(opt, tuple) else (opt, opt)
             self.addItem(label, data)
-        self.blockSignals(False)
+        self.blockSignals(was_blocked)
         if value is not None:
             self.set_value(value)
 
