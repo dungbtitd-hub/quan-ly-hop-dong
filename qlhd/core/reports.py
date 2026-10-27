@@ -140,6 +140,26 @@ def _with(f: "ReportFilters", **kw) -> "ReportFilters":
     return ReportFilters(**{**f.__dict__, **kw})
 
 
+def split_by_rate(row: dict, inv) -> list[dict]:
+    """Hóa đơn nhiều mức thuế: tách mỗi mức thuế một dòng (như bảng kê thuế). Phí ngoài VAT, đã thu, còn phải thu
+    nằm ở dòng đầu để cộng vẫn đúng tổng hóa đơn. Hóa đơn một mức thuế: giữ nguyên một dòng."""
+    from .vat import load_breakdown
+    lines = load_breakdown(inv["ChiTietThueSuat"] if "ChiTietThueSuat" in inv.keys() else None)
+    if len(lines) < 2:
+        return [row]
+    out = []
+    extra = row["GiaTriSauThue"] - row["GiaTriTruocThue"] - row["VAT"]        # phí ngoài VAT
+    for n, x in enumerate(lines):
+        part = dict(row, ThueSuat=x["ThueSuat"], GiaTriTruocThue=x["TruocThue"], VAT=x["VAT"],
+                    GiaTriSauThue=x["TruocThue"] + x["VAT"] + (extra if n == 0 else 0))
+        if n:
+            for k in ("DaThu", "ConPhaiThu"):
+                if k in part:
+                    part[k] = 0
+        out.append(part)
+    return out
+
+
 def sheet_name(text: str) -> str:
     """Tên sheet Excel hợp lệ: bỏ ký tự cấm, tối đa 31 ký tự."""
     for ch in '[]:*?/\\':
@@ -495,13 +515,15 @@ class ContractReports:
                 continue
             name = inv["TenNguoiMua"] or c["TenDoiTac"]
             mst = inv["MSTNguoiMua"] or (c["MaThueDoiTac"] if not inv["TenNguoiMua"] else "") or ""
-            rows.append({"KyHieuHD": inv["KyHieuHD"] or "", "SoHoaDon": inv["SoHoaDon"],
-                         "NgayXuatHD": inv["NgayXuatHD"], "SoHopDong": c["SoHopDong"], "TenNguoiMua": name,
-                         "MSTNguoiMua": mst, "MatHang": inv["MatHang"] or "", "ThueSuat": inv["ThueSuat"] or "",
-                         "GiaTriTruocThue": inv["GiaTriTruocThue"], "VAT": inv["VAT"],
-                         "GiaTriSauThue": inv["GiaTriSauThue"], "DaThu": paid,
-                         "ConPhaiThu": inv["GiaTriSauThue"] - paid, "TinhTrang": status,
-                         "_nguoi_mua": buyer_key(name, mst), "_hd": c["Ma"], "_hdr": inv["Ma"]})
+            row = {"KyHieuHD": inv["KyHieuHD"] or "", "SoHoaDon": inv["SoHoaDon"],
+                   "NgayXuatHD": inv["NgayXuatHD"], "SoHopDong": c["SoHopDong"], "TenNguoiMua": name,
+                   "MSTNguoiMua": mst, "MatHang": inv["MatHang"] or "", "ThueSuat": inv["ThueSuat"] or "",
+                   "GiaTriTruocThue": inv["GiaTriTruocThue"], "VAT": inv["VAT"],
+                   "GiaTriSauThue": inv["GiaTriSauThue"], "DaThu": paid,
+                   "ConPhaiThu": inv["GiaTriSauThue"] - paid, "TinhTrang": status,
+                   "_nguoi_mua": buyer_key(name, mst), "_hd": c["Ma"], "_hdr": inv["Ma"]}
+            rows += split_by_rate(row, inv)
+
         rows.sort(key=lambda r: (r["NgayXuatHD"], r["SoHoaDon"]))
         return rows
 
@@ -652,15 +674,19 @@ class ContractReports:
         rows = []
         for i in self._in_invoices(f):
             nhom = i["NhomThue"] or guess_tax_group(i["VAT"])
-            if f.nhom_thue in TAX_GROUPS and nhom != f.nhom_thue:
-                continue
-            rows.append({"SoHoaDonGoc": i["SoHoaDonGoc"], "NgayNhanHD": i["NgayNhanHD"],
-                         "TenNhaCungCap": i["TenNhaCungCap"], "MaThueNCC": i["MaThueNCC"], "MatHang": i["MatHang"] or "",
-                         "GiaTriTruocThue": i["GiaTriTruocThue"], "ThueSuat": i["ThueSuat"] or "", "VAT": i["VAT"],
-                         "GiaTriSauThue": i["GiaTriSauThue"], "KyHieuHD": i["KyHieuHD"] or "",
-                         "NguoiMuaHang": i["NguoiMuaHang"] or "", "SoThamChieuSK": i["SoThamChieuSK"] or "",
-                         "SoHopDong": contracts.get(i["MaHopDong"], "") if i["MaHopDong"] else "(Mua trực tiếp)",
-                         "_nhom": nhom, "_hdv": i["Ma"], "_hd": i["MaHopDong"]})
+            row = {"SoHoaDonGoc": i["SoHoaDonGoc"], "NgayNhanHD": i["NgayNhanHD"],
+                   "TenNhaCungCap": i["TenNhaCungCap"], "MaThueNCC": i["MaThueNCC"], "MatHang": i["MatHang"] or "",
+                   "GiaTriTruocThue": i["GiaTriTruocThue"], "ThueSuat": i["ThueSuat"] or "", "VAT": i["VAT"],
+                   "GiaTriSauThue": i["GiaTriSauThue"], "KyHieuHD": i["KyHieuHD"] or "",
+                   "NguoiMuaHang": i["NguoiMuaHang"] or "", "SoThamChieuSK": i["SoThamChieuSK"] or "",
+                   "SoHopDong": contracts.get(i["MaHopDong"], "") if i["MaHopDong"] else "(Mua trực tiếp)",
+                   "_nhom": nhom, "_hdv": i["Ma"], "_hd": i["MaHopDong"]}
+            for part in split_by_rate(row, i):       # nhiều mức thuế: mỗi mức một dòng, xếp nhóm theo mức đó
+                if part is not row and i["NhomThue"] != "Không chịu thuế":
+                    part["_nhom"] = guess_tax_group(part["VAT"])
+                if f.nhom_thue in TAX_GROUPS and part["_nhom"] != f.nhom_thue:
+                    continue
+                rows.append(part)
         rows.sort(key=lambda r: (r["NgayNhanHD"], r["SoHoaDonGoc"]))
         return rows
 

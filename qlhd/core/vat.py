@@ -25,13 +25,23 @@ def _fold(s) -> str:
 
 
 def parse_rate(v) -> str:
-    """Chuẩn hóa thuế suất: 0.1 / 10 / "10" / "10 %" → "10%"; "kct" → "KCT"; trống → ""."""
+    """Chuẩn hóa thuế suất: 0.1 / 10 / "10" / "10 %" → "10%"; "kct" → "KCT"; trống → "".
+    Hóa đơn nhiều mức thuế: "10%; 8%" (mỗi mức chuẩn hóa, bỏ trùng, cách nhau "; ")."""
+    if isinstance(v, str) and ";" in v:
+        parts = list(dict.fromkeys(p for p in (_parse_one(x) for x in v.split(";")) if p))
+        return "; ".join(parts)
+    return _parse_one(v)
+
+
+def _parse_one(v) -> str:
     if v in (None, ""):
         return ""
     if isinstance(v, (int, float)):
         n = v * 100 if 0 < abs(v) < 1 else v
         return f"{round(n, 4):g}%"
     s = _fold(v).replace(" ", "").upper()
+    if not s:
+        return ""
     if s in NO_TAX:
         return s
     m = re.fullmatch(r"(\d+(?:[.,]\d+)?)%?", s)
@@ -43,9 +53,47 @@ def parse_rate(v) -> str:
     return f"{round(n, 4):g}%"
 
 
+def is_multi(rate) -> bool:
+    """Hóa đơn có nhiều mức thuế (VD "10%; 8%")."""
+    return isinstance(rate, str) and ";" in rate
+
+
+def load_breakdown(raw) -> list[dict]:
+    """Chi tiết theo từng mức thuế: [{"ThueSuat", "TruocThue", "VAT"}] từ JSON đã lưu (hoặc danh sách).
+    Dòng thiếu tiền thuế thì tính theo thuế suất."""
+    import json
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return []
+    out = []
+    for x in raw or []:
+        rate = _parse_one(x.get("ThueSuat"))
+        before = int(x.get("TruocThue") or 0)
+        tax = x.get("VAT")
+        if tax in (None, ""):
+            r = rate_value(rate)
+            tax = _round(before * r / 100) if r is not None else 0
+        if rate or before or int(tax or 0):
+            out.append({"ThueSuat": rate, "TruocThue": before, "VAT": int(tax or 0)})
+    return out
+
+
+def dump_breakdown(lines: list[dict]) -> str | None:
+    import json
+    return json.dumps(lines, ensure_ascii=False) if len(lines) > 1 else None
+
+
+def breakdown_rate(lines: list[dict]) -> str:
+    return "; ".join(dict.fromkeys(x["ThueSuat"] for x in lines if x["ThueSuat"]))
+
+
 def rate_value(rate: str) -> Fraction | None:
-    """"10%" → 10; "KCT" → 0; "" → None."""
-    if not rate:
+    """"10%" → 10; "KCT" → 0; "" hoặc nhiều mức → None."""
+    if not rate or is_multi(rate):
         return None
     if rate in NO_TAX:
         return Fraction(0)
@@ -131,6 +179,10 @@ def _complete(before: int | None, vat: int | None, after: int | None, rate: str 
             res.error = "Chỉ có tiền VAT, thiếu giá trị trước thuế hoặc sau thuế."
         res.vat = vat or 0
         return res
+    if is_multi(rate) and vat is None and (before is None or after is None):
+        res.error = (f"Hóa đơn nhiều mức thuế ({rate}): nhập tiền VAT, hoặc bấm \"Nhiều mức thuế\" để nhập tiền hàng "
+                     "và VAT theo từng mức.")
+        return res
     if before is not None and after is not None and vat is not None:
         if before + vat != after:
             res.error = (f"Trước thuế {_money(before)} + VAT {_money(vat)} = {_money(before + vat)}, "
@@ -184,8 +236,24 @@ def fill(v: dict, after_key: str = "GiaTriSauThue", strict: bool = True) -> VatR
 
     rate = parse_rate(v.get("ThueSuat"))
     fee_rate = parse_rate(v.get("TyLePhiKhac"))
-    res = complete(amount("GiaTriTruocThue"), amount("VAT"), amount(after_key), rate,
-                   amount("PhiKhac") if "PhiKhac" in v else None, fee_rate)
+    lines = load_breakdown(v.get("ChiTietThueSuat"))
+    if len(lines) > 1:                 # nhiều mức thuế: tổng tiền hàng, tổng VAT lấy theo từng mức
+        b, t = sum(x["TruocThue"] for x in lines), sum(x["VAT"] for x in lines)
+        for key, label, total in (("GiaTriTruocThue", "tiền hàng", b), ("VAT", "tiền VAT", t)):
+            given = amount(key)
+            if strict and given is not None and abs(given - total) > len(lines):
+                raise ValueError(f"Tổng {label} theo từng mức thuế ({_money(total)}) khác ô "
+                                 f"{'Trước thuế' if key == 'GiaTriTruocThue' else 'VAT'} ({_money(given)}).")
+        rate = breakdown_rate(lines)
+        res = complete(amount("GiaTriTruocThue") or b, amount("VAT") or t, amount(after_key), rate,
+                       amount("PhiKhac") if "PhiKhac" in v else None, fee_rate)
+    else:
+        if lines and not rate:
+            rate = lines[0]["ThueSuat"]
+        res = complete(amount("GiaTriTruocThue"), amount("VAT"), amount(after_key), rate,
+                       amount("PhiKhac") if "PhiKhac" in v else None, fee_rate)
+    if "ChiTietThueSuat" in v:
+        v["ChiTietThueSuat"] = dump_breakdown(lines)
     if res.error and strict:
         raise ValueError(res.error)
     v["GiaTriTruocThue"], v["VAT"], v[after_key] = res.before, res.vat, res.after

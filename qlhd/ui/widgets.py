@@ -512,6 +512,8 @@ class FormDialog(QDialog):
             return Combo(f.get("options", []), v)
         if kind == "combo_edit":
             return EditCombo(f.get("options", []), v)
+        if kind == "rates":
+            return RatesEdit(v)
         if kind == "multiline":
             w = QPlainTextEdit(v or "")
             w.setFixedHeight(70)
@@ -588,6 +590,22 @@ class FormDialog(QDialog):
 
         for key in ("GiaTriTruocThue", "VAT", after) + (("PhiKhac",) if has_fee else ()):
             w[key].textEdited.connect(lambda _t, k=key: update(k))
+        if isinstance(w.get("ChiTietThueSuat"), RatesEdit):
+            def from_rates():                # nhập chi tiết nhiều mức thuế: điền thuế suất, tổng tiền hàng, VAT
+                lines = w["ChiTietThueSuat"].lines()
+                if len(lines) < 2:
+                    return
+                from ..core.vat import breakdown_rate
+                if "ThueSuat" in w:
+                    w["ThueSuat"].blockSignals(True)
+                    w["ThueSuat"].set_value(breakdown_rate(lines))
+                    w["ThueSuat"].blockSignals(False)
+                b, t = sum(x["TruocThue"] for x in lines), sum(x["VAT"] for x in lines)
+                fee = self.values().get("PhiKhac") or 0 if has_fee else 0
+                w["GiaTriTruocThue"].set_value(b)
+                w["VAT"].set_value(t)
+                w[after].set_value(b + t + fee)
+            w["ChiTietThueSuat"].changed.connect(from_rates)
         for key in ("ThueSuat", "TyLePhiKhac"):
             if key in w:
                 box = w[key]
@@ -635,8 +653,140 @@ class FormDialog(QDialog):
         return {key: widget_text(w) for key, w in self.widgets.items()}
 
 
+class RatesDialog(QDialog):
+    """Hóa đơn nhiều mức thuế: mỗi dòng một mức thuế suất với tiền hàng (trước thuế) và tiền VAT."""
+
+    RATES = ["10%", "8%", "5%", "0%", "KCT", "KKKNT"]
+
+    def __init__(self, lines: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nhiều mức thuế trên một hóa đơn")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint("Mỗi dòng một mức thuế: tiền hàng chưa thuế và tiền VAT của các mặt hàng chịu mức đó "
+                           "(xem bảng tổng hợp theo thuế suất trên hóa đơn). Gõ tiền hàng, VAT tự tính, sửa được."))
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Thuế suất", "Tiền hàng (trước thuế)", "Tiền VAT"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        lay.addWidget(self.table, 1)
+        self.total = QLabel()
+        lay.addWidget(self.total)
+        lay.addLayout(toolbar(button("Thêm mức thuế", lambda: self.add_line()),
+                              button("Xóa dòng đang chọn", self.remove_line), "stretch"))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Đồng ý")
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        for x in lines or [{"ThueSuat": "10%"}, {"ThueSuat": "8%"}]:
+            self.add_line(x)
+        self._sum()
+
+    def add_line(self, x: dict | None = None):
+        x = x or {}
+        i = self.table.rowCount()
+        self.table.insertRow(i)
+        rate = EditCombo(self.RATES, x.get("ThueSuat") or "")
+        before, tax = MoneyEdit(x.get("TruocThue") or 0), MoneyEdit(x.get("VAT") or 0)
+        self.table.setCellWidget(i, 0, rate)
+        self.table.setCellWidget(i, 1, before)
+        self.table.setCellWidget(i, 2, tax)
+        rate.currentTextChanged.connect(lambda _t: self._auto(rate, before, tax))
+        before.textEdited.connect(lambda _t: self._auto(rate, before, tax))
+        tax.textEdited.connect(lambda _t: self._sum())
+
+    def _auto(self, rate, before, tax):
+        from ..core.vat import _round, parse_rate, rate_value
+        try:
+            r = rate_value(parse_rate(rate.value()))
+        except ValueError:
+            r = None
+        if r is not None and not isinstance(r, str):
+            tax.set_value(_round(before.value() * r / 100))
+        self._sum()
+
+    def remove_line(self):
+        i = self.table.currentRow()
+        if i >= 0:
+            self.table.removeRow(i)
+            self._sum()
+
+    def lines(self) -> list[dict]:
+        out = []
+        for i in range(self.table.rowCount()):
+            rate = self.table.cellWidget(i, 0).value()
+            before, tax = self.table.cellWidget(i, 1).value(), self.table.cellWidget(i, 2).value()
+            if rate or before or tax:
+                out.append({"ThueSuat": rate, "TruocThue": before, "VAT": tax})
+        return out
+
+    def _sum(self):
+        ls = self.lines()
+        self.total.setText(f"Cộng: tiền hàng {fmt_money(sum(x['TruocThue'] for x in ls))} · VAT "
+                           f"{fmt_money(sum(x['VAT'] for x in ls))} · {len(ls)} mức thuế")
+
+    def _ok(self):
+        from ..core.vat import parse_rate
+        ls = self.lines()
+        try:
+            rates = [parse_rate(x["ThueSuat"]) for x in ls]
+        except ValueError as e:
+            return error(self, str(e))
+        if any(not r for r in rates):
+            return error(self, "Chọn thuế suất cho mọi dòng.")
+        if len(set(rates)) != len(rates):
+            return error(self, "Mỗi mức thuế chỉ một dòng: cộng các mặt hàng cùng mức vào một dòng.")
+        self.accept()
+
+
+class RatesEdit(QWidget):
+    """Ô "Nhiều mức thuế" của biểu mẫu hóa đơn: giữ chi tiết từng mức (JSON), bấm nút để nhập / sửa."""
+
+    changed = Signal()
+
+    def __init__(self, value=None, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.label = QLabel()
+        self.label.setWordWrap(True)
+        lay.addWidget(self.label, 1)
+        lay.addWidget(button("Nhập / sửa…", self.edit))
+        self.clear_btn = button("Bỏ", lambda: self.set_value(None, True))
+        lay.addWidget(self.clear_btn)
+        self.set_value(value)
+
+    def edit(self):
+        from ..core.vat import load_breakdown
+        dlg = RatesDialog(load_breakdown(self._value), self)
+        if dlg.exec() == QDialog.Accepted:
+            self.set_value(dlg.lines(), True)
+
+    def set_value(self, v, emit: bool = False) -> None:
+        from ..core.vat import dump_breakdown, load_breakdown
+        lines = load_breakdown(v)
+        self._value = dump_breakdown(lines)
+        self.label.setText(self.text() or "Một mức thuế (không cần nhập)")
+        self.clear_btn.setVisible(bool(self._value))
+        if emit:
+            self.changed.emit()
+
+    def value(self):
+        return self._value
+
+    def lines(self) -> list[dict]:
+        from ..core.vat import load_breakdown
+        return load_breakdown(self._value)
+
+    def text(self) -> str:
+        return "; ".join(f"{x['ThueSuat']}: {fmt_money(x['TruocThue'])} + VAT {fmt_money(x['VAT'])}"
+                         for x in self.lines()) if self._value else ""
+
+
 def widget_set(w, v) -> None:
-    if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
+    if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo, RatesEdit)):
         w.set_value(v)
     elif isinstance(w, QPlainTextEdit):
         w.setPlainText(v or "")
@@ -649,7 +799,7 @@ def widget_set(w, v) -> None:
 
 
 def widget_value(w):
-    if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo)):
+    if isinstance(w, (MoneyEdit, DateEdit, Combo, EditCombo, RatesEdit)):
         return w.value()
     if isinstance(w, QPlainTextEdit):
         return w.toPlainText().strip()
@@ -662,6 +812,8 @@ def widget_value(w):
 
 def widget_text(w) -> str:
     """Giá trị của ô dưới dạng chữ như người dùng thấy."""
+    if isinstance(w, RatesEdit):
+        return w.text()
     if isinstance(w, MoneyEdit):
         return fmt_money(w.value()) if w.value() else ""
     if isinstance(w, DateEdit):

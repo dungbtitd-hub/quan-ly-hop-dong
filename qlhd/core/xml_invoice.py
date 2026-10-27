@@ -103,6 +103,15 @@ def parse_invoice(source: str | Path | bytes) -> dict:
     for ts in thue_suat:
         if ts["ThueSuat"] and ts["ThueSuat"] not in rates:
             rates.append(ts["ThueSuat"])
+    # chi tiết theo từng mức thuế: bảng tổng hợp THTTLTSuat của hóa đơn, không có thì cộng các dòng hàng theo mức
+    chi_tiet = [{"ThueSuat": ts["ThueSuat"], "TruocThue": ts["ThanhTien"], "VAT": ts["TienThue"]}
+                for ts in thue_suat if ts["ThueSuat"]]
+    if len(chi_tiet) < 2 and len({ln["ThueSuat"] for ln in lines if ln["ThueSuat"]}) > 1:
+        by_rate: dict[str, int] = {}
+        for ln in lines:
+            if ln["ThueSuat"]:
+                by_rate[ln["ThueSuat"]] = by_rate.get(ln["ThueSuat"], 0) + ln["ThanhTien"]
+        chi_tiet = [{"ThueSuat": r, "TruocThue": b, "VAT": None} for r, b in by_rate.items()]
     so_hd = []
     for el in data.iter():
         if _local(el.tag) == "TTin":
@@ -134,6 +143,7 @@ def parse_invoice(source: str | Path | bytes) -> dict:
         "ThueSuat": thue_suat,
         "MatHang": join_items(items),
         "ThueSuatHD": "; ".join(rates),
+        "ChiTietThueSuat": chi_tiet if len(chi_tiet) > 1 else [],
         "Dong": lines,
     }
 

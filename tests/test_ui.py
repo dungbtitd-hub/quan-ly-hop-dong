@@ -1177,3 +1177,23 @@ def test_dup_review_page_and_extra_fields_dialog(qtbot, ctx, monkeypatch):
     assert any(not cd.extra.item(i).isHidden() for i in range(cd.extra.count()))
     out = apply_choice(ctx, reps, {"cot": ["SoHoaDon"], "them": ["x_tt_ngay", "x_tt_ref"], "tach_tt": False})
     assert [c[0] for c in out[0].columns] == ["KyHieuHD", "SoHoaDon", "x_tt_ngay", "x_tt_ref"]
+
+
+def test_invoice_form_multi_rate_fills_totals(qtbot, ctx):
+    from qlhd.ui.invoices_page import InvoicesPage
+    from qlhd.ui.widgets import FormDialog, RatesDialog
+    page = InvoicesPage(ctx, "ra")
+    qtbot.addWidget(page)
+    dlg = FormDialog("Hóa đơn đầu ra", page._fields(), {"TinhChatHD": "Gốc"})
+    qtbot.addWidget(dlg)
+    dlg.widgets["ChiTietThueSuat"].set_value([{"ThueSuat": "10%", "TruocThue": 1_000_000},
+                                              {"ThueSuat": "8%", "TruocThue": 500_000}], True)
+    v = dlg.values()
+    assert (v["GiaTriTruocThue"], v["VAT"], v["GiaTriSauThue"], v["ThueSuat"]) == (1_500_000, 140_000, 1_640_000,
+                                                                                    "10%; 8%")
+    assert "8%: 500.000" in dlg._display()["ChiTietThueSuat"]
+    rd = RatesDialog([])
+    qtbot.addWidget(rd)
+    rd.table.cellWidget(0, 1).set_value(200_000)
+    rd._auto(rd.table.cellWidget(0, 0), rd.table.cellWidget(0, 1), rd.table.cellWidget(0, 2))
+    assert rd.lines()[0] == {"ThueSuat": "10%", "TruocThue": 200_000, "VAT": 20_000}

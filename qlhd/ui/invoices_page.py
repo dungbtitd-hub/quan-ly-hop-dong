@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
                                QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
+from ..core import in_invoice_excel, invoice_match, pdf_invoice, vat, xml_invoice
 from ..core.assets import AssetService
 from ..core.duplicates import CONFIRM_KEY as DUP_OK
 from ..core.contracts import (DuplicateWarning, INSTALLMENTS, INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
@@ -28,6 +28,11 @@ CHOOSE = "__chon_hop_dong__"
 CHOOSE_LABEL = "— Chọn hợp đồng —"
 TAX_GROUP_OPTIONS = [("Chịu thuế GTGT (nhóm 1 bảng kê)", "Chịu thuế"),
                      ("Không chịu thuế GTGT (nhóm 5 bảng kê)", "Không chịu thuế")]
+
+
+RATES_FIELD = {"key": "ChiTietThueSuat", "label": "Nhiều mức thuế", "kind": "rates",
+               "hint": "Chỉ khi hóa đơn có hàng hóa chịu nhiều mức thuế (VD 10% và 8%): nhập tiền hàng, VAT theo từng "
+                       "mức; tổng tự điền vào Trước thuế / VAT / Sau thuế."}
 
 
 def _check_chosen(values: dict) -> None:
@@ -170,9 +175,23 @@ def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[di
     if d.get("ThieuTruong"):
         notes.append("Chưa đọc được: " + ", ".join(d["ThieuTruong"]) + ". Hãy kiểm tra và nhập bổ sung.")
     rate = d.get("ThueSuatHD") or rate_from_amounts(d["GiaTriTruocThue"], d["VAT"])
+    try:
+        rate = vat.parse_rate(rate)
+    except ValueError:
+        notes.append(f"Thuế suất \"{rate}\" chưa nhận ra, hãy chọn lại.")
+        rate = ""
     common = {"KyHieuMauSo": d["KyHieuMauSo"], "KyHieuHD": d["KyHieuHD"], "GiaTriTruocThue": d["GiaTriTruocThue"],
               "VAT": d["VAT"], "GiaTriSauThue": d["GiaTriSauThue"], "MatHang": d.get("MatHang") or "",
-              "ThueSuat": rate, "DuongDanTep": path}
+              "ThueSuat": rate, "DuongDanTep": path, "ChiTietThueSuat": None}
+    lines = vat.load_breakdown(d.get("ChiTietThueSuat"))
+    if len(lines) > 1:            # nhiều mức thuế: giữ chi tiết từng mức nếu cộng lại khớp tổng hóa đơn
+        b, t = sum(x["TruocThue"] for x in lines), sum(x["VAT"] for x in lines)
+        if abs(b - d["GiaTriTruocThue"]) <= len(lines) and abs(t - d["VAT"]) <= len(lines):
+            common.update(ChiTietThueSuat=vat.dump_breakdown(lines), ThueSuat=vat.breakdown_rate(lines))
+            notes.append("Hóa đơn nhiều mức thuế: " + "; ".join(
+                f"{x['ThueSuat']}: tiền hàng {fmt_money(x['TruocThue'])}, VAT {fmt_money(x['VAT'])}" for x in lines) + ".")
+        else:
+            notes.append(f"Hóa đơn nhiều mức thuế ({rate}): chi tiết từng mức không khớp tổng, chỉ lưu tổng tiền.")
     if kind == "ra":
         if mst_cty and d["MSTNguoiBan"] and d["MSTNguoiBan"] != mst_cty:
             notes.append(f"MST người bán {d['MSTNguoiBan']} khác MST công ty {mst_cty}.")
@@ -352,7 +371,7 @@ class InvoicesPage(QWidget):
                     {"key": "SoHoaDon", "label": "Số hóa đơn", "required": True},
                     {"key": "NgayXuatHD", "label": "Ngày xuất", "kind": "date"},
                     {"key": "TenNguoiMua", "label": "Tên người mua"}, {"key": "MSTNguoiMua", "label": "MST người mua"},
-                    {"key": "MatHang", "label": "Mặt hàng"}, rate_field(),
+                    {"key": "MatHang", "label": "Mặt hàng"}, rate_field(), dict(RATES_FIELD),
                     {"key": "GiaTriTruocThue", "label": "Trước thuế", "kind": "money"},
                     {"key": "VAT", "label": "VAT", "kind": "money"},
                     {"key": "GiaTriSauThue", "label": "Sau thuế", "kind": "money",
@@ -371,7 +390,7 @@ class InvoicesPage(QWidget):
                 {"key": "NgayNhanHD", "label": "Ngày hóa đơn", "kind": "date"},
                 {"key": "MatHang", "label": "Mặt hàng"},
                 {"key": "GiaTriTruocThue", "label": "Trước thuế", "kind": "money"},
-                rate_field(),
+                rate_field(), dict(RATES_FIELD),
                 {"key": "VAT", "label": "VAT", "kind": "money"},
                 {"key": "PhiKhac", "label": "Phí BVMT / phí khác", "kind": "money",
                  "hint": "Chỉ hóa đơn có phí ngoài VAT (VD nước sạch: phí bảo vệ môi trường). Không có thì để 0."},

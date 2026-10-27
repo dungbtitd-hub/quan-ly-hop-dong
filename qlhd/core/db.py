@@ -319,6 +319,8 @@ ADDED_COLUMNS = [
     ("HoaDonDauRa", "MatHang", "TEXT"),
     ("HoaDonDauRa", "ThueSuat", "TEXT"),
     ("HoaDonDauRa", "DotThanhToan", "TEXT"),           # đợt: Toàn bộ / Lần 1, 2… / Lần cuối (trống = chưa ghi)
+    ("HoaDonDauRa", "ChiTietThueSuat", "TEXT"),        # hóa đơn nhiều mức thuế: JSON [{ThueSuat, TruocThue, VAT}]
+    ("HoaDonDauVao", "ChiTietThueSuat", "TEXT"),
     ("HoaDonDauVao", "MatHang", "TEXT"),
     ("HoaDonDauVao", "ThueSuat", "TEXT"),
     ("HoaDonDauVao", "NhomThue", "TEXT"),
