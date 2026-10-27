@@ -11,10 +11,14 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
 
 from ..core import finance as fin
 from ..core import finance_import
-from ..core.finance import FinanceError, FinanceStore
+from ..core.duplicates import CONFIRM_KEY as DUP_OK
+from ..core.finance import FinanceDuplicate, FinanceError, FinanceStore
 from ..core.reports import FinanceReports, export_xlsx, fmt_date, fmt_money, period_range
-from .widgets import (Combo, DataTable, DateEdit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
-                      copy_text, error, hint, info, page_title, run_safely, toolbar)
+from .profit_page import ProfitTab
+from . import style
+from .widgets import (Combo, DataTable, DateEdit, bulk_edit, FormDialog, MoneyEdit, ask_secret, ask_text, button, confirm,
+                      confirm_changes, confirm_delete,
+                      confirm_duplicate, copy_text, error, hint, info, page_title, run_safely, toolbar)
 
 ENTRY_COLS = [("Ngay", "Ngày", "date"), ("SoPhieu", "Số phiếu / Số HĐ", "text"), ("PhanLoai", "Phân loại", "text"),
               ("NoiDung", "Nội dung", "text"), ("TenDuAn", "Dự án", "text"), ("KhoanMuc", "Khoản mục", "text"),
@@ -37,7 +41,7 @@ class RecoveryCodeDialog(QDialog):
                            "Warn"))
         edit = QLineEdit(code)
         edit.setReadOnly(True)
-        edit.setStyleSheet("font-family: Consolas, Menlo, monospace; font-size: 14pt;")
+        edit.setStyleSheet(f"font-family: Consolas, Menlo, monospace; font-size: {style.pt(14)};")
         lay.addWidget(edit)
         row = QHBoxLayout()
         row.addWidget(button("Sao chép", lambda: copy_text(code)))
@@ -52,6 +56,11 @@ class RecoveryCodeDialog(QDialog):
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 f.write("MÃ KHÔI PHỤC THU CHI – Phần mềm Quản lý Hợp đồng\n\n" + code + "\n")
+
+
+VOUCHER_LABELS = {"NgayPhatSinh": "Ngày", "SoTien": "Số tiền", "NoiDung": "Nội dung", "DoiTuong": "Đối tượng",
+                  "MaKhoanMuc": "Khoản mục", "MaQuy": "Quỹ", "MaHopDong": "Dự án", "PhanLoaiChi": "Phân loại chi",
+                  "SoChungTu": "Số chứng từ", "GhiChu": "Ghi chú", "LoaiThuChi": "Loại"}
 
 
 class VoucherDialog(QDialog):
@@ -176,11 +185,23 @@ class VoucherDialog(QDialog):
 
     def _save(self, close: bool):
         v = self.values()
+        if self.editing:
+            changes = [(k, str(self.values_in.get(k) or ""), str(v.get(k) or "")) for k in v
+                       if k in self.values_in and str(self.values_in.get(k) or "") != str(v.get(k) or "")]
+            if changes and not confirm_changes(self, [(VOUCHER_LABELS.get(k, k), fmt_money(o) if k == "SoTien" and o
+                                                       else o, fmt_money(n) if k == "SoTien" and n else n)
+                                                      for k, o, n in changes], "phiếu"):
+                return
         try:
             if self.editing:
                 self.store.update_voucher(self.editing, v)
             else:
-                self.saved_ids.append(self.store.add_voucher(v))
+                try:
+                    self.saved_ids.append(self.store.add_voucher(v))
+                except FinanceDuplicate as e:   # giống phiếu đã có: rà soát xác nhận mới thêm
+                    if not confirm_duplicate(self, e):
+                        return
+                    self.saved_ids.append(self.store.add_voucher(dict(v, **{DUP_OK: True})))
         except FinanceError as e:
             return error(self, str(e))
         if v.get("PhanLoaiChi"):
@@ -368,6 +389,7 @@ class FinancePage(QWidget):
         tabs.addTab(self._tab_categories(), "Khoản mục")
         tabs.addTab(self._tab_funds(), "Quỹ tiền")
         tabs.addTab(self._tab_reports(), "Báo cáo && xuất Excel")
+        tabs.addTab(ProfitTab(self.ctx), "Lãi lỗ")
         tabs.addTab(self._tab_delete(), "Xóa dữ liệu")
         tabs.addTab(self._tab_security(), "Bảo mật")
         lay.addWidget(tabs)
@@ -441,17 +463,54 @@ class FinancePage(QWidget):
         r = self.ledger.current()
         if not r:
             return
+        rows = [x for x in self.ledger.selected() if x["Nguon"] == "Phiếu"]
+        if len(rows) > 1:
+            return self._bulk_edit(rows)
         if r["Nguon"] == "Hợp đồng":
             return info(self, "Khoản thu từ hợp đồng được sửa ở phần Hợp đồng / Hóa đơn đầu ra (nơi gốc).")
         v = dict(self.ctx.finance.fdb.get("PhieuThuChi", r["Ma"]))
         if VoucherDialog(self.ctx.finance, v["LoaiThuChi"], v, self).exec() == QDialog.Accepted:
             self.reload()
 
+    def _bulk_edit(self, rows: list[dict]):
+        """Sửa cùng lúc quỹ, khoản mục, dự án… cho các phiếu đã chọn (khoản thu hợp đồng bỏ qua)."""
+        store = self.ctx.finance
+        full = [dict(store.fdb.get("PhieuThuChi", r["Ma"])) for r in rows]
+        for v in full:
+            v["_nhan"] = v.get("SoPhieu") or v.get("NoiDung") or v["Ma"]
+        kinds = {v["LoaiThuChi"] for v in full}
+        fields = [{"key": "MaQuy", "label": "Quỹ", "kind": "combo",
+                   "options": [(f["TenQuy"], f["Ma"]) for f in store.funds()]}]
+        if len(kinds) == 1:
+            fields.append({"key": "MaKhoanMuc", "label": "Khoản mục", "kind": "combo",
+                           "options": [("    " * d + c["TenKhoanMuc"], c["Ma"])
+                                       for c, d in store.category_tree(kinds.pop())]})
+        if all(v["LoaiThuChi"] == "Chi" for v in full):
+            fields += [{"key": "PhanLoaiChi", "label": "Phân loại chi", "kind": "combo",
+                        "options": [("Chi hoạt động văn phòng", "Văn phòng"), ("Chi dự án", "Dự án")]},
+                       {"key": "MaDuAn", "label": "Dự án", "kind": "combo",
+                        "options": [("(không)", None)] + [(f"{p['SoHopDong']} – {p['TenHopDong']}", p["Ma"])
+                                                          for p in store.projects()]}]
+        fields += [{"key": "DoiTuong", "label": "Người nhận / nộp"}, {"key": "NgayPhatSinh", "label": "Ngày",
+                                                                     "kind": "date"}]
+        names = {p["Ma"]: p["TenHopDong"] for p in store.projects()}
+
+        def save(r, ch):
+            ch = dict(ch)
+            if "MaDuAn" in ch:
+                ch["TenDuAn"] = names.get(ch["MaDuAn"]) if ch["MaDuAn"] else None
+            store.update_voucher(r["Ma"], ch)
+
+        if bulk_edit(self, f"Sửa {len(rows)} phiếu đã chọn", fields, full, save):
+            self.reload()
+
     def _delete(self):
         rows = [r for r in self.ledger.selected() if r["Nguon"] == "Phiếu"]
         if not rows:
             return info(self, "Chọn phiếu chi / phiếu thu khác cần xóa (khoản thu hợp đồng xóa ở phần Hợp đồng).")
-        if confirm(self, f"Xóa vĩnh viễn {len(rows)} phiếu, tổng {fmt_money(sum(r['Thu'] + r['Chi'] for r in rows))} đ?"):
+        if confirm_delete(self, f"{len(rows)} phiếu thu chi, tổng {fmt_money(sum(r['Thu'] + r['Chi'] for r in rows))} đ",
+                          [f"{fmt_date(r['Ngay']) if r.get('Ngay') else ''} {r.get('NoiDung') or ''} "
+                           f"{fmt_money(r['Thu'] + r['Chi'])} đ".strip() for r in rows], count=len(rows)):
             self.ctx.finance.delete_vouchers([r["Ma"] for r in rows])
             self.reload()
 
@@ -558,8 +617,9 @@ class FinancePage(QWidget):
     def _cat_rename(self):
         sel = self._cat_selected()
         if sel and sel[0] == "cat":
-            name = ask_text(self, "Đổi tên", "Tên mới:", self.cat_tree.currentItem().text(0))
-            if name:
+            old = self.cat_tree.currentItem().text(0)
+            name = ask_text(self, "Đổi tên", "Tên mới:", old)
+            if name and name != old and confirm_changes(self, [("Tên mục", old, name)]):
                 self.ctx.finance.rename_category(sel[1], name)
                 self.reload()
 
@@ -598,7 +658,9 @@ class FinancePage(QWidget):
 
     def _cat_delete(self):
         sel = self._cat_selected()
-        if sel and sel[0] == "cat" and confirm(self, "Xóa mục này?"):
+        if sel and sel[0] == "cat" and confirm_delete(self, "mục thu chi đang chọn",
+                                                       ["Mục đã có phiếu hoặc có mục con thì phần mềm không cho xóa (chỉ ẩn); dùng "
+                                                        "\"Chuyển phiếu\" sang mục khác trước."]):
             run_safely(self, self.ctx.finance.delete_category, sel[1])
             self.reload_categories()
 
@@ -746,7 +808,10 @@ class FinancePage(QWidget):
         p = self._d_preview()
         if not p["so_phieu"]:
             return info(self, "Không có phiếu nào trong khoảng này.")
-        if not confirm(self, f"Xóa vĩnh viễn {p['so_phieu']} phiếu? Nên xuất Excel trước."):
+        if not confirm_delete(self, f"{p['so_phieu']} phiếu thu chi từ {fmt_date(self.d_tu.value())} đến "
+                                    f"{fmt_date(self.d_den.value())}",
+                              [f"Thu khác {fmt_money(p['thu'])} đ, chi {fmt_money(p['chi'])} đ.",
+                               "Sau bước này phải nhập lại Khóa thu chi."], count=p["so_phieu"]):
             return
         key = ask_secret(self, "Xác nhận", "Nhập lại Khóa thu chi để xóa:")
         if key is None:

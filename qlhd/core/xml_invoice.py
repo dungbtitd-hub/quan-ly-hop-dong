@@ -42,6 +42,13 @@ def _money(s: str) -> int:
         return 0
 
 
+def _number(s: str) -> float | None:
+    try:
+        return float(s.replace(",", "")) if s else None
+    except ValueError:
+        return None
+
+
 def parse_invoice(source: str | Path | bytes) -> dict:
     try:
         if isinstance(source, bytes):
@@ -58,7 +65,18 @@ def parse_invoice(source: str | Path | bytes) -> dict:
         raise InvoiceXMLError("Không tìm thấy số hóa đơn (thẻ <SHDon>) trong file.")
     tong_truoc = _money(_text(data, "TToan", "TgTCThue"))
     vat = _money(_text(data, "TToan", "TgTThue"))
-    tong_sau = _money(_text(data, "TToan", "TgTTTBSo")) or tong_truoc + vat
+    # phí ngoài VAT (VD phí bảo vệ môi trường trên hóa đơn nước sạch): <DSLPhi><LPhi><TLPhi>…<TPhi>…
+    phi, ten_phi = 0, []
+    ds_phi = _find(data, "TToan", "DSLPhi")
+    if ds_phi is not None:
+        for lp in ds_phi:
+            if _local(lp.tag) == "LPhi":
+                phi += _money(_text(lp, "TPhi"))
+                if _text(lp, "TLPhi"):
+                    ten_phi.append(_text(lp, "TLPhi"))
+    tong_sau = _money(_text(data, "TToan", "TgTTTBSo")) or tong_truoc + vat + phi
+    if not phi and tong_truoc and tong_sau - tong_truoc - vat > 0:
+        phi = tong_sau - tong_truoc - vat            # tổng thanh toán lớn hơn tiền hàng + thuế: phần chênh là phí
     thue_suat = []
     ts_root = _find(data, "THTTLTSuat")
     if ts_root is not None:
@@ -66,10 +84,17 @@ def parse_invoice(source: str | Path | bytes) -> dict:
             if _local(el.tag) == "LTSuat":
                 thue_suat.append({"ThueSuat": _text(el, "TSuat"), "ThanhTien": _money(_text(el, "ThTien")),
                                   "TienThue": _money(_text(el, "TThue"))})
-    items, rates = [], []
+    items, rates, lines = [], [], []
     for el in data.iter():
         if _local(el.tag) == "HHDVu":
             ten = " ".join(_text(el, "THHDVu").split())
+            tinh_chat = _text(el, "TChat")
+            thanh_tien = _money(_text(el, "ThTien"))
+            if ten and tinh_chat != "4" and (thanh_tien or tinh_chat not in ("2",)):
+                lines.append({"TenHang": ten, "DVT": _text(el, "DVTinh"), "SoLuong": _number(_text(el, "SLuong")),
+                              "DonGia": _money(_text(el, "DGia")),
+                              "ThanhTien": -abs(thanh_tien) if tinh_chat == "3" else thanh_tien,
+                              "ThueSuat": _text(el, "TSuat")})
             if ten and ten not in items:
                 items.append(ten)
             rate = _text(el, "TSuat")
@@ -78,6 +103,15 @@ def parse_invoice(source: str | Path | bytes) -> dict:
     for ts in thue_suat:
         if ts["ThueSuat"] and ts["ThueSuat"] not in rates:
             rates.append(ts["ThueSuat"])
+    # chi tiết theo từng mức thuế: bảng tổng hợp THTTLTSuat của hóa đơn, không có thì cộng các dòng hàng theo mức
+    chi_tiet = [{"ThueSuat": ts["ThueSuat"], "TruocThue": ts["ThanhTien"], "VAT": ts["TienThue"]}
+                for ts in thue_suat if ts["ThueSuat"]]
+    if len(chi_tiet) < 2 and len({ln["ThueSuat"] for ln in lines if ln["ThueSuat"]}) > 1:
+        by_rate: dict[str, int] = {}
+        for ln in lines:
+            if ln["ThueSuat"]:
+                by_rate[ln["ThueSuat"]] = by_rate.get(ln["ThueSuat"], 0) + ln["ThanhTien"]
+        chi_tiet = [{"ThueSuat": r, "TruocThue": b, "VAT": None} for r, b in by_rate.items()]
     so_hd = []
     for el in data.iter():
         if _local(el.tag) == "TTin":
@@ -104,9 +138,13 @@ def parse_invoice(source: str | Path | bytes) -> dict:
         "GiaTriTruocThue": tong_truoc,
         "VAT": vat,
         "GiaTriSauThue": tong_sau,
+        "PhiKhac": phi,
+        "TenPhiKhac": "; ".join(ten_phi),
         "ThueSuat": thue_suat,
         "MatHang": join_items(items),
         "ThueSuatHD": "; ".join(rates),
+        "ChiTietThueSuat": chi_tiet if len(chi_tiet) > 1 else [],
+        "Dong": lines,
     }
 
 

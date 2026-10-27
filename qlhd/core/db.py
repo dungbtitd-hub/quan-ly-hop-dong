@@ -34,6 +34,8 @@ SYNCED_TABLES = [
     "HoaDonDauRa",
     "ThanhToanHopDong",
     "HoaDonDauVao",
+    "DongHoaDonDauVao",
+    "TaiSan",
 ]
 
 SCHEMA = f"""
@@ -158,6 +160,55 @@ CREATE TABLE IF NOT EXISTS HoaDonDauVao (
     DuongDanTep TEXT,
     GhiChuHDDV TEXT,{SYNC_COLS}
 );
+CREATE TABLE IF NOT EXISTS DongHoaDonDauVao (   -- từng dòng hàng hóa, dịch vụ của hóa đơn đầu vào
+    Ma TEXT PRIMARY KEY,
+    MaHoaDon TEXT NOT NULL,
+    STT INTEGER NOT NULL DEFAULT 1,
+    TenHang TEXT NOT NULL,
+    DVT TEXT,
+    SoLuong REAL,
+    DonGia INTEGER,
+    ThanhTien INTEGER NOT NULL DEFAULT 0, -- chưa thuế
+    ThueSuat TEXT,
+    PhanLoai TEXT NOT NULL DEFAULT 'Chưa phân loại'
+        CHECK(PhanLoai IN ('Chưa phân loại', 'Chi phí trong kỳ', 'TSCĐ', 'CCDC', 'Chờ phân bổ', 'Không tính chi phí')),
+    MaNhomDM TEXT,                        -- mã nhóm trong danh mục cài sẵn (asset_catalog)
+    TuDong INTEGER NOT NULL DEFAULT 1,    -- 1 = phần mềm tự phân loại, 0 = kế toán đã chọn
+    SoThang INTEGER,                      -- thời gian khấu hao / phân bổ
+    GhiChu TEXT,{SYNC_COLS}
+);
+CREATE TABLE IF NOT EXISTS TaiSan (               -- sổ TSCĐ và sổ theo dõi CCDC (gồm chi phí chờ phân bổ)
+    Ma TEXT PRIMARY KEY,
+    LoaiSo TEXT NOT NULL CHECK(LoaiSo IN ('TSCĐ', 'CCDC')),
+    PhanLoai TEXT NOT NULL DEFAULT 'CCDC' CHECK(PhanLoai IN ('TSCĐ', 'CCDC', 'Chờ phân bổ')),
+    MaTS TEXT NOT NULL,
+    TenTS TEXT NOT NULL,
+    LoaiTS TEXT,
+    MaNhomDM TEXT,
+    DonViSuDung TEXT,
+    NgayGhiTang TEXT NOT NULL,
+    SoCTGhiTang TEXT,
+    NgayBatDauKH TEXT,
+    SoKy INTEGER NOT NULL CHECK(SoKy > 0),
+    DVT TEXT,
+    SoLuong REAL NOT NULL DEFAULT 1,
+    NguyenGia INTEGER NOT NULL DEFAULT 0,
+    GiaTriTinhKH INTEGER NOT NULL DEFAULT 0,
+    MucKy INTEGER,                        -- giá trị khấu hao / phân bổ mỗi kỳ (trống = tự tính)
+    TKNguyenGia TEXT,
+    TKKhauHao TEXT,                       -- TSCĐ: 2141…; CCDC: TK chờ phân bổ 242
+    NgayGhiGiam TEXT,
+    LyDoGhiGiam TEXT,
+    MocNam INTEGER,                       -- số liệu đã chốt theo sổ cũ đến hết năm này (nhập từ Excel)
+    MocTrongKy INTEGER,
+    MocLuyKe INTEGER,
+    MocKyConLai INTEGER,
+    MaDongHD TEXT,                        -- dòng hóa đơn đầu vào sinh ra tài sản
+    ThuTu INTEGER NOT NULL DEFAULT 0,
+    GhiChu TEXT,{SYNC_COLS}
+);
+CREATE INDEX IF NOT EXISTS ix_dong_hoa_don ON DongHoaDonDauVao(MaHoaDon);
+CREATE INDEX IF NOT EXISTS ix_tai_san_dong ON TaiSan(MaDongHD);
 
 -- Bảng cục bộ của từng máy (không đồng bộ)
 CREATE TABLE IF NOT EXISTS ThongTinMay (
@@ -245,6 +296,12 @@ CREATE TABLE IF NOT EXISTS AnhXaMa (       -- bản ghi máy khác đã được
     MaNoiBo TEXT NOT NULL,
     PRIMARY KEY (Bang, MaNgoai)
 );
+CREATE TABLE IF NOT EXISTS NhanDongBo (    -- lúc máy này nhận bản ghi từ máy khác, để gửi tiếp khi đồng bộ "thay đổi"
+    Bang TEXT NOT NULL,
+    Ma TEXT NOT NULL,
+    ThoiDiem TEXT NOT NULL,
+    PRIMARY KEY (Bang, Ma)
+);
 CREATE TABLE IF NOT EXISTS CaiDat (
     Khoa TEXT PRIMARY KEY,
     GiaTri TEXT
@@ -257,13 +314,23 @@ ADDED_COLUMNS = [
     ("HopDong", "ThoiGianThucHien", "INTEGER"),
     ("HopDong", "DonViThoiGian", "TEXT"),
     ("HopDong", "NhacTruocNgay", "INTEGER"),
+    ("HopDong", "ThueSuat", "TEXT"),
+    ("HopDong", "HoSoDaLay", "TEXT"),                  # hồ sơ, tài liệu đã lấy về từ đối tác
     ("HoaDonDauRa", "MatHang", "TEXT"),
     ("HoaDonDauRa", "ThueSuat", "TEXT"),
+    ("HoaDonDauRa", "DotThanhToan", "TEXT"),           # đợt: Toàn bộ / Lần 1, 2… / Lần cuối (trống = chưa ghi)
+    ("HoaDonDauRa", "ChiTietThueSuat", "TEXT"),        # hóa đơn nhiều mức thuế: JSON [{ThueSuat, TruocThue, VAT}]
+    ("HoaDonDauVao", "ChiTietThueSuat", "TEXT"),
     ("HoaDonDauVao", "MatHang", "TEXT"),
     ("HoaDonDauVao", "ThueSuat", "TEXT"),
     ("HoaDonDauVao", "NhomThue", "TEXT"),
     ("HoaDonDauVao", "NguoiMuaHang", "TEXT"),
     ("HoaDonDauVao", "SoThamChieuSK", "TEXT"),
+    ("HoaDonDauVao", "PhiKhac", "INTEGER"),            # phí ngoài VAT, VD phí bảo vệ môi trường (nước sạch)
+    ("HoaDonDauVao", "TyLePhiKhac", "TEXT"),           # tỷ lệ phí trên giá trị trước thuế, VD '10%'
+    ("HoaDonDauVao", "TenPhiKhac", "TEXT"),
+    ("TaiSan", "XoaKhoiSoNam", "INTEGER"),
+    ("CaiDat", "NgaySua", "TEXT"),                     # giờ sửa (UTC): khi đồng bộ, cài đặt sửa sau được giữ             # đã hết khấu hao, xóa khỏi sổ từ năm này (năm trước vẫn hiện)
 ]
 
 
@@ -370,14 +437,15 @@ class Database(Store):
 
     def __init__(self, path: str | Path, machine_id: str = "local"):
         self.path = str(path)
+        self._restores = 0
         conn = sqlite3.connect(self.path)
         super().__init__(conn, machine_id)
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.executescript(SCHEMA)
         self._upgrade()
         self.conn.commit()
 
     def _upgrade(self) -> None:
+        self.conn.executescript(SCHEMA)       # bảng mới của bản sau (kể cả khi khôi phục bản sao lưu cũ)
         for table, col, kind in ADDED_COLUMNS:
             if col not in self.columns(table):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
@@ -392,19 +460,22 @@ class Database(Store):
         source = sqlite3.connect(str(src))
         source.backup(self.conn)
         source.close()
+        self._restores += 1
         self._upgrade()
         self.conn.commit()
+
+    def cache_key(self) -> tuple:
+        """Đổi mỗi khi dữ liệu đổi: dùng làm khóa bộ nhớ đệm cho các phép tính nặng."""
+        return (id(self.conn), self.path, self._restores, self.conn.total_changes)
 
     # ---- cài đặt & nhật ký
     def setting(self, key: str, default: str | None = None) -> str | None:
         r = self.one("SELECT GiaTri FROM CaiDat WHERE Khoa = ?", (key,))
-        return r["GiaTri"] if r else default
+        return r["GiaTri"] if r and r["GiaTri"] is not None else default
 
     def set_setting(self, key: str, value: str | None) -> None:
-        if value is None:
-            self.execute("DELETE FROM CaiDat WHERE Khoa = ?", (key,))
-        else:
-            self.execute("INSERT OR REPLACE INTO CaiDat (Khoa, GiaTri) VALUES (?, ?)", (key, value))
+        """value None = xóa cài đặt: giữ dòng trống kèm giờ sửa để lần đồng bộ sau máy khác cũng xóa theo."""
+        self.execute("INSERT OR REPLACE INTO CaiDat (Khoa, GiaTri, NgaySua) VALUES (?, ?, ?)", (key, value, now_iso()))
 
     def log(self, user: str | None, action: str, target: str | None = None) -> None:
         self.execute(

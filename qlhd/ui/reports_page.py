@@ -4,17 +4,63 @@ from __future__ import annotations
 import json
 from datetime import date
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QComboBox, QCheckBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QRadioButton,
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QRadioButton,
                                QScrollArea, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
+from ..core import data_export, report_fields
 from ..core.contracts import CONTRACT_STATUSES
-from ..core.reports import (CONTEXT_LABELS, CONTEXTS, RELATIVE_PERIODS, TAX_MODES, ContractReports, ReportFilters,
-                            export_xlsx, relative_range)
-from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm, hint, info,
+from ..core.reports import (CONTEXT_LABELS, CONTEXTS, DETAIL_LEVELS, INVOICE_PERIODS, RELATIVE_PERIODS, TAX_MODES,
+                            ContractReports, Report, ReportFilters, export_xlsx,
+                            relative_range)
+from .column_picker import CheckGrid, PreviewTable
+from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm_delete, hint, info,
                       page_title, toolbar)
 
 TEMPLATE_PREFIX = "mau_bao_cao:"
+# Thanh toán: hóa đơn đầu ra / hợp đồng đã xuất hóa đơn
+PAY_OPTIONS = [("Tất cả", None), ("Chưa thu (đã xuất hóa đơn)", "Chưa thu"), ("Thu một phần", "Thu một phần"),
+               ("Đã thu đủ", "Đã thu đủ"), ("Chỉ còn phải thu", "Còn phải thu")]
+# hóa đơn đầu vào: đã trả = có số sao kê, không có "một phần"
+IN_PAY_OPTIONS = [("Tất cả", None), ("Chưa trả (chưa có số sao kê)", "Chưa thu"),
+                  ("Đã trả (có số sao kê)", "Đã thu đủ")]
+
+
+_DATE = {"ky_td", "tu", "den"}
+_CONTRACT = {"loai", "doi_tac", "nhom", "tinh_trang"}
+_SPLIT = {"chieu", "gop"}
+_VALUE = {"tinh_theo", "che_do", "tt_tt", "tt_xuat", "tach_nam"}
+_CONTRACT_REPORT = _DATE | _CONTRACT | _SPLIT | _VALUE
+_PARTNER_REPORT = _DATE | _CONTRACT | _VALUE                              # chỉ hợp đồng đầu ra
+# Ô lọc nào áp dụng cho ngữ cảnh nào; ô không có trong danh sách sẽ mờ đi và không được dùng khi lập báo cáo.
+_DETAIL = {"muc"}                         # gộp / chi tiết từng hợp đồng / đến từng hóa đơn
+_INV_PERIOD = {"ky_hd", "cong_ky"}         # hóa đơn chia theo tháng / quý / năm, hoặc chỉ dòng cộng mỗi kỳ
+RELEVANT = {
+    "tong_hop": _CONTRACT_REPORT,
+    "loai_hd": _CONTRACT_REPORT | _DETAIL,
+    "hop_dong": _CONTRACT_REPORT | _DETAIL,
+    "chu_dau_tu": _PARTNER_REPORT | _DETAIL,
+    "nhom_cdt": _PARTNER_REPORT | _DETAIL,
+    "hoa_don_ra": _DATE | _CONTRACT | {"tt_tt", "tach_nam"} | _INV_PERIOD,
+    "hoa_don_ra_nguoi_mua": _DATE | _CONTRACT | {"tt_tt", "tach_nam", "nguoi_mua"} | _INV_PERIOD,
+    "da_thanh_toan": _DATE | _CONTRACT | {"tt_xuat", "tach_nam"},
+    "nha_cung_cap": _DATE | {"loai", "doi_tac", "tinh_trang", "tinh_theo", "che_do", "tach_nam", "lien_ket"} | _DETAIL,
+    "hoa_don_vao": _DATE | {"tach_nam", "lien_ket", "nhom_thue", "tt_tt"} | _INV_PERIOD,
+    "hoa_don_ra_vao": _DATE | _CONTRACT | {"gop", "tt_tt", "tach_nam", "lien_ket", "nhom_thue"} | _INV_PERIOD,
+    "thoi_gian": _DATE | _CONTRACT | _SPLIT | {"ky"},
+}
+# Ô lọc trên màn hình -> trường của ReportFilters
+FILTER_KEYS = {
+    "ky_td": ["ky_tuong_doi"], "tu": ["tu"], "den": ["den"], "tinh_theo": ["tinh_theo"], "chieu": ["chieu"],
+    "gop": ["gop_ra_vao"], "tach_nam": ["tach_nam"], "loai": ["loai_hd"], "doi_tac": ["doi_tac"], "nhom": ["nhom"],
+    "tinh_trang": ["tinh_trang"], "tt_tt": ["tt_thanh_toan"], "tt_xuat": ["tt_xuat_hd"], "lien_ket": ["co_hd_lien_ket"],
+    "nhom_thue": ["nhom_thue"], "nguoi_mua": ["nguoi_mua"], "ky": ["ky"], "che_do": ["che_do"],
+    "muc": ["muc_chi_tiet"], "ky_hd": ["nhom_ky_hd"], "cong_ky": ["chi_cong_ky"],
+}
+
+
+def relevant(context: str | None) -> set[str]:
+    return RELEVANT.get(context, set(FILTER_KEYS))
 
 
 def preview_rows(rep) -> list[dict]:
@@ -24,7 +70,20 @@ def preview_rows(rep) -> list[dict]:
     return rows + ([dict(rep.total, _kieu="tong")] if rep.total else [])
 
 
+def row_contract(r: dict) -> str | None:
+    """Hợp đồng của một dòng báo cáo (dòng hợp đồng, hóa đơn, thanh toán) để mở nhanh; dòng tổng hợp thì không có."""
+    if r.get("_kieu") == "con":                  # dòng chi tiết hợp đồng / hóa đơn dưới dòng tổng hợp
+        return r.get("MaHopDong")
+    if r.get("_kieu"):
+        return None
+    if r.get("MaHopDong"):
+        return r["MaHopDong"]
+    return r.get("Ma") if r.get("ChieuHopDong") and r.get("SoHopDong") else None
+
+
 class ReportsPage(QWidget):
+    open_contract = Signal(str)
+
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
@@ -52,16 +111,23 @@ class ReportsPage(QWidget):
         self.tinh_theo = Combo([("Ngày ký hợp đồng", "NgayKy"), ("Ngày lập hóa đơn", "NgayHoaDon"),
                                 ("Ngày tiền về", "NgayTienVe")])
         self.chieu = Combo([("Tất cả", None), ("Đầu ra", "Đầu ra"), ("Đầu vào", "Đầu vào")])
+        self.chieu.currentIndexChanged.connect(lambda *_: hasattr(self, "_labels") and self._pay_enabled())
         self.gop = QCheckBox("Gộp đầu ra, đầu vào chung bảng")
         self.gop.setToolTip("Mặc định hợp đồng / hóa đơn đầu ra và đầu vào được tách thành bảng (sheet) riêng.")
+        self.tach_nam = QCheckBox("Tách theo năm ký hợp đồng")
+        self.tach_nam.setChecked(True)
+        self.tach_nam.setToolTip("Mỗi năm một nhóm có dòng Cộng năm, cuối bảng là tổng cộng. Hóa đơn, thanh toán "
+                                 "của hợp đồng nằm trong năm ký hợp đồng đó; hóa đơn mua trực tiếp theo năm hóa đơn.")
         self.loai = CheckList()
         self.doi_tac = CheckList()
         self.nhom = CheckList()
         self.tinh_trang = CheckList(list(CONTRACT_STATUSES))
-        self.tt_tt = Combo([("Tất cả", None), ("Chưa thu", "Chưa thu"), ("Thu một phần", "Thu một phần"),
-                            ("Đã thu đủ", "Đã thu đủ"), ("Chỉ còn phải thu", "Còn phải thu")])
+        self.tt_tt = Combo(PAY_OPTIONS)
+        self.tt_tt.setToolTip("Chỉ xét hợp đồng / hóa đơn đã xuất hóa đơn: hợp đồng chưa xuất hóa đơn không có tình "
+                              "trạng thanh toán nên không nằm trong kết quả khi chọn ô này.")
         self.tt_xuat = Combo([("Tất cả", None), ("Chưa xuất", "Chưa xuất"), ("Xuất một phần", "Xuất một phần"),
                               ("Đã xuất đủ", "Đã xuất đủ")])
+        self.tt_xuat.currentIndexChanged.connect(lambda *_: hasattr(self, "_labels") and self._pay_enabled())
         self.lien_ket = Combo([("Tất cả", None), ("Có hợp đồng", True), ("Không có hợp đồng", False)])
         self.nhom_thue = Combo([(label, key) for key, label in TAX_MODES])
         self.nguoi_mua = CheckList()
@@ -69,26 +135,41 @@ class ReportsPage(QWidget):
         self.luy_ke = QRadioButton("Lũy kế")
         self.luy_ke.setChecked(True)
         self.ky = Combo([("Tháng", "thang"), ("Quý", "quy"), ("Năm", "nam")])
+        self.muc = Combo([(label, key) for key, label in DETAIL_LEVELS])
+        self.muc.setToolTip("Gộp: chỉ dòng tổng hợp (theo loại, chủ đầu tư…). Chi tiết: dưới mỗi dòng liệt kê từng hợp "
+                            "đồng, hoặc đến từng hóa đơn (kèm đã thu, còn phải thu). Kết hợp với bộ lọc Thanh toán để "
+                            "xem hợp đồng / hóa đơn nào chưa thu.")
+        self.ky_hd = Combo([(label, key) for key, label in INVOICE_PERIODS])
+        self.ky_hd.setToolTip("Chia danh sách hóa đơn theo tháng, quý hoặc năm, mỗi kỳ có dòng cộng.")
+        self.cong_ky = QCheckBox("Gộp: chỉ dòng cộng mỗi kỳ")
+        self.cong_ky.setToolTip("Bỏ tích để liệt kê từng hóa đơn trong từng kỳ.")
         for lst in (self.loai, self.doi_tac, self.nhom, self.tinh_trang, self.nguoi_mua):
             lst.setMaximumHeight(90)
         r = 0
-        for label, w in (("Kỳ báo cáo", self.ky_td), ("1. Từ ngày", self.tu), ("    Đến ngày", self.den),
-                         ("2. Tính theo", self.tinh_theo), ("3. Chiều hợp đồng", self.chieu), ("", self.gop),
-                         ("4. Loại hợp đồng", self.loai), ("5. Chủ đầu tư / NCC", self.doi_tac),
-                         ("6. Nhóm chủ đầu tư", self.nhom), ("7. Tình trạng HĐ", self.tinh_trang),
-                         ("8. Thanh toán", self.tt_tt), ("9. Xuất hóa đơn", self.tt_xuat),
-                         ("10. HĐơn đầu vào", self.lien_ket), ("11. Thuế GTGT đầu vào", self.nhom_thue),
-                         ("12. Người mua (HĐơn ra)", self.nguoi_mua), ("Kỳ (ngữ cảnh thời gian)", self.ky)):
-            g.addWidget(QLabel(label), r, 0, Qt.AlignTop)
+        self._labels: dict[str, QLabel] = {}
+        for label, name in (("Kỳ báo cáo", "ky_td"), ("Mức chi tiết", "muc"), ("Hóa đơn theo kỳ", "ky_hd"),
+                            ("", "cong_ky"), ("1. Từ ngày", "tu"), ("    Đến ngày", "den"),
+                            ("2. Tính theo", "tinh_theo"), ("3. Chiều hợp đồng", "chieu"), ("", "gop"),
+                            ("", "tach_nam"),
+                            ("4. Loại hợp đồng", "loai"), ("5. Chủ đầu tư / NCC", "doi_tac"),
+                            ("6. Nhóm chủ đầu tư", "nhom"), ("7. Tình trạng HĐ", "tinh_trang"),
+                            ("8. Xuất hóa đơn", "tt_xuat"), ("9. Thanh toán", "tt_tt"),
+                            ("10. HĐơn đầu vào", "lien_ket"), ("11. Thuế GTGT đầu vào", "nhom_thue"),
+                            ("12. Người mua (HĐơn ra)", "nguoi_mua"), ("Kỳ (ngữ cảnh thời gian)", "ky")):
+            w = getattr(self, name)
+            lab = self._labels[name] = QLabel(label)
+            g.addWidget(lab, r, 0, Qt.AlignTop)
             g.addWidget(w, r, 1)
             r += 1
         mode = QHBoxLayout()
         mode.addWidget(self.trong_ky)
         mode.addWidget(self.luy_ke)
-        g.addWidget(QLabel("Cách tính giá trị"), r, 0)
+        self._labels["che_do"] = QLabel("Cách tính giá trị")
+        g.addWidget(self._labels["che_do"], r, 0)
         g.addLayout(mode, r, 1)
         r += 1
-        g.addWidget(button("Lưu các CĐT đã tích thành nhóm…", self._save_group), r, 0, 1, 2)
+        self.b_group = button("Lưu các CĐT đã tích thành nhóm…", self._save_group)
+        g.addWidget(self.b_group, r, 0, 1, 2)
         scroll = QScrollArea()
         scroll.setWidget(filt)
         scroll.setWidgetResizable(True)
@@ -106,7 +187,11 @@ class ReportsPage(QWidget):
         b_export = button("Xuất Excel…", self.export, "Primary")
         b_export.setEnabled(ctx.can("BaoCao", "Xuat"))
         self.note = hint("")
-        rl.addLayout(toolbar(button("Xem trước", self.preview), b_export, "stretch"))
+        b_data = button("Xuất dữ liệu tùy chọn…", self.export_data)
+        b_data.setToolTip("Xuất bất kỳ dữ liệu nào đang quản lý (hợp đồng, thanh toán, hóa đơn, công việc, tài sản, "
+                          "đối tác, thu chi…), tự chọn cột và khoảng ngày")
+        b_data.setEnabled(ctx.can("BaoCao", "Xuat"))
+        rl.addLayout(toolbar(button("Xem trước", self.preview), b_export, b_data, "stretch"))
         rl.addWidget(self.note)
         self.tabs = QTabWidget()
         rl.addWidget(self.tabs, 1)
@@ -146,26 +231,57 @@ class ReportsPage(QWidget):
             "hoa_don_ra_nguoi_mua": "Tích người mua ở bộ lọc 12 (không tích = tất cả). Mỗi người mua một sheet.",
             "hoa_don_ra_vao": "Mặc định hóa đơn đầu ra và đầu vào ở hai sheet riêng; tích \"Gộp\" để chung một bảng.",
         }
-        self.note.setText(notes.get(self.context.value(), "Đầu ra và đầu vào được tách bảng riêng, trừ khi tích "
-                                                          "\"Gộp đầu ra và đầu vào\"."))
+        text = notes.get(self.context.value(), "Đầu ra và đầu vào được tách bảng riêng, trừ khi tích "
+                                               "\"Gộp đầu ra và đầu vào\".")
+        self.note.setText(text + " Ô lọc mờ không áp dụng cho ngữ cảnh này.")
+        on = relevant(self.context.value())
+        for name, lab in self._labels.items():
+            lab.setEnabled(name in on)
+            widgets = (self.trong_ky, self.luy_ke) if name == "che_do" else (getattr(self, name),)
+            for w in widgets:
+                w.setEnabled(name in on)
+        self.b_group.setEnabled("doi_tac" in on)
+        self.tt_tt.set_options(IN_PAY_OPTIONS if self.context.value() == "hoa_don_vao" else PAY_OPTIONS,
+                               self.tt_tt.value())
+        self._pay_enabled()
+        self._relative_changed()
+
+    def _pay_enabled(self, *_):
+        """Đã chọn "Chưa xuất" hóa đơn thì không còn tình trạng thanh toán để lọc: khóa ô Thanh toán."""
+        on = relevant(self.context.value())
+        ok = "tt_tt" in on and not ("tt_xuat" in on and self.tt_xuat.value() == "Chưa xuất") \
+            and not ("chieu" in on and self.chieu.value() == "Đầu vào")
+        self.tt_tt.setEnabled(ok)
+        self._labels["tt_tt"].setEnabled(ok)
 
     def _relative_changed(self):
         key = self.ky_td.value()
-        self.tu.setEnabled(not key)
-        self.den.setEnabled(not key)
+        self.tu.setEnabled(not key and self.ky_td.isEnabled())
+        self.den.setEnabled(not key and self.ky_td.isEnabled())
         if key:
             tu, den = relative_range(key, date.today())
             self.tu.set_value(tu)
             self.den.set_value(den)
 
     def filters(self) -> ReportFilters:
-        return ReportFilters(
+        """Ô lọc không áp dụng cho ngữ cảnh đang chọn (mờ) lấy giá trị mặc định, không ảnh hưởng kết quả."""
+        on = relevant(self.context.value())
+        values = dict(
             tu=self.tu.value(), den=self.den.value(), tinh_theo=self.tinh_theo.value(), chieu=self.chieu.value(),
             loai_hd=self.loai.values(), doi_tac=self.doi_tac.values(), nhom=self.nhom.values(),
             tinh_trang=self.tinh_trang.values(), tt_thanh_toan=self.tt_tt.value(), tt_xuat_hd=self.tt_xuat.value(),
             co_hd_lien_ket=self.lien_ket.value(), che_do="trong_ky" if self.trong_ky.isChecked() else "luy_ke",
             ky=self.ky.value(), nhom_thue=self.nhom_thue.value(), nguoi_mua=self.nguoi_mua.values(),
-            gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value())
+            gop_ra_vao=self.gop.isChecked(), ky_tuong_doi=self.ky_td.value(), tach_nam=self.tach_nam.isChecked(),
+            muc_chi_tiet=self.muc.value(), nhom_ky_hd=self.ky_hd.value(), chi_cong_ky=self.cong_ky.isChecked())
+        default = ReportFilters()
+        if not self.tt_tt.isEnabled():
+            on = on - {"tt_tt"}
+        for widget, keys in FILTER_KEYS.items():
+            if widget not in on:
+                for k in keys:
+                    values[k] = getattr(default, k)
+        return ReportFilters(**values)
 
     def build(self):
         return self.cr.build(self.context.value(), self.filters())
@@ -176,9 +292,17 @@ class ReportsPage(QWidget):
         for rep in reports:
             table = DataTable([])
             table.set_rows(preview_rows(rep), rep.columns)
+            if any(row_contract(r) for r in table.rows):
+                table.setToolTip("Bấm đúp một dòng để mở hợp đồng đó (xem, sửa, thêm hóa đơn, thanh toán)")
+                table.activated_row.connect(lambda r: row_contract(r) and self.open_contract.emit(row_contract(r)))
             self.tabs.addTab(table, rep.sheet)
 
-    def _export(self, reports, default_name: str):
+    def _export(self, reports, default_name: str, pick: bool = True):
+        if pick:                   # tự chọn cột cần xuất (nhớ lựa chọn lần trước của từng ngữ cảnh)
+            reports = pick_columns(self, self.ctx, "cot_bao_cao:" + self.context.value(), reports,
+                                   self.filters().resolved().den)
+            if reports is None:
+                return
         path, _ = QFileDialog.getSaveFileName(self, "Xuất Excel", f"{default_name}.xlsx", "Excel (*.xlsx)")
         if path:
             export_xlsx(reports, path, company=self.ctx.company, user=self.ctx.user["HoTen"])
@@ -196,12 +320,17 @@ class ReportsPage(QWidget):
         self.preview(reps)
         f = ReportFilters.from_dict(d).resolved()
         stamp = f" {f.tu or ''}_{f.den or ''}".rstrip("_ ") if f.tu or f.den else ""
-        self._export(reps, name + stamp)
+        if d.get("cot"):                 # mẫu xuất nhanh: dùng các cột, trường đã chọn khi lưu mẫu
+            reps = apply_choice(self.ctx, reps, d["cot"], f.den)
+        self._export(reps, name + stamp, pick=False)
+
+    def export_data(self):
+        DataExportDialog(self.ctx, self).exec()
 
     # ---- mẫu báo cáo
     def _template_names(self) -> list[str]:
         return [r["Khoa"][len(TEMPLATE_PREFIX):] for r in self.ctx.db.query(
-            "SELECT Khoa FROM CaiDat WHERE Khoa LIKE ? ORDER BY Khoa", (TEMPLATE_PREFIX + "%",))]
+            "SELECT Khoa FROM CaiDat WHERE Khoa LIKE ? AND GiaTri IS NOT NULL ORDER BY Khoa", (TEMPLATE_PREFIX + "%",))]
 
     def _template(self, name: str) -> dict:
         try:
@@ -226,6 +355,10 @@ class ReportsPage(QWidget):
         data = dict(self.filters().__dict__, context=self.context.value(), xuat_nhanh=v["xuat_nhanh"])
         if data["ky_tuong_doi"]:
             data["tu"] = data["den"] = None
+        try:                              # cột đã chọn ở lần xuất gần nhất của ngữ cảnh này
+            data["cot"] = json.loads(self.ctx.db.setting("cot_bao_cao:" + self.context.value()) or "null")
+        except ValueError:
+            data["cot"] = None
         self.ctx.db.set_setting(TEMPLATE_PREFIX + v["ten"], json.dumps(data, ensure_ascii=False))
         self.refresh()
         self.templates.set_value(v["ten"])
@@ -248,6 +381,7 @@ class ReportsPage(QWidget):
         self.tinh_theo.set_value(f.tinh_theo)
         self.chieu.set_value(f.chieu)
         self.gop.setChecked(f.gop_ra_vao)
+        self.tach_nam.setChecked(f.tach_nam)
         self.loai.set_options([(t["TenLoaiHD"], t["Ma"]) for t in self.ctx.cs.contract_types()], f.loai_hd)
         self.doi_tac.set_options([(p["TenDoiTac"], p["Ma"]) for p in self.ctx.cs.partners()], f.doi_tac)
         self.nhom.set_options([(g["TenNhom"], g["Ma"]) for g in self.ctx.cs.groups()], f.nhom)
@@ -259,11 +393,14 @@ class ReportsPage(QWidget):
         self.nhom_thue.set_value(f.nhom_thue)
         (self.trong_ky if f.che_do == "trong_ky" else self.luy_ke).setChecked(True)
         self.ky.set_value(f.ky)
+        self.muc.set_value(f.muc_chi_tiet)
+        self.ky_hd.set_value(f.nhom_ky_hd)
+        self.cong_ky.setChecked(f.chi_cong_ky)
         self.preview()
 
     def _del_template(self):
         name = self.templates.value()
-        if name and confirm(self, f"Xóa mẫu báo cáo \"{name}\"?"):
+        if name and confirm_delete(self, f"mẫu báo cáo \"{name}\"", ["Chỉ xóa mẫu đã lưu, số liệu không đổi."]):
             self.ctx.db.set_setting(TEMPLATE_PREFIX + name, None)
             self.refresh()
 
@@ -276,3 +413,279 @@ class ReportsPage(QWidget):
             self.ctx.cs.save_group(name, members)
             self.refresh()
             info(self, f"Đã lưu nhóm \"{name}\" ({len(members)} chủ đầu tư).")
+
+
+def pick_columns(parent, ctx, key: str, reports, den: str | None = None):
+    """Hỏi các cột cần xuất và trường dữ liệu thêm (mặc định: lựa chọn lần trước, lần đầu là tất cả cột có sẵn,
+    không thêm trường). Trả None nếu hủy."""
+    cols, seen = [], set()
+    for rep in reports:
+        for i, c in enumerate(rep.columns):
+            if c[0] not in seen:
+                seen.add(c[0])
+                cols.append((c[1] + (" (luôn xuất)" if i == 0 else ""), c[0]))
+    try:
+        last = json.loads(ctx.db.setting(key) or "null")
+    except ValueError:
+        last = None
+    last_cols, last_extra, last_tach = report_fields.parse_choice(last)
+    dlg = ColumnsDialog(cols, last_cols, parent, extras=report_fields.available(reports), extra_checked=last_extra,
+                        tach_tt=last_tach, preview=report_preview(ctx, reports, den))
+    if dlg.exec() != QDialog.Accepted:
+        return None
+    choice = {"cot": dlg.values(), "them": dlg.extra_values(), "tach_tt": dlg.tach_tt()}
+    ctx.db.set_setting(key, json.dumps(choice))
+    return apply_choice(ctx, reports, choice, den)
+
+
+def report_preview(ctx, reports, den: str | None = None, n: int = 3):
+    """Hàm vẽ xem trước cho hộp chọn cột: lấy vài dòng chi tiết đầu của bảng đầu tiên có dữ liệu."""
+    rep = next((r for r in reports if r.rows), reports[0] if reports else None)
+    if rep is None:
+        return None
+    rows = [r for r in rep.rows if not r.get("_kieu")] or rep.rows
+    sample = Report(rep.title, rep.columns, [dict(r) for r in rows[:n]], None, rep.subtitle, rep.sheet)
+
+    def preview(keys, extra, tach):
+        out = apply_choice(ctx, [Report(sample.title, sample.columns, [dict(r) for r in sample.rows], None,
+                                        sample.subtitle, sample.sheet)],
+                           {"cot": keys, "them": extra, "tach_tt": tach}, den)[0]
+        return out.columns, [r for r in out.rows if not r.get("_kieu")][:n * 2], set(extra)
+    return preview
+
+
+def apply_choice(ctx, reports, choice, den: str | None = None):
+    """Áp lựa chọn cột (kiểu cũ: danh sách cột; kiểu mới: thêm trường dữ liệu) vào các bảng."""
+    keys, extra, tach = report_fields.parse_choice(choice)
+    if keys:
+        reports = data_export.select_columns(reports, set(keys))
+    return report_fields.enrich(ctx.db, reports, extra, tach, den)
+
+
+class ColumnsDialog(QDialog):
+    """Chọn cột cần xuất ra Excel, và thêm trường lấy từ dữ liệu hợp đồng, hóa đơn, thanh toán.
+
+    Bên trái: cột có sẵn của báo cáo; bên phải: trường thêm chia nhóm; dưới: xem trước vài dòng (cột thêm tô xanh).
+    `preview(cot, them, tach_tt)` trả (cột, dòng, khóa cần tô xanh) để vẽ bảng xem trước."""
+
+    def __init__(self, cols, checked=None, parent=None, title: str = "Chọn cột và trường cần xuất", extras=(),
+                 extra_checked=(), tach_tt: bool = False, preview=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.preview_fn = preview
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint("Tích cột có sẵn của báo cáo" + (
+            " và thêm trường lấy từ dữ liệu hợp đồng, hóa đơn, thanh toán" if extras else "")
+            + ". Lựa chọn được nhớ riêng cho từng ngữ cảnh."))
+        body = QHBoxLayout()
+        lay.addLayout(body, 1)
+        left_box = QGroupBox()
+        left = QVBoxLayout(left_box)
+        body.addWidget(left_box, 2)
+        left.addWidget(QLabel("<b>Cột của báo cáo</b>"))
+        self.list = CheckGrid([("", label, key) for label, key in cols],
+                              [k for _, k in cols] if checked is None else checked, cols=1)
+        left.addWidget(self.list, 1)
+        left.addLayout(toolbar(button("Chọn tất cả", lambda: self.list.set_all(True)),
+                               button("Bỏ chọn tất cả", lambda: self.list.set_all(False)), "stretch"))
+        self.extra = CheckGrid([(f.group, f.label, f.key) for f in extras], list(extra_checked), cols=2)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Tìm trường…")
+        self.search.setMaximumWidth(200)
+        self.tach = QRadioButton("Thêm dòng chi tiết cho từng lần thanh toán")
+        self.gop_tt = QRadioButton("Gộp các lần thanh toán vào một ô (ví dụ: 05/10/2026; 20/10/2026)")
+        if extras:
+            right_box = QGroupBox()
+            right = QVBoxLayout(right_box)
+            body.addWidget(right_box, 3)
+            right.addLayout(toolbar(QLabel("<b>Thêm trường từ dữ liệu</b>"), "stretch", self.search))
+            right.addWidget(self.extra, 1)
+            self.search.textChanged.connect(self.extra.filter)
+            if any(f.group == report_fields.TT for f in extras):
+                (self.tach if tach_tt else self.gop_tt).setChecked(True)
+                pay = QGroupBox()
+                pay.setObjectName("Soft")
+                pl = QVBoxLayout(pay)
+                pl.setContentsMargins(8, 4, 8, 4)
+                pl.addWidget(self.gop_tt)
+                pl.addWidget(self.tach)
+                right.addWidget(pay)
+            right.addLayout(toolbar(button("Bỏ chọn trường thêm", lambda: self.extra.set_all(False)), "stretch"))
+            self.resize(1000, 780)
+        else:
+            self.resize(560 if preview else 420, 600)
+            lay.addWidget(hint("Bảng này không có dòng từng hợp đồng / hóa đơn nên không thêm trường được. Muốn thêm, "
+                               "chọn mức chi tiết \"Chi tiết từng hợp đồng\" hoặc \"đến từng hóa đơn\"."))
+        self.preview = PreviewTable()
+        if preview is not None:
+            lay.addWidget(QLabel("<b>Xem trước</b>"))
+            lay.addWidget(self.preview)
+            if extras:
+                lay.addWidget(hint("Cột tô xanh là trường vừa thêm."))
+            for w in (self.list, self.extra):
+                w.changed.connect(self._update_preview)
+            self.tach.toggled.connect(self._update_preview)
+            self._update_preview()
+        bb = QDialogButtonBox()
+        ok = bb.addButton("Tiếp tục xuất", QDialogButtonBox.AcceptRole)
+        ok.setObjectName("Primary")
+        ok.setDefault(True)
+        bb.addButton("Hủy", QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _update_preview(self, *_):
+        try:
+            cols, rows, mark = self.preview_fn(self.values(), self.extra_values(), self.tach_tt())
+        except Exception:                                   # xem trước lỗi không được chặn việc xuất
+            cols, rows, mark = [], [], ()
+        self.preview.show_rows(cols, rows, mark)
+
+    def _ok(self):
+        if not self.values():
+            return info(self, "Chọn ít nhất một cột.")
+        self.accept()
+
+    def values(self) -> list:
+        return self.list.values()
+
+    def extra_values(self) -> list:
+        return self.extra.values()
+
+    def tach_tt(self) -> bool:
+        return self.tach.isChecked()
+
+
+class DataExportDialog(QDialog):
+    """Xuất dữ liệu tùy chọn: chọn loại dữ liệu, các cột, khoảng ngày (hoặc toàn bộ đến hôm nay)."""
+
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.setWindowTitle("Xuất dữ liệu tùy chọn")
+        self.resize(900, 680)
+        lay = QVBoxLayout(self)
+        self.sets = [d for d in data_export.DATASETS
+                     if (ctx.finance is not None if d.finance else ctx.can(d.quyen))]
+        self.kind = Combo([(d.label, d.key) for d in self.sets])
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        self.ky = Combo([(label, key) for key, label in RELATIVE_PERIODS], "den_nay")
+        self.ky.currentIndexChanged.connect(self._ky_changed)
+        year = date.today().year
+        self.tu, self.den = DateEdit(f"{year}-01-01", optional=True), DateEdit(None, optional=True)
+        form = QGridLayout()
+        for r, (label, w) in enumerate((("Dữ liệu", self.kind), ("Kỳ", self.ky), ("Từ ngày", self.tu),
+                                        ("Đến ngày", self.den))):
+            form.addWidget(QLabel(label), r, 0)
+            form.addWidget(w, r, 1)
+        lay.addLayout(form)
+        self.date_note = hint("")
+        lay.addWidget(self.date_note)
+        box = QGroupBox()
+        bl = QVBoxLayout(box)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Tìm cột…")
+        self.search.setMaximumWidth(200)
+        bl.addLayout(toolbar(QLabel("<b>Các cột cần xuất</b>"), "stretch", self.search))
+        self.cols = CheckGrid(cols=3)
+        self.cols.changed.connect(self._show_preview)
+        self.search.textChanged.connect(self.cols.filter)
+        bl.addWidget(self.cols, 1)
+        bl.addLayout(toolbar(button("Chọn tất cả", lambda: self._all(True)),
+                             button("Bỏ chọn tất cả", lambda: self._all(False)), "stretch"))
+        lay.addWidget(box, 1)
+        self.preview_note = QLabel("<b>Xem trước</b>")
+        lay.addWidget(self.preview_note)
+        self.preview = PreviewTable()
+        lay.addWidget(self.preview)
+        self.sample = None
+        for w in (self.tu, self.den):
+            w.dateChanged.connect(self._load_sample)
+        if not any(d.finance for d in self.sets):
+            lay.addWidget(hint("Phiếu thu chi chỉ xuất được khi đăng nhập Giám đốc / Quản lý và đã mở khóa Thu chi."))
+        bb = QDialogButtonBox()
+        ok = bb.addButton("Xuất Excel…", QDialogButtonBox.AcceptRole)
+        ok.setObjectName("Primary")
+        bb.addButton("Đóng", QDialogButtonBox.RejectRole)
+        bb.accepted.connect(self.export)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._kind_changed()
+        self._ky_changed()
+
+    def ds(self):
+        return data_export.BY_KEY[self.kind.value()]
+
+    def _all(self, on: bool):
+        self.cols.set_all(on)
+
+    def _load_sample(self, *_):
+        """Đọc lại vài dòng đầu theo dữ liệu / kỳ đang chọn để xem trước."""
+        if not self.sets:
+            return
+        ds = self.ds()
+        tu, den = (self.tu.value(), self.den.value()) if ds.date_key else (None, None)
+        fdb = self.ctx.finance.fdb if ds.finance and self.ctx.finance is not None else None
+        try:
+            self.sample = data_export.build(self.ctx.db, ds.key, None, tu, den, fdb=fdb)
+        except ValueError:
+            self.sample = None
+        self._show_preview()
+
+    def _show_preview(self, *_):
+        if self.sample is None:
+            return self.preview.show_rows([], [])
+        keys = set(self.cols.values())
+        n = len(self.sample.rows)
+        self.preview_note.setText(f"<b>Xem trước</b> ({min(n, 3)} / {n} dòng sẽ xuất)")
+        self.preview.show_rows([c for c in self.sample.columns if c[0] in keys], self.sample.rows[:3])
+
+    def _kind_changed(self, *_):
+        if not self.sets:
+            return
+        ds = self.ds()
+        try:
+            last = json.loads(self.ctx.db.setting("cot_du_lieu:" + ds.key) or "null")
+        except ValueError:
+            last = None
+        self.cols.set_options([("", c[1], c[0]) for c in ds.columns], [c[0] for c in ds.columns] if last is None else last)
+        self.search.clear()
+        has_date = ds.date_key is not None
+        for w in (self.ky, self.tu, self.den):
+            w.setEnabled(has_date)
+        if has_date:
+            label = next((c[1] for c in ds.columns if c[0] == ds.date_key), ds.date_key)
+            self.date_note.setText(f"Lọc theo cột \"{label}\". Kỳ \"Từ trước đến nay\" xuất toàn bộ đến hôm nay.")
+        else:
+            self.date_note.setText("Dữ liệu này không lọc theo ngày: xuất toàn bộ.")
+        self._ky_changed()
+
+    def _ky_changed(self, *_):
+        key = self.ky.value()
+        on = self.ky.isEnabled()
+        self.tu.setEnabled(on and not key)
+        self.den.setEnabled(on and not key)
+        if key:
+            tu, den = relative_range(key, date.today())
+            self.tu.set_value(tu or None)
+            self.den.set_value(den)
+        self._load_sample()
+
+    def export(self):
+        if not self.sets:
+            return
+        ds, keys = self.ds(), self.cols.values()
+        if not keys:
+            return info(self, "Chọn ít nhất một cột.")
+        tu, den = (self.tu.value(), self.den.value()) if ds.date_key else (None, None)
+        fdb = self.ctx.finance.fdb if ds.finance and self.ctx.finance is not None else None
+        rep = data_export.build(self.ctx.db, ds.key, keys, tu, den, fdb=fdb)
+        self.ctx.db.set_setting("cot_du_lieu:" + ds.key, json.dumps(keys))
+        path, _ = QFileDialog.getSaveFileName(self, "Xuất Excel", f"{ds.label}.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        export_xlsx(rep, path, company=self.ctx.company, user=self.ctx.user["HoTen"],
+                    password=None)
+        self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xuất dữ liệu tùy chọn", f"{ds.label}: {len(rep.rows)} dòng")
+        info(self, f"Đã xuất {len(rep.rows)} dòng {ds.label.lower()}:\n{path}")

@@ -80,6 +80,22 @@ Tạo trang Release: tab **Actions** → *Kiểm thử và đóng gói* → **Ru
 - Nhập hàng loạt **phiếu chi / phiếu thu khác từ Excel** (Thu chi → Sổ thu chi → *Nhập từ Excel*, chỉ khi đã mở khóa):
   file mẫu riêng, đọc được file Excel có mật khẩu, xem trước dòng lỗi / trùng, tự thêm khoản mục mới,
   tùy chọn xóa file Excel nguồn sau khi nhập.
+- **Tài sản, CCDC** (màn *Tài sản, CCDC*): mỗi dòng hàng của hóa đơn đầu vào (đọc từ XML; hóa đơn nhập tay / Excel
+  là một dòng gộp) được tự phân loại theo **danh mục cài sẵn** (37 nhóm, theo TT 45/2013, TT 147/2016,
+  NĐ 320/2025 và sổ kế toán của công ty): *Chi phí trong kỳ* (xăng xe, VPP, cước, tiếp khách…), *CCDC*, *TSCĐ*
+  (đơn giá từ 30 triệu), *Chờ phân bổ* (phí đường bộ, chữ ký số, I-VAN…). Danh mục khóa: kế toán chỉ chọn trong danh
+  sách; thời gian khấu hao / phân bổ nhập tự do (chọn nhanh 2 / 3 / 5 năm, 12 / 24 / 36 tháng). Dòng không nhận ra
+  vào thẻ *Cần phân loại* (huy hiệu đỏ, chuông, báo ngay sau khi nhập hóa đơn); chưa phân loại xong thì chưa chốt
+  năm được.
+- **Sổ TSCĐ, sổ theo dõi CCDC** đúng các cột của sổ kế toán, tính khấu hao / phân bổ như sổ (khớp từng đồng với sổ
+  năm 2025: tháng đầu TSCĐ tính theo ngày, CCDC đủ tháng, kỳ cuối nhận phần còn lại). *Nhập sổ cũ từ Excel* (sổ xuất
+  từ phần mềm kế toán) rồi tính tiếp các năm sau, hóa đơn mới nối tiếp theo ngày; xuất Excel theo trường hợp (toàn bộ,
+  còn / hết khấu hao, đầu kỳ, tăng mới, có phát sinh trong năm, đã ghi giảm), có dòng *Số dòng = N* và tổng; ghi giảm.
+- **Bảng tổng hợp lãi lỗ** (Thu chi → *Lãi lỗ*, dữ liệu mã hóa cùng thu chi, chỉ Giám đốc và Người quản lý, chỉ đi
+  theo Gói Giám đốc, xóa vĩnh viễn từng dòng / từng năm / toàn bộ): doanh thu tự lấy từ hóa đơn đầu ra (hoặc chỉ phần
+  đã thanh toán đến 31/12), phân bổ TSCĐ / CCDC từ sổ, chi phí xăng xe, VPP… và sạc xe, tiếp khách, CPN từ hóa đơn
+  đầu vào (chia quý), gợi ý dở dang đầu kỳ / sang năm sau; môn bài, lương, bảo hiểm nhập tay; thêm, bớt, đổi tên,
+  sắp xếp, ẩn dòng; thuế suất TNDN nhập theo năm; chốt năm; xuất Excel có công thức và báo cáo doanh thu, chi phí năm.
 - Sao lưu tự động khi thoát (giữ 30 bản), sao lưu / khôi phục thủ công.
 
 ## Dữ liệu nằm ở đâu
@@ -126,6 +142,7 @@ cạnh tệp khóa. Chỉ khi buộc phải thay khóa mới chạy `python tool
 ```
 qlhd/core/   licensing (Key, mã nhân viên, thu hồi) · auth (tài khoản, phân quyền) · db (SQLite + cột đồng bộ)
              contracts · finance (thu chi mã hóa) · reports (12 ngữ cảnh, Excel) · sync (gói .qlhd, Gói Giám đốc)
+             asset_catalog (danh mục phân loại) · assets (sổ TSCĐ / CCDC) · profit (bảng lãi lỗ)
              xml_invoice · pdf_invoice · excel_import · crypto · machine
 qlhd/ui/     giao diện PySide6 (style.py: chủ đề sáng / tối, icons.py: biểu tượng SVG)
 tools/       license_manager.py (Phần mềm cấp mã)

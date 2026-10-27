@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from .contracts import TAX_GROUP_TITLES, TAX_GROUPS, ValidationError, guess_tax_group, rate_from_amounts
+from . import asset_catalog as dm
+from . import vat
+from .contracts import TAX_GROUP_TITLES, TAX_GROUPS, ValidationError, guess_tax_group
 from .invoice_match import fold
 
 # (khóa, tiêu đề trong file mẫu, bắt buộc, kiểu, các cụm từ nhận diện tiêu đề — đã bỏ dấu, chữ thường)
@@ -22,19 +24,24 @@ COLUMNS = [
     ("NgayNhanHD", "Ngày hóa đơn", True, "date", ("ngay",)),
     ("MaThueNCC", "Mã số thuế người bán", True, "mst", ("ma so thue", "mst")),
     ("TenNhaCungCap", "Tên người bán", True, "text", ("nguoi ban", "nha cung cap", "don vi ban", "ben ban")),
+    ("LoaiHang", "Loại hàng hóa (mã nhóm, VD CP03)", False, "text", ("loai hang", "loai hang hoa", "phan loai",
+                                                                     "nhom danh muc", "ma nhom")),
     ("NguoiMuaHang", "Người mua hàng", False, "text", ("nguoi mua",)),
-    ("NhomThue", "Nhóm thuế GTGT", False, "group", ("nhom",)),
+    ("NhomThue", "Nhóm thuế GTGT", False, "group", ("nhom thue", "nhom")),
     ("ThueSuat", "Thuế suất", False, "rate", ("thue suat",)),
     ("GiaTriTruocThue", "Giá trị chưa có thuế", False, "money",
      ("chua co thue", "chua thue", "truoc thue", "doanh so", "thanh tien")),
     ("GiaTriSauThue", "Tổng thanh toán", False, "money", ("tong thanh toan", "sau thue", "tong cong", "tong tien",
                                                           "da co thue")),
+    ("TyLePhiKhac", "Tỷ lệ phí BVMT (%)", False, "rate", ("ty le phi",)),
+    ("PhiKhac", "Phí BVMT / phí khác", False, "money", ("phi bao ve moi truong", "phi bvmt", "phi khac", "le phi")),
     ("VAT", "Thuế GTGT", False, "money", ("thue gtgt", "tien thue", "vat", "thue")),
     ("MatHang", "Mặt hàng", False, "text", ("mat hang", "ten hang", "hang hoa", "noi dung", "dien giai")),
     ("GhiChuHDDV", "Ghi chú", False, "text", ("ghi chu",)),
 ]
-TEMPLATE_KEYS = ["SoHoaDonGoc", "KyHieuHD", "NgayNhanHD", "TenNhaCungCap", "MaThueNCC", "MatHang", "GiaTriTruocThue",
-                 "ThueSuat", "VAT", "GiaTriSauThue", "NhomThue", "NguoiMuaHang", "SoThamChieuSK", "SoHopDong",
+TEMPLATE_KEYS = ["SoHoaDonGoc", "KyHieuHD", "NgayNhanHD", "TenNhaCungCap", "MaThueNCC", "MatHang", "LoaiHang",
+                 "GiaTriTruocThue",
+                 "ThueSuat", "VAT", "PhiKhac", "TyLePhiKhac", "GiaTriSauThue", "NhomThue", "NguoiMuaHang", "SoThamChieuSK", "SoHopDong",
                  "GhiChuHDDV"]
 SHEET = "Hóa đơn đầu vào"
 LABELS = {c[0]: c[1] for c in COLUMNS}
@@ -52,11 +59,18 @@ GUIDE = [
     " Chịu thuế) và nhắc kiểm tra lại.",
     "5. Số hợp đồng đầu vào: điền nếu hóa đơn thuộc hợp đồng. Không điền thì phần mềm thử nhận theo MST người bán;"
     " không chắc chắn thì bạn phải tự chọn hợp đồng (hoặc 'Không có – mua hàng trực tiếp') trên màn hình xem trước.",
-    "6. Hóa đơn đã có trong phần mềm (cùng MST người bán + ký hiệu + số) hoặc lặp lại trong file sẽ được bỏ qua.",
-    "7. Trong phần mềm: Hóa đơn đầu vào → Nhập từ Excel → chọn file → kiểm tra, chọn hợp đồng → Nhập.",
+    "   Hóa đơn nước sạch có Phí bảo vệ môi trường: điền cột Phí BVMT (số tiền) hoặc Tỷ lệ phí BVMT (VD 10%);"
+    " tổng thanh toán = trước thuế + thuế GTGT + phí. Bảng kê ghi phí thành dòng thứ hai ngay dưới hóa đơn (ô số hóa"
+    " đơn, ngày, người bán để trống hoặc gộp ô, mặt hàng 'Phí bảo vệ môi trường') thì phần mềm gộp vào hóa đơn trên."
+    " Hóa đơn chỉ có một dòng là hóa đơn không có phí.",
+    "6. Loại hàng hóa: chọn trong danh sách (mã nhóm – tên nhóm, sheet 'Danh mục nhóm'); có thể ghi kèm phân loại,"
+    " VD 'TSCĐ TB01' hoặc 'CCDC TB05'. Có điền thì phần mềm lấy đúng loại này, coi như kế toán đã phân loại;"
+    " để trống thì phần mềm tự nhận theo tên hàng, chưa rõ thì để chờ kế toán phân loại và cảnh báo.",
+    "7. Hóa đơn đã có trong phần mềm (cùng MST người bán + ký hiệu + số) hoặc lặp lại trong file sẽ được bỏ qua.",
+    "8. Trong phần mềm: Hóa đơn đầu vào → Nhập từ Excel → chọn file → kiểm tra, chọn hợp đồng → Nhập.",
 ]
 EXAMPLE = ["1285718", "C26TAA", date(2026, 4, 30), "CÔNG TY CỔ PHẦN GIAO THÔNG SỐ VIỆT NAM", "0109266456",
-           "Cước đường bộ 30K90317", 94699, "10%", 7576, 102275, "Chịu thuế", "Nguyễn Văn A", "FT26120123456", "",
+           "Cước đường bộ 30K90317", "CP02 – Phí qua trạm, vé cầu đường, gửi xe, rửa xe", 94699, "10%", 7576, None, None, 102275, "Chịu thuế", "Nguyễn Văn A", "FT26120123456", "",
            "Ví dụ, xóa dòng này trước khi nhập"]
 
 
@@ -92,6 +106,22 @@ def write_template(path: str | Path) -> Path:
             dv = DataValidation(type="list", formula1='"' + ",".join(TAX_GROUPS) + '"', allow_blank=True)
             ws.add_data_validation(dv)
             dv.add(f"{letter}2:{letter}2000")
+        if key == "LoaiHang":
+            ws.column_dimensions[letter].width = 40
+            dv = DataValidation(type="list", formula1=f"'Danh mục nhóm'!$A$2:$A${len(dm.CATALOG) + 1}",
+                                allow_blank=True, showErrorMessage=False)       # vẫn cho gõ "TSCĐ TB01"…
+            ws.add_data_validation(dv)
+            dv.add(f"{letter}2:{letter}2000")
+    cat = wb.create_sheet("Danh mục nhóm")
+    for c, title in enumerate(("Loại hàng hóa (chọn ở cột Loại hàng hóa)", "Phân loại mặc định", "Ví dụ hàng hóa"),
+                              start=1):
+        cat.cell(1, c, title).font = Font(bold=True)
+    for r, n in enumerate(dm.CATALOG, start=2):
+        cat.cell(r, 1, f"{n.ma} – {n.ten}")
+        cat.cell(r, 2, ", ".join(dict.fromkeys(dm.allowed_classes(n, 0) + dm.allowed_classes(n, dm.NGUONG_TSCD))))
+        cat.cell(r, 3, ", ".join(n.tu_khoa[:6]))
+    for col, w in (("A", 70), ("B", 26), ("C", 60)):
+        cat.column_dimensions[col].width = w
     ws.row_dimensions[1].height = 34
     ws.freeze_panes = "A2"
     path = Path(path)
@@ -108,6 +138,8 @@ class ExcelInvoice:
     notes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     so_hop_dong: str = ""
+    blank: set = field(default_factory=set)     # các ô để trống trong file
+    loai_hang: object = None                    # dm.KetQua khi cột Loại hàng hóa có ghi và đọc được
 
 
 def _column_key(header) -> str | None:
@@ -186,14 +218,10 @@ def _money(v) -> int:
 def _rate(v) -> str:
     if v in (None, ""):
         return ""
-    if isinstance(v, (int, float)):
-        n = v * 100 if 0 < v < 1 else v
-        return f"{n:g}%"
-    s = fold(v).replace(" ", "").upper()
-    if s in ("KCT", "KKKNT", "KHAC"):
-        return s
-    m = re.fullmatch(r"(\d+(?:[.,]\d+)?)%?", s)
-    return f"{m.group(1).replace(',', '.')}%" if m else str(v).strip()
+    try:
+        return vat.parse_rate(v)
+    except ValueError:
+        return str(v).strip()
 
 
 def _group(v) -> str | None:
@@ -235,7 +263,7 @@ def read_rows(rows: list[tuple], sheet: str) -> list[ExcelInvoice]:
     if not found:
         return []
     h, cols = found
-    out: list[ExcelInvoice] = []
+    raw: list[tuple[ExcelInvoice, str | None]] = []
     group = None
     kinds = {c[0]: c[3] for c in COLUMNS}
     so_idx = next(j for j, k in cols.items() if k == "SoHoaDonGoc")
@@ -251,31 +279,73 @@ def read_rows(rows: list[tuple], sheet: str) -> list[ExcelInvoice]:
             continue
         if _is_total(row) and not (_text(so) and _text(so)[0].isdigit()):
             continue
-        values, errors = {}, []
+        values, errors, blank = {}, [], set(kinds) - set(cols.values())
         for j, key in cols.items():
             v = row[j] if j < len(row) else None
             kind = kinds[key]
+            if v in (None, ""):
+                blank.add(key)
             try:
                 values[key] = {"date": _date, "money": _money, "mst": _mst, "rate": _rate, "group": _group,
                                "invoice_no": _invoice_no}.get(kind, _text)(v)
             except ValueError as e:
                 errors.append(f"{LABELS[key]}: {e}")
         if not values.get("SoHoaDonGoc") and not values.get("TenNhaCungCap"):
+            if raw:
+                _continue(raw[-1][0], values, blank, i + 1)
             continue
-        out.append(_finish(ExcelInvoice(sheet, i + 1, values, errors=errors), group))
-    return out
+        raw.append((ExcelInvoice(sheet, i + 1, values, errors=errors, blank=blank), group))
+    return [_finish(item, g) for item, g in raw]
+
+
+FEE_WORDS = ("phi bao ve moi truong", "phi bvmt", "phi moi truong", "le phi", "phi khac")
+
+
+def _continue(item: ExcelInvoice, values: dict, blank: set, line: int) -> bool:
+    """Dòng tiếp theo của cùng một hóa đơn (bảng kê gộp ô Số hóa đơn, Ngày, Người bán):
+    dòng 'Phí bảo vệ môi trường' thành phí của hóa đơn; dòng hàng hóa khác cộng vào giá trị hóa đơn."""
+    amount = values.get("GiaTriTruocThue") or values.get("GiaTriSauThue") or values.get("PhiKhac") or 0
+    if not amount:
+        return False
+    v = item.values
+    name = values.get("MatHang") or ""
+    if any(w in fold(name) for w in FEE_WORDS) and not values.get("VAT"):
+        v["PhiKhac"] = (v.get("PhiKhac") or 0) + amount
+        v["TenPhiKhac"] = name
+        item.blank.discard("PhiKhac")
+        if "GiaTriSauThue" not in item.blank:
+            v["GiaTriSauThue"] = (v.get("GiaTriSauThue") or 0) + (values.get("GiaTriSauThue") or amount)
+        item.notes.append(f"{name} {amount:,} đ lấy từ dòng {line} (dòng thứ hai của hóa đơn).".replace(",", "."))
+        return True
+    if not name:                       # dòng chỉ có số, không có tên hàng (VD dòng cộng): bỏ qua
+        return False
+    for k in ("GiaTriTruocThue", "VAT", "GiaTriSauThue"):
+        if k not in blank and k not in item.blank:
+            v[k] = (v.get(k) or 0) + (values.get(k) or 0)
+    if name:
+        v["MatHang"] = "; ".join(x for x in (v.get("MatHang"), name) if x)
+    item.notes.append(f"Gộp dòng {line} ({name}) vào hóa đơn.")
+    return True
 
 
 def _finish(item: ExcelInvoice, group: str | None) -> ExcelInvoice:
     v = item.values
+    def given(k):
+        return None if k in item.blank else (v.get(k) or 0)
+
+    if given("GiaTriTruocThue") or given("GiaTriSauThue"):
+        res = vat.complete(given("GiaTriTruocThue") or None, given("VAT"), given("GiaTriSauThue") or None,
+                           v.get("ThueSuat") or "", given("PhiKhac") or None, v.get("TyLePhiKhac") or "")
+        if res.error:
+            item.errors.append(res.error)
+        else:
+            v["GiaTriTruocThue"], v["VAT"], v["GiaTriSauThue"], v["ThueSuat"] = res.before, res.vat, res.after, res.rate
+            v["PhiKhac"], v["TyLePhiKhac"] = res.fee, res.fee_rate
+            item.notes += res.notes
+            if res.computed and "Thuế suất" not in res.computed:
+                item.notes.append("Tự tính: " + ", ".join(res.computed) + ".")
     for key in ("GiaTriTruocThue", "VAT", "GiaTriSauThue"):
         v[key] = v.get(key) or 0
-    if not v["GiaTriSauThue"]:
-        v["GiaTriSauThue"] = v["GiaTriTruocThue"] + v["VAT"]
-    elif not v["GiaTriTruocThue"]:
-        v["GiaTriTruocThue"] = v["GiaTriSauThue"] - v["VAT"]
-    if not v.get("ThueSuat"):
-        v["ThueSuat"] = rate_from_amounts(v["GiaTriTruocThue"], v["VAT"])
     if not v.get("NhomThue"):
         if group:
             v["NhomThue"] = group
@@ -283,6 +353,11 @@ def _finish(item: ExcelInvoice, group: str | None) -> ExcelInvoice:
             v["NhomThue"] = guess_tax_group(v["VAT"])
             item.notes.append(f"Nhóm thuế xếp theo tiền thuế ({v['NhomThue']}), kiểm tra lại.")
     item.so_hop_dong = v.pop("SoHopDong", "") or ""
+    loai = v.pop("LoaiHang", "") or ""
+    if loai:
+        kq, note = dm.parse_class_text(loai, v.get("MatHang") or "", int(v.get("GiaTriTruocThue") or 0))
+        item.loai_hang = kq
+        item.notes.append(note)
     for key in ("SoHoaDonGoc", "TenNhaCungCap", "MaThueNCC", "NgayNhanHD"):
         if not v.get(key) and not any(e.startswith(LABELS[key]) for e in item.errors):
             item.errors.append(f"Thiếu {LABELS[key]}")

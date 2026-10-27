@@ -13,7 +13,7 @@ from . import licensing as lic
 from .db import Database, now_iso
 
 ROLES = ("Giám đốc", "Người quản lý", "Kế toán viên")
-FEATURES = ("HopDong", "HoaDonDauRa", "HoaDonDauVao", "BaoCao", "DanhMuc", "SaoLuu",
+FEATURES = ("HopDong", "HoaDonDauRa", "HoaDonDauVao", "TaiSan", "BaoCao", "DanhMuc", "SaoLuu",
             "DongBo", "ThuChi", "TaiKhoan")
 ACTIONS = ("Xem", "Them", "Sua", "Xoa", "Xuat")
 WIPE_PENDING = "lenh_xoa_cho_gui"
@@ -61,6 +61,7 @@ def default_permissions(role: str) -> dict:
     p["HopDong"] = {"Xem": 1, "Them": 0, "Sua": 0, "Xoa": 0, "Xuat": 1}
     p["HoaDonDauRa"] = {"Xem": 1, "Them": 0, "Sua": 1, "Xoa": 0, "Xuat": 1}  # ghi nhận thanh toán
     p["HoaDonDauVao"] = {"Xem": 1, "Them": 1, "Sua": 1, "Xoa": 0, "Xuat": 1}
+    p["TaiSan"] = {"Xem": 1, "Them": 1, "Sua": 1, "Xoa": 0, "Xuat": 1}   # phân loại hóa đơn, sổ TSCĐ / CCDC
     p["BaoCao"] = {"Xem": 1, "Them": 0, "Sua": 0, "Xoa": 0, "Xuat": 1}
     p["DanhMuc"] = {"Xem": 1, "Them": 0, "Sua": 0, "Xoa": 0, "Xuat": 0}
     p["DongBo"] = {"Xem": 1, "Them": 1, "Sua": 0, "Xoa": 0, "Xuat": 1}
@@ -411,7 +412,12 @@ class AccountService:
 
     def permissions(self, user) -> dict:
         rows = self.db.query("SELECT * FROM PhanQuyen WHERE MaNguoiDung = ?", (user["MaNguoiDung"],))
-        return {r["ChucNang"]: {a: r[a] for a in ACTIONS} for r in rows}
+        p = {r["ChucNang"]: {a: r[a] for a in ACTIONS} for r in rows}
+        missing = [f for f in FEATURES if f not in p]     # chức năng có ở bản sau: lấy quyền mặc định theo vai trò
+        if missing:
+            d = default_permissions(user["VaiTro"])
+            p.update({f: d[f] for f in missing})
+        return p
 
     def can(self, user, feature: str, action: str = "Xem") -> bool:
         if feature == "ThuChi" and user["VaiTro"] == "Kế toán viên":

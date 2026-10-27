@@ -44,7 +44,8 @@ def self_test() -> int:
     import pypdf  # noqa: F401
 
     from .core import licensing
-    from .ui import accounts_page, contracts_page, finance_page, invoices_page, reports_page, sync_page  # noqa: F401
+    from .ui import (accounts_page, assets_page, contracts_page, finance_page, invoices_page,  # noqa: F401
+                     profit_page, reports_page, sync_page)
 
     create_app([])
     licensing.vendor_public_key()
@@ -63,7 +64,7 @@ def main(argv=None) -> int:
         return self_test()
     app = create_app(argv)
     ctx = AppContext()
-    apply_theme(app, ctx.db.setting("giao_dien") or "sang")
+    apply_theme(app, ctx.db.setting("giao_dien") or "sang", ctx.db.setting("co_chu") or "vua")
     try:
         SplashDialog(ctx.acc).exec()
         if not ctx.acc.is_activated():

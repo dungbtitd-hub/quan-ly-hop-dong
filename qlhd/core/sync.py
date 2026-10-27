@@ -51,13 +51,30 @@ FOREIGN_KEYS = {
     "HoaDonDauRa": {"MaHopDong": "HopDong"},
     "ThanhToanHopDong": {"MaHopDong": "HopDong", "MaHDDauRa": "HoaDonDauRa"},
     "HoaDonDauVao": {"MaHopDong": "HopDong"},
+    "DongHoaDonDauVao": {"MaHoaDon": "HoaDonDauVao"},
+    "TaiSan": {"MaDongHD": "DongHoaDonDauVao"},
 }
+
+# Cài đặt chỉ thuộc máy này, không gửi kèm gói: tên máy, bản sao lưu hoàn tác, khóa / mốc chống chỉnh giờ,
+# lệnh xóa, Telegram (mã bot riêng từng máy, tránh nhiều máy cùng gửi bản tin), trạng thái bộ lọc đang chọn,
+# nhắc việc đã hiện hôm nay, đếm đăng nhập sai thu chi.
+LOCAL_SETTINGS = {"ten_may", "dong_bo_hoan_tac", "dong_bo_hoan_tac_tc", "ngay_lon_nhat", "khoa_cong_ty_tam",
+                  "lenh_xoa_cho_gui", "lenh_xoa_da_dung", "dang_nhap_cuoi", "ra_soat_phan_loai_phien_ban"}
+LOCAL_SETTING_PREFIXES = ("tg_", "tc_sai:", "bo_loc:", "nhac_hd_ngay:", "nhac_phan_loai_ngay:")
+
+
+def shared_setting(key: str) -> bool:
+    """Cài đặt phần mềm dùng chung (đồng bộ sang máy khác): nhắc hạn, mẫu báo cáo, ngữ cảnh thông báo, Tổng quan,
+    giao diện, cỡ chữ…"""
+    return key not in LOCAL_SETTINGS and not key.startswith(LOCAL_SETTING_PREFIXES)
+
 
 TABLE_LABELS = {
     "LoaiHopDong": "Loại hợp đồng", "DoiTac": "Đối tác", "NhomDoiTac": "Nhóm đối tác",
     "NhomDoiTacThanhVien": "Thành viên nhóm", "HopDong": "Hợp đồng", "CongViec": "Công việc",
     "LichSuBanGiao": "Bàn giao", "LichSuNghiemThu": "Nghiệm thu", "HoaDonDauRa": "Hóa đơn đầu ra",
     "ThanhToanHopDong": "Thanh toán", "HoaDonDauVao": "Hóa đơn đầu vào",
+    "DongHoaDonDauVao": "Dòng hóa đơn đầu vào", "TaiSan": "Tài sản, CCDC",
 }
 
 
@@ -92,6 +109,10 @@ def natural_key(table: str, r: dict):
         return (r["MaHopDong"], r["NgayThanhToan"], r["SoTien"], _low(r.get("SoThamChieuSK")))
     if table == "HoaDonDauVao":
         return (r["MaThueNCC"].strip(), _low(r.get("KyHieuHD")), _low(r["SoHoaDonGoc"]))
+    if table == "DongHoaDonDauVao":
+        return (r["MaHoaDon"], r["STT"])
+    if table == "TaiSan":
+        return ("dong", r["MaDongHD"]) if r.get("MaDongHD") else (r["LoaiSo"], _low(r["MaTS"]), r["NgayGhiTang"])
     return None
 
 
@@ -117,7 +138,80 @@ def describe(table: str, r: dict) -> str:
         return f"{t} ngày {r['NgayThanhToan']}: {r['SoTien']:,}".replace(",", ".") + " đ"
     if table == "HoaDonDauVao":
         return f"{t} {r.get('KyHieuHD') or ''} số {r['SoHoaDonGoc']} – {r['TenNhaCungCap']}"
+    if table == "DongHoaDonDauVao":
+        return f"{t}: {r['TenHang']} ({r['PhanLoai']})"
+    if table == "TaiSan":
+        return f"{'Sổ TSCĐ' if r['LoaiSo'] == 'TSCĐ' else 'Sổ CCDC'}: {r['MaTS']} – {r['TenTS']}"
     return t
+
+
+FIELD_LABELS = {
+    "KyHieuMauSo": "ký hiệu mẫu số", "KyHieuHD": "ký hiệu", "SoHoaDon": "số hóa đơn", "SoHoaDonGoc": "số hóa đơn",
+    "MaHopDong": "hợp đồng", "NgayXuatHD": "ngày xuất", "NgayNhanHD": "ngày hóa đơn", "TenNguoiMua": "người mua",
+    "MSTNguoiMua": "MST người mua", "TenNhaCungCap": "người bán", "MaThueNCC": "MST người bán",
+    "GiaTriTruocThue": "trước thuế", "VAT": "VAT", "GiaTriSauThue": "sau thuế", "TinhChatHD": "tính chất",
+    "MatHang": "mặt hàng", "ThueSuat": "thuế suất", "NhomThue": "nhóm thuế", "NguoiMuaHang": "người mua hàng",
+    "SoThamChieuSK": "số sao kê", "DuongDanTep": "tệp gốc", "GhiChuHDDR": "ghi chú", "GhiChuHDDV": "ghi chú",
+    "GhiChu": "ghi chú", "PhiKhac": "phí BVMT / phí khác", "TyLePhiKhac": "tỷ lệ phí", "TenPhiKhac": "tên phí",
+    "PhanLoai": "phân loại", "MaNhom": "nhóm danh mục", "SoThang": "số tháng",
+}
+# Giá trị coi như "chưa nhập" – khi gộp bản ghi trùng thì được bổ sung từ máy gửi.
+CLASS_FIELDS = ("PhanLoai", "MaNhomDM", "SoThang", "TuDong")
+PLACEHOLDERS = {"PhanLoai": ("Chưa phân loại",)}
+
+
+def field_label(k: str) -> str:
+    return FIELD_LABELS.get(k, k)
+
+
+def _blank(k: str, v) -> bool:
+    return v is None or (isinstance(v, str) and not v.strip()) or v in PLACEHOLDERS.get(k, ())
+
+
+def fill_fields(incoming: dict, local: dict) -> dict:
+    """Các ô máy này còn trống mà bên gửi đã có: được bổ sung khi gộp hai bản ghi trùng."""
+    return {k: v for k, v in business_fields(incoming).items()
+            if k in local and k != "DaXoa" and _blank(k, local.get(k)) and not _blank(k, v)}
+
+
+def differing_fields(incoming: dict, local: dict) -> list[str]:
+    """Các ô cả hai bên đều có nhưng khác nhau (khi gộp giữ theo máy này)."""
+    return [k for k, v in business_fields(incoming).items()
+            if k in local and k != "DaXoa" and not _blank(k, v) and not _blank(k, local.get(k))
+            and v != local.get(k)]
+
+
+def _so(v) -> str:
+    return _low(v).lstrip("0")
+
+
+def _name(v) -> str:
+    return " ".join(_low(v).replace(".", " ").replace(",", " ").split())
+
+
+# Hóa đơn nghi trùng dù khác ký hiệu / mã: (nhãn, cách lấy giá trị) cho từng tiêu chí.
+SUSPECT_FIELDS = {
+    "HoaDonDauVao": {"so": ("cùng số hóa đơn", lambda r: _so(r["SoHoaDonGoc"])),
+                     "mst": ("cùng MST người bán", lambda r: (r.get("MaThueNCC") or "").strip()),
+                     "ten": ("cùng tên người bán", lambda r: _name(r.get("TenNhaCungCap"))),
+                     "tien": ("cùng số tiền", lambda r: r.get("GiaTriSauThue") or None),
+                     "ngay": ("cùng ngày", lambda r: r.get("NgayNhanHD"))},
+    "HoaDonDauRa": {"so": ("cùng số hóa đơn", lambda r: _so(r["SoHoaDon"])),
+                    "hd": ("cùng hợp đồng", lambda r: r.get("MaHopDong")),
+                    "mst": ("cùng MST người mua", lambda r: (r.get("MSTNguoiMua") or "").strip()),
+                    "tien": ("cùng số tiền", lambda r: r.get("GiaTriSauThue") or None),
+                    "ngay": ("cùng ngày", lambda r: r.get("NgayXuatHD"))},
+}
+
+
+def suspect_match(table: str, incoming: dict, local: dict) -> tuple[bool, bool, list[str]]:
+    """(nghi trùng?, gần như chắc chắn?, các tiêu chí khớp) giữa hóa đơn bên gửi và một hóa đơn ở máy này."""
+    spec = SUSPECT_FIELDS[table]
+    hit = {k for k, (_, get) in spec.items() if get(incoming) and get(incoming) == get(local)}
+    party = bool(hit & {"mst", "ten", "hd"})
+    suspect = ("so" in hit and (party or "tien" in hit)) or (party and {"tien", "ngay"} <= hit)
+    strong = "so" in hit and party and "tien" in hit
+    return suspect, strong, [spec[k][0] for k in spec if k in hit]
 
 
 def business_fields(row: dict) -> dict:
@@ -149,6 +243,8 @@ class SyncItem:
     local: dict | None = None
     dup_ma: str | None = None
     diff: list[str] = field(default_factory=list)
+    note: str = ""               # lý do nghi trùng, ô sẽ bổ sung, ô khác nhau
+    fill: dict = field(default_factory=dict)    # ô sẽ bổ sung vào bản ghi ở máy này khi gộp
 
 
 class SyncService:
@@ -191,7 +287,10 @@ class SyncService:
                 since = r["t"]
             for t in SYNCED_TABLES:
                 if since:
-                    tables[t] = [dict(r) for r in self.db.query(f"SELECT * FROM {t} WHERE NgaySua > ?", (since,))]
+                    # NgaySua giữ giờ sửa ở máy gốc: bản ghi nhận từ máy khác sau lần gửi trước cũng phải gửi tiếp
+                    tables[t] = [dict(r) for r in self.db.query(
+                        f"SELECT * FROM {t} WHERE NgaySua > ? OR Ma IN "
+                        "(SELECT Ma FROM NhanDongBo WHERE Bang = ? AND ThoiDiem > ?)", (since, t, since))]
                 else:
                     tables[t] = [dict(r) for r in self.db.query(f"SELECT * FROM {t}")]
         elif scope == "contracts":
@@ -211,6 +310,11 @@ class SyncService:
                 hdv += q("SELECT * FROM HoaDonDauVao WHERE MaHopDong IS NULL AND NgayNhanHD BETWEEN ? AND ?",
                          (in_invoice_from or "0000-01-01", in_invoice_to or "9999-12-31"))
             tables["HoaDonDauVao"] = hdv
+            hm = [r["Ma"] for r in hdv]
+            dong = q(f"SELECT * FROM DongHoaDonDauVao WHERE MaHoaDon IN ({','.join('?' * len(hm)) or 'NULL'})", hm)
+            tables["DongHoaDonDauVao"] = dong
+            dm_ = [r["Ma"] for r in dong]
+            tables["TaiSan"] = q(f"SELECT * FROM TaiSan WHERE MaDongHD IN ({','.join('?' * len(dm_)) or 'NULL'})", dm_)
             partners = {r["MaDoiTac"] for r in tables["HopDong"] if r["MaDoiTac"]}
             tables["DoiTac"] = [dict(r) for r in self.db.query("SELECT * FROM DoiTac")
                                 if r["Ma"] in partners or r["DaXoa"] == 0]
@@ -232,7 +336,9 @@ class SyncService:
         mst, cty = self._company()
         tables = self.collect(scope, partner=partner, contract_ids=contract_ids,
                               in_invoice_from=in_invoice_from, in_invoice_to=in_invoice_to)
-        body: dict = {"tables": tables}
+        body: dict = {"tables": tables,
+                      "settings": [dict(r) for r in self.db.query("SELECT Khoa, GiaTri, NgaySua FROM CaiDat")
+                                   if shared_setting(r["Khoa"])]}
         if self.accounts is not None:
             tok = self.accounts.signed_revocations()
             if tok:
@@ -257,6 +363,8 @@ class SyncService:
         scope_text = {"all": "Toàn bộ dữ liệu", "changes": "Các thay đổi từ lần gửi trước",
                       "contracts": f"{len(contract_ids or [])} hợp đồng được chọn"}[scope]
         counts = {t: len(v) for t, v in tables.items() if v}
+        if body["settings"]:
+            counts["CaiDat"] = len(body["settings"])
         salt = os.urandom(16)
         header = {"phien_ban": 1, "loai": loai, "may_gui": self.db.machine_id, "ten_may": self.machine_name(),
                   "nguoi_xuat": user["HoTen"], "thoi_diem": now_iso(), "pham_vi": scope_text,
@@ -271,7 +379,7 @@ class SyncService:
             " VALUES (?, ?, 'Gửi', ?, ?, ?, ?, ?)",
             (partner or "", partner_name or "(chưa chọn máy nhận)", header["thoi_diem"], header["thoi_diem"],
              scope_text + (" + Thu chi (Gói Giám đốc)" if loai == "giam_doc" else ""),
-             ", ".join(f"{TABLE_LABELS[t]}: {n}" for t, n in counts.items()), user["TenDangNhap"]))
+             ", ".join(f"{TABLE_LABELS.get(t, 'Cài đặt')}: {n}" for t, n in counts.items()), user["TenDangNhap"]))
         self.db.log(user["TenDangNhap"], "Xuất gói đồng bộ" + (" Giám đốc" if loai == "giam_doc" else ""), str(path))
         return header
 
@@ -335,24 +443,54 @@ class SyncService:
             if not rows:
                 continue
             nk_index: dict = {}
+            locals_: list[dict] = []
             for lr in self.db.query(f"SELECT * FROM {table} WHERE DaXoa = 0"):
                 if (table, lr["Ma"]) in incoming_ids:
                     continue
+                locals_.append(dict(lr))
                 k = natural_key(table, dict(lr))
                 if k is not None:
                     nk_index.setdefault(k, lr["Ma"])
+            taken: set[str] = set()
             for row in rows:
                 r = self._remap(table, row, id_map)
                 local = self.db.get(table, r["Ma"])
                 local = dict(local) if local else None
                 dup_ma = None
                 diff: list[str] = []
+                note, fill, default = "", {}, None
                 if local is None:
                     if r["DaXoa"]:
                         status = ST_DELETED
                     else:
                         dup_ma = nk_index.get(natural_key(table, r))
+                        reasons, strong = ["trùng " + ("ký hiệu, số hóa đơn" if table.startswith("HoaDon")
+                                                       else "thông tin chính")], True
+                        if not dup_ma and table in SUSPECT_FIELDS:
+                            best = None
+                            for lr in locals_:
+                                if lr["Ma"] in taken:
+                                    continue
+                                ok, sure, why = suspect_match(table, r, lr)
+                                if ok and (best is None or (sure, len(why)) > (best[1], len(best[2]))):
+                                    best = (lr["Ma"], sure, why)
+                            if best:
+                                dup_ma, strong, reasons = best[0], best[1], best[2]
                         status = ST_DUP if dup_ma else ST_NEW
+                        if dup_ma:
+                            taken.add(dup_ma)
+                            dup_row = dict(self.db.get(table, dup_ma))
+                            fill = fill_fields(r, dup_row)
+                            if table == "DongHoaDonDauVao" and not r.get("TuDong") and dup_row.get("TuDong"):
+                                # máy gửi đã phân loại tay, máy này mới tự phân loại: lấy phân loại tay
+                                fill.update({k: r.get(k) for k in CLASS_FIELDS if r.get(k) != dup_row.get(k)})
+                            diff = [k for k in differing_fields(r, dup_row) if k not in fill]
+                            note = "Nghi trùng: " + ", ".join(reasons)
+                            if fill:
+                                note += " · Gộp sẽ bổ sung: " + ", ".join(field_label(k) for k in fill)
+                            if diff:
+                                note += " · Khác nhau (giữ máy này): " + ", ".join(field_label(k) for k in diff)
+                            default = A_MERGE if strong else None
                 else:
                     bi, bl = business_fields(r), business_fields(local)
                     diff = [k for k in bi if bi.get(k) != bl.get(k)]
@@ -388,11 +526,14 @@ class SyncService:
                     cv_contract[row["Ma"]] = r["MaHopDong"]
                 action = (decisions or {}).get((table, row["Ma"]))
                 if action is None or (status != ST_DUP and action in (A_MERGE, A_BOTH)):
-                    action = DEFAULT_ACTION[status]
+                    action = default if status == ST_DUP else DEFAULT_ACTION[status]
+                if status == ST_CONFLICT and action is None and table == "DongHoaDonDauVao" \
+                        and bool(r.get("TuDong")) != bool(local.get("TuDong")):
+                    action = A_KEEP if r.get("TuDong") else A_TAKE      # phân loại tay luôn thắng phân loại tự động
                 if status == ST_CONFLICT and action is None and prefer:
                     action = A_TAKE if prefer == "gui" else A_KEEP
                 item = SyncItem(table, row["Ma"], r["Ma"], status, action, describe(table, r), group, r, local,
-                                dup_ma, diff)
+                                dup_ma, diff, note, fill)
                 if status == ST_DUP and action == A_MERGE:
                     id_map[(table, row["Ma"])] = dup_ma
                     item.ma = dup_ma
@@ -414,12 +555,19 @@ class SyncService:
 
     def apply(self, pkg: Package, *, user, decisions: dict | None = None, prefer: str | None = None,
               only_groups: set | None = None) -> dict:
-        """decisions: {(bảng, mã bên gửi): hành động}. only_groups: chỉ đồng bộ các hợp đồng đã chọn."""
+        """decisions: {(bảng, mã bên gửi): hành động}. only_groups: chỉ đồng bộ các hợp đồng đã chọn.
+        Đồng bộ tất cả (only_groups None) nhận cả cài đặt phần mềm dùng chung trong gói."""
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup = self.backup_dir() / f"QuanLyHopDong-truoc-dong-bo-{stamp}.db"
         self.db.backup_to(backup)
-        result = {"them": 0, "cap_nhat": 0, "gop": 0, "bo_qua": 0, "chua_xu_ly": 0, "loi": 0, "loi_chi_tiet": []}
+        result = {"them": 0, "cap_nhat": 0, "gop": 0, "bo_sung": 0, "bo_qua": 0, "chua_xu_ly": 0, "loi": 0, "loi_chi_tiet": []}
         id_map = self._id_map()
+        stamp_now = now_iso()
+        lines: list[str] = []
+
+        def received(table: str, ma: str):
+            self.db.conn.execute("INSERT OR REPLACE INTO NhanDongBo (Bang, Ma, ThoiDiem) VALUES (?, ?, ?)",
+                                 (table, ma, stamp_now))
 
         def apply_item(it: SyncItem):
             in_scope = only_groups is None or it.group is None or it.group in only_groups
@@ -434,17 +582,32 @@ class SyncService:
             if it.action == A_MERGE:
                 self.db.conn.execute("INSERT OR REPLACE INTO AnhXaMa (Bang, MaNgoai, MaNoiBo) VALUES (?, ?, ?)",
                                      (it.table, it.their_ma, it.dup_ma))
+                if it.fill:                     # giữ nguyên bản ghi máy này, chỉ điền thêm các ô còn trống
+                    self.db.update(it.table, it.dup_ma, it.fill, commit=False)
+                    result["bo_sung"] += 1
+                    if it.table == "DongHoaDonDauVao" and set(CLASS_FIELDS) & set(it.fill):
+                        lines.append(it.dup_ma)
                 result["gop"] += 1
                 return
             try:
                 self.db.upsert_raw(it.table, it.incoming)
+                received(it.table, it.incoming["Ma"])
                 result["them" if it.local is None else "cap_nhat"] += 1
             except sqlite3.IntegrityError as e:
                 result["loi"] += 1
                 result["loi_chi_tiet"].append(f"{it.label}: {e}")
 
+        result["cai_dat"] = 0
         try:
             self._classify(pkg, id_map, decisions, prefer, apply_item)
+            if only_groups is None:
+                result["cai_dat"] = self._apply_settings(pkg.body.get("settings") or [])
+            if lines:                           # dòng gộp nhận phân loại tay: cập nhật sổ TSCĐ, CCDC theo
+                from .assets import AssetService
+                svc = AssetService(self.db)
+                for ma in lines:
+                    line = self.db.get("DongHoaDonDauVao", ma)
+                    svc._sync_asset(line, self.db.get("HoaDonDauVao", line["MaHoaDon"]))
             self.db.conn.commit()
         except Exception:
             self.db.conn.rollback()
@@ -464,8 +627,10 @@ class SyncService:
             self.db.conn.execute(f"INSERT OR REPLACE INTO MaDaCap ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                                  [r[c] for c in cols])
         h = pkg.header
-        summary = (f"Thêm {result['them']}, cập nhật {result['cap_nhat']}, gộp {result['gop']}, "
-                   f"bỏ qua {result['bo_qua']}, chưa xử lý {result['chua_xu_ly']}, lỗi {result['loi']}")
+        summary = (f"Thêm {result['them']}, cập nhật {result['cap_nhat']}, gộp {result['gop']} "
+                   f"(bổ sung thông tin {result['bo_sung']}), "
+                   f"bỏ qua {result['bo_qua']}, chưa xử lý {result['chua_xu_ly']}, lỗi {result['loi']}"
+                   + (f", cài đặt {result['cai_dat']}" if result["cai_dat"] else ""))
         self.db.conn.execute(
             "INSERT INTO LichSuDongBo (MaMayDoiTac, TenMayDoiTac, Chieu, ThoiDiem, MocDuLieu, PhamVi, KetQua, TenDangNhap)"
             " VALUES (?, ?, 'Nhận', ?, ?, ?, ?, ?)",
@@ -476,6 +641,24 @@ class SyncService:
         result["sao_luu"] = str(backup)
         result["tom_tat"] = summary
         return result
+
+    def _apply_settings(self, rows: list[dict]) -> int:
+        """Cài đặt sửa sau (theo giờ sửa) được giữ, kể cả cài đặt đã xóa; không rõ giờ sửa thì giữ của máy này."""
+        n = 0
+        for r in rows:
+            key = r.get("Khoa")
+            if not key or not shared_setting(key):
+                continue
+            local = self.db.one("SELECT GiaTri, NgaySua FROM CaiDat WHERE Khoa = ?", (key,))
+            theirs = r.get("NgaySua") or ""
+            if local is not None and (theirs <= (local["NgaySua"] or "") or local["GiaTri"] == r.get("GiaTri")):
+                continue
+            if local is None and r.get("GiaTri") is None:
+                continue
+            self.db.conn.execute("INSERT OR REPLACE INTO CaiDat (Khoa, GiaTri, NgaySua) VALUES (?, ?, ?)",
+                                 (key, r.get("GiaTri"), theirs or None))
+            n += 1
+        return n
 
     def wipe_order_for_me(self, pkg) -> str | None:
         """Lệnh xóa sạch hợp lệ dành cho máy này trong gói (nếu có)."""

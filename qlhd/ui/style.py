@@ -1,6 +1,7 @@
 """Giao diện phẳng hiện đại, thanh điều hướng tối bên trái; hai chế độ sáng / tối."""
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from string import Template
@@ -16,6 +17,7 @@ THEMES = {
         "success": "#15803d", "success_soft": "#e7f6ec", "group_bg": "#eef3fb", "total_bg": "#f3f4f6",
         "topbar": "#ffffff", "sidebar": "#1c2434", "sidebar_text": "#d5dbe5", "sidebar_head": "#7d8aa0",
         "sidebar_sel": "#2b3750", "sidebar_hover": "#252f43", "button": "#ffffff", "button_hover": "#f3f5f8",
+        "grid": "#e9ecf1",          # đường kẻ ô bảng: mờ
     },
     "toi": {
         "bg": "#0f141c", "card": "#171e29", "border": "#263042", "border_strong": "#334155", "text": "#e5e7eb",
@@ -25,10 +27,13 @@ THEMES = {
         "success": "#4ade80", "success_soft": "#173324", "group_bg": "#1e2838", "total_bg": "#1b2331",
         "topbar": "#131a24", "sidebar": "#0b1017", "sidebar_text": "#cbd5e1", "sidebar_head": "#64748b",
         "sidebar_sel": "#1e293b", "sidebar_hover": "#151d2a", "button": "#1b2331", "button_hover": "#222c3d",
+        "grid": "#222b39",
     },
 }
 THEME_NAMES = {"sang": "Sáng", "toi": "Tối"}
+FONT_SIZES = {"nho": ("Nhỏ", 0.9), "vua": ("Vừa", 1.0), "lon": ("Lớn", 1.15), "rat_lon": ("Rất lớn", 1.3)}
 _current = "sang"
+_font = "vua"
 
 QSS = Template("""
 * { font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif; font-size: 10pt; color: $text; }
@@ -109,6 +114,14 @@ QPushButton#Primary:hover { background: $accent_hover; border-color: $accent_hov
 QPushButton#Primary:disabled { background: $border_strong; border-color: $border_strong; color: $card; }
 QPushButton#Danger { color: $danger; }
 QPushButton#Danger:hover { background: $danger_soft; border-color: $danger; }
+QFrame#SearchBox { background: $input; border: 1px solid $border_strong; border-radius: 6px; }
+QFrame#SearchBox QLineEdit#SearchEdit { border: none; background: transparent; padding: 4px 2px; }
+QToolButton#FilterButton { border: none; border-left: 1px solid $border; background: $header_bg; padding: 5px 10px;
+                           border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+QToolButton#FilterButton:hover { background: $button_hover; }
+QFrame#FilterPanel { background: $card; border: 1px solid $border_strong; border-radius: 8px; }
+QPushButton#Chip { border-radius: 13px; padding: 4px 12px; color: $muted; }
+QPushButton#Chip:checked { background: $accent_soft; color: $accent; border-color: $accent; font-weight: 600; }
 QPushButton#Link { border: none; background: transparent; color: $accent; padding: 2px 4px; }
 
 /* ---- ô nhập */
@@ -144,11 +157,11 @@ QCheckBox, QRadioButton { background: transparent; spacing: 6px; }
 /* ---- bảng, danh sách */
 QTableWidget, QTableView, QTreeWidget, QListWidget {
     background: $card; alternate-background-color: $alt_row; border: 1px solid $border; border-radius: 8px;
-    gridline-color: $border; selection-background-color: $sel; selection-color: $sel_text; outline: 0;
+    gridline-color: $grid; selection-background-color: $sel; selection-color: $sel_text; outline: 0;
 }
 QHeaderView { background: transparent; }
 QHeaderView::section {
-    background: $header_bg; border: none; border-bottom: 1px solid $border; border-right: 1px solid $border;
+    background: $header_bg; border: none; border-bottom: 1px solid $border; border-right: 1px solid $grid;
     padding: 6px 8px; color: $muted; font-weight: 600;
 }
 QTableCornerButton::section { background: $header_bg; border: none; }
@@ -159,6 +172,8 @@ QTabBar::tab:selected { color: $accent; border-bottom-color: $accent; font-weigh
 QTabBar::tab:hover:!selected { color: $text; }
 QGroupBox { background: $card; border: 1px solid $border; border-radius: 10px; margin-top: 14px; padding: 12px 10px 10px; }
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; font-weight: 700; }
+QGroupBox#Soft { background: $accent_soft; border: none; margin-top: 4px; padding: 6px 8px; }
+QWidget#CheckGrid { background: transparent; }
 QSplitter::handle { background: transparent; }
 QProgressBar { background: $border; border: none; border-radius: 4px; height: 8px; text-align: center; }
 QProgressBar::chunk { background: $success; border-radius: 4px; }
@@ -204,9 +219,26 @@ def _assets(theme: str) -> dict[str, str]:
     return out
 
 
+def font_scale() -> float:
+    return FONT_SIZES.get(_font, FONT_SIZES["vua"])[1]
+
+
+def font_size() -> str:
+    return _font
+
+
+def pt(size: float) -> str:
+    """Cỡ chữ theo tùy chọn cỡ chữ đang dùng (cho style đặt riêng trong mã)."""
+    return f"{size * font_scale():.1f}pt"
+
+
 def qss(theme: str = "sang") -> str:
     theme = theme if theme in THEMES else "sang"
-    return QSS.substitute({**THEMES[theme], **_assets(theme)})
+    text = QSS.substitute({**THEMES[theme], **_assets(theme)})
+    k = font_scale()
+    if k != 1.0:      # mọi cỡ chữ trong QSS nhân theo tỷ lệ đã chọn
+        text = re.sub(r"(\d+(?:\.\d+)?)pt", lambda m: f"{float(m.group(1)) * k:.1f}pt", text)
+    return text
 
 
 def color(key: str) -> str:
@@ -218,9 +250,11 @@ def current() -> str:
     return _current
 
 
-def apply_theme(app, theme: str = "sang") -> None:
-    global _current
+def apply_theme(app, theme: str = "sang", font: str | None = None) -> None:
+    global _current, _font
     _current = theme if theme in THEMES else "sang"
+    if font is not None:
+        _font = font if font in FONT_SIZES else "vua"
     t = THEMES[_current]
     pal = QPalette()
     for role, key in ((QPalette.Window, "bg"), (QPalette.WindowText, "text"), (QPalette.Base, "card"),

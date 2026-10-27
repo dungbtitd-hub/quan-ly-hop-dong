@@ -9,8 +9,14 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from .contracts import CONTRACT_STATUSES, PAY_METHODS, ContractService, ValidationError
+from . import vat
+from . import duplicates as dupl
+from .contracts import (CONTRACT_STATUSES, DURATION_UNITS, PAY_METHODS, ContractService, DuplicateWarning,
+                        ValidationError)
 from .db import Database
+
+RATE_OPTIONS = ("10%", "8%", "5%", "0%", "KCT", "KKKNT")
+VAT_AFTER = {"Hợp đồng": "GiaTriTongSauThue", "Hóa đơn đầu ra": "GiaTriSauThue"}
 
 # (tiêu đề cột, khóa, bắt buộc, kiểu)
 CONTRACT_COLS = [
@@ -20,13 +26,18 @@ CONTRACT_COLS = [
     ("Loại hợp đồng", "LoaiHD", False, "text"),
     ("Đối tác (Chủ đầu tư / Nhà cung cấp)", "TenDoiTac", True, "text"),
     ("MST đối tác", "MaThueDoiTac", False, "text"),
-    ("Giá trị trước thuế (đồng)", "GiaTriTruocThue", True, "money"),
+    ("Giá trị trước thuế (đồng)", "GiaTriTruocThue", False, "money"),
+    ("Thuế suất VAT (%)", "ThueSuat", False, "rate"),
     ("Tiền thuế VAT (đồng)", "VAT", False, "money"),
+    ("Giá trị sau thuế (đồng)", "GiaTriTongSauThue", False, "money"),
     ("Ngày ký", "NgayKy", True, "date"),
     ("Ngày bắt đầu dự kiến", "NgayBatDauDuKien", False, "date"),
+    ("Thời gian thực hiện", "ThoiGianThucHien", True, "int"),
+    ("Đơn vị thời gian", "DonViThoiGian", False, "unit"),
     ("Ngày kết thúc dự kiến", "NgayKetThucDuKien", False, "date"),
     ("Tình trạng", "TinhTrangHopDong", False, "status"),
     ("Ghi chú", "GhiChu", False, "text"),
+    ("Hồ sơ đã lấy về", "HoSoDaLay", False, "text"),
 ]
 INVOICE_COLS = [
     ("Số hợp đồng", "SoHopDong", True, "text"),
@@ -34,8 +45,10 @@ INVOICE_COLS = [
     ("Ký hiệu hóa đơn", "KyHieuHD", False, "text"),
     ("Số hóa đơn", "SoHoaDon", True, "text"),
     ("Ngày xuất hóa đơn", "NgayXuatHD", True, "date"),
-    ("Giá trị trước thuế (đồng)", "GiaTriTruocThue", True, "money"),
+    ("Giá trị trước thuế (đồng)", "GiaTriTruocThue", False, "money"),
+    ("Thuế suất VAT (%)", "ThueSuat", False, "rate"),
     ("Tiền thuế VAT (đồng)", "VAT", False, "money"),
+    ("Giá trị sau thuế (đồng)", "GiaTriSauThue", False, "money"),
     ("Ghi chú", "GhiChuHDDR", False, "text"),
 ]
 PAYMENT_COLS = [
@@ -52,13 +65,13 @@ SHEETS = [("Hợp đồng", CONTRACT_COLS), ("Hóa đơn đầu ra", INVOICE_COL
 EXAMPLES = {
     "Hợp đồng": [
         ["01/2026/HĐTV", "Tư vấn thiết kế trường THCS A", "Đầu ra", "Tư vấn thiết kế", "Ban QLDA quận Ba Đình",
-         "0101234567", 100000000, 10000000, date(2026, 1, 15), date(2026, 2, 1), date(2026, 12, 31),
-         "Đang thực hiện", "Ví dụ, xóa dòng này trước khi nhập"],
+         "0101234567", 100000000, "8%", None, None, date(2026, 1, 15), date(2026, 2, 1), 11, "tháng", None,
+         "Đang thực hiện", "Ví dụ, xóa dòng này trước khi nhập", "Bản vẽ khảo sát gốc, biên bản giao mốc (lấy 20/01/2026)"],
         ["05/2026/MB", "Mua vật tư văn phòng", "Đầu vào", "Mua sắm", "Công ty TNHH Vật tư B", "0309876543",
-         20000000, 2000000, date(2026, 2, 3), None, None, "Hoàn thành", "Ví dụ, xóa dòng này trước khi nhập"],
+         None, "10%", None, 22000000, date(2026, 2, 3), None, 30, "ngày", None, "Hoàn thành", "Ví dụ, xóa dòng này trước khi nhập"],
     ],
     "Hóa đơn đầu ra": [
-        ["01/2026/HĐTV", "1", "C26TAA", "0000012", date(2026, 3, 1), 50000000, 5000000, "Ví dụ"],
+        ["01/2026/HĐTV", "1", "C26TAA", "0000012", date(2026, 3, 1), 50000000, None, 4000000, None, "Ví dụ"],
     ],
     "Thanh toán": [
         ["01/2026/HĐTV", date(2026, 3, 10), 30000000, "Chuyển khoản", "FT26069123456", "0000012", "Ví dụ"],
@@ -75,6 +88,11 @@ GUIDE = [
     "4. Sheet 'Hóa đơn đầu ra' và 'Thanh toán' không bắt buộc; nối với hợp đồng qua cột Số hợp đồng"
     " (hợp đồng phải có trong file hoặc đã có trong phần mềm).",
     "5. Số tiền nhập dạng số, đơn vị đồng (VD 100000000). Ngày nhập dạng ngày của Excel hoặc dd/mm/yyyy.",
+    "   Giá trị: chỉ cần 2 trong 4 cột Trước thuế / Thuế suất VAT / Tiền thuế VAT / Sau thuế, phần mềm tự tính"
+    " phần còn lại: trước thuế + thuế suất; sau thuế + thuế suất; trước thuế + tiền VAT; sau thuế + tiền VAT."
+    " Thuế suất ghi 10%, 8%, 5%, 0%, KCT… Điền đủ cả ba số tiền thì phần mềm kiểm tra trước thuế + VAT = sau thuế.",
+    "   Thời gian thực hiện (bắt buộc): số ngày hoặc số tháng; Đơn vị thời gian ghi 'ngày' hoặc 'tháng' (để trống là"
+    " ngày). Phần mềm tự tính Ngày kết thúc dự kiến từ ngày bắt đầu (trống thì từ ngày ký), tính cả ngày bắt đầu.",
     "6. Loại hợp đồng, đối tác chưa có trong phần mềm sẽ được tự thêm vào danh mục.",
     "7. Phần mềm kiểm tra trùng: hợp đồng trùng Số hợp đồng + đối tác, hóa đơn trùng Ký hiệu + Số hóa đơn"
     " (cả với hóa đơn đã có lẫn các dòng khác trong file) và báo ngay khi chọn file. Dòng trùng hoặc lỗi"
@@ -104,7 +122,7 @@ def write_template(path: str | Path) -> Path:
             cell.font = Font(bold=True)
             cell.fill = req_fill if required else opt_fill
             cell.alignment = Alignment(wrap_text=True, vertical="center")
-            ws.column_dimensions[cell.column_letter].width = 18 if kind in ("money", "date") else 26
+            ws.column_dimensions[cell.column_letter].width = 18 if kind in ("money", "date", "rate") else 26
             if kind == "chieu":
                 cell.comment = Comment("Đầu ra hoặc Đầu vào", "QLHD")
         ws.row_dimensions[1].height = 34
@@ -120,9 +138,11 @@ def write_template(path: str | Path) -> Path:
         for c, (_, _, _, kind) in enumerate(cols, start=1):
             letter = ws.cell(1, c).column_letter
             options = {"chieu": ["Đầu ra", "Đầu vào"], "status": list(CONTRACT_STATUSES),
-                       "method": list(PAY_METHODS)}.get(kind)
+                       "unit": list(DURATION_UNITS),
+                       "method": list(PAY_METHODS), "rate": list(RATE_OPTIONS)}.get(kind)
             if options:
-                dv = DataValidation(type="list", formula1='"' + ",".join(options) + '"', allow_blank=True)
+                dv = DataValidation(type="list", formula1='"' + ",".join(options) + '"', allow_blank=True,
+                                    showErrorMessage=kind != "rate")
                 ws.add_data_validation(dv)
                 dv.add(f"{letter}2:{letter}2000")
             elif kind == "money":
@@ -184,22 +204,57 @@ def _to_money(v) -> int:
     return int(s)
 
 
+def _to_int(v) -> int:
+    if v in (None, ""):
+        return 0
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    s = str(v).strip().split()[0] if str(v).strip() else ""
+    if not s.isdigit() or int(s) <= 0:
+        raise ValueError(f"cần số nguyên dương: {v}")
+    return int(s)
+
+
 def _norm(s) -> str:
     return " ".join(str(s or "").split()).strip()
 
 
+def _header_index(header: tuple, cols) -> list[int | None]:
+    """Vị trí từng cột theo tên tiêu đề (file mẫu bản cũ ít cột hơn vẫn đọc đúng); không khớp thì theo thứ tự."""
+    names = [" ".join(str(h or "").replace("*", "").split()).lower() for h in header]
+    idx = [names.index(label.lower()) if label.lower() in names else None for label, *_ in cols]
+    if sum(i is not None for i in idx) * 2 < len(cols):
+        return list(range(len(cols)))
+    return idx
+
+
 def _read_sheet(ws, cols, sheet_name) -> list[ImportRow]:
     out = []
-    for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if row is None or all(v in (None, "") for v in row[:len(cols)]):
+    rows = ws.iter_rows(values_only=True)
+    header = next(rows, None) or ()
+    idx = _header_index(header, cols)
+    for r_idx, row in enumerate(rows, start=2):
+        if row is None or all(v in (None, "") for v in row):
             continue
-        values, errors = {}, []
-        for (label, key, required, kind), v in zip(cols, list(row) + [None] * len(cols)):
+        row = list(row)
+        cells = [row[i] if i is not None and i < len(row) else None for i in idx]
+        values, errors, blank = {}, [], set()
+        for (label, key, required, kind), v in zip(cols, cells):
+            if v in (None, ""):
+                blank.add(key)
             try:
                 if kind == "money":
                     values[key] = _to_money(v)
                 elif kind == "date":
                     values[key] = _to_date(v)
+                elif kind == "rate":
+                    values[key] = vat.parse_rate(v)
+                elif kind == "int":
+                    values[key] = _to_int(v)
+                elif kind == "unit":
+                    values[key] = _norm(v).lower() or "ngày"
+                    if values[key] not in DURATION_UNITS:
+                        raise ValueError("ghi 'ngày' hoặc 'tháng'")
                 else:
                     values[key] = _norm(v) if v not in (None, "") else ""
             except ValueError as e:
@@ -213,11 +268,40 @@ def _read_sheet(ws, cols, sheet_name) -> list[ImportRow]:
                 errors.append(f"Tình trạng không hợp lệ: {values[key]}")
             if kind == "method" and values.get(key) and values[key] not in PAY_METHODS:
                 errors.append(f"Hình thức không hợp lệ: {values[key]}")
-        item = ImportRow(sheet_name, r_idx, values, errors)
+        notes = []
+        if sheet_name in VAT_AFTER and not errors:
+            notes = _complete_vat(values, blank, VAT_AFTER[sheet_name], errors)
+        item = ImportRow(sheet_name, r_idx, values, errors + notes)
         if errors:
             item.status = "Lỗi"
         out.append(item)
     return out
+
+
+def _complete_vat(v: dict, blank: set, after_key: str, errors: list[str]) -> list[str]:
+    """Tự tính trước thuế / VAT / sau thuế / thuế suất từ hai dữ kiện; trả về các lưu ý cho màn xem trước."""
+    def given(k):
+        return None if k in blank else v[k]
+
+    before, after = given("GiaTriTruocThue"), given(after_key)
+    if not before and not after:
+        errors.append("Thiếu giá trị: cần Giá trị trước thuế hoặc Giá trị sau thuế")
+        return []
+    res = vat.complete(before, given("VAT"), after, v.get("ThueSuat") or "")
+    if res.error:
+        errors.append(res.error)
+        return []
+    v["GiaTriTruocThue"], v["VAT"], v[after_key], v["ThueSuat"] = res.before, res.vat, res.after, res.rate
+    notes = [f"Lưu ý: {n}" for n in res.notes]
+    auto = {"Trước thuế": res.before, "VAT": res.vat, "Sau thuế": res.after}
+    shown = [f"{k} {fmt_vnd(auto[k])}" if k in auto else f"{k} {res.rate}" for k in res.computed]
+    if shown:
+        notes.insert(0, "Tự tính: " + ", ".join(shown))
+    return notes
+
+
+def fmt_vnd(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
 
 
 def read_workbook(path: str | Path, db: Database) -> list[ImportRow]:
@@ -298,7 +382,7 @@ def _check_invoice_no(r: ImportRow, by_no: dict[str, list[dict]]) -> None:
     elif unsure:
         r.status, r.errors = "Nghi trùng", ["Trùng số hóa đơn, thiếu ký hiệu để phân biệt: " + label(unsure[0])]
     elif other:
-        r.errors = ["Lưu ý: cùng số với " + label(other[0]) + ", khác ký hiệu"]
+        r.errors.append("Lưu ý: cùng số với " + label(other[0]) + ", khác ký hiệu")
     same.append({"kh": kh, "so": so, "noi": f"ở dòng {r.line} trong file"})
 
 
@@ -310,7 +394,17 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
     """Lưu các dòng hợp lệ, trả về số lượng đã lưu theo từng sheet."""
     cs = ContractService(db)
     types = {t["TenLoaiHD"].lower(): t["Ma"] for t in cs.contract_types()}
-    saved = {"Hợp đồng": 0, "Hóa đơn đầu ra": 0, "Thanh toán": 0, "loi": []}
+    saved = {"Hợp đồng": 0, "Hóa đơn đầu ra": 0, "Thanh toán": 0, "loi": [], "trung": []}
+
+    def keep(r, label, fn, v, e):
+        """Giống dữ liệu đã có: không lưu, để người nhập rà soát (saved["trung"]: nhãn, lý do, hàm lưu, dữ liệu)."""
+        r.status, r.errors = "Nghi trùng", e.matches
+        saved["trung"].append((f"{label} dòng {r.line}", e.matches, fn, v))
+
+    def confirmed(r, v):
+        if r.force:                  # đã tích "Vẫn lưu" ở màn xem trước
+            v[dupl.CONFIRM_KEY] = True
+        return v
     by_no: dict[str, str] = {}
     for r in rows:
         if r.sheet != "Hợp đồng" or not r.ok:
@@ -325,8 +419,10 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
                                                   "Chủ đầu tư" if v["ChieuHopDong"] == "Đầu ra" else "Nhà cung cấp")
         v["TinhTrangHopDong"] = v["TinhTrangHopDong"] or "Chưa bắt đầu"
         try:
-            by_no[v["SoHopDong"].lower()] = cs.save_contract(v)
+            by_no[v["SoHopDong"].lower()] = cs.save_contract(confirmed(r, v))
             saved["Hợp đồng"] += 1
+        except DuplicateWarning as e:
+            keep(r, "Hợp đồng", cs.save_contract, v, e)
         except ValidationError as e:
             r.status, r.errors = "Lỗi", [str(e)]
             saved["loi"].append(f"Hợp đồng dòng {r.line}: {e}")
@@ -348,8 +444,10 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
             if not ma_hd:
                 raise ValidationError("Không tìm thấy hợp đồng")
             v["MaHopDong"] = ma_hd
-            inv_by_no[invoice_no(v["SoHoaDon"])] = cs.save_out_invoice(v)
+            inv_by_no[invoice_no(v["SoHoaDon"])] = cs.save_out_invoice(confirmed(r, v))
             saved["Hóa đơn đầu ra"] += 1
+        except DuplicateWarning as e:
+            keep(r, "Hóa đơn", cs.save_out_invoice, v, e)
         except ValidationError as e:
             r.status, r.errors = "Lỗi", [str(e)]
             saved["loi"].append(f"Hóa đơn dòng {r.line}: {e}")
@@ -371,8 +469,10 @@ def import_rows(db: Database, rows: list[ImportRow]) -> dict:
                     ma_inv = hit[0]["Ma"] if hit else None
                 v["MaHDDauRa"] = ma_inv
             v["HinhThuc"] = v["HinhThuc"] or "Chuyển khoản"
-            cs.save_payment(v)
+            cs.save_payment(confirmed(r, v))
             saved["Thanh toán"] += 1
+        except DuplicateWarning as e:
+            keep(r, "Thanh toán", cs.save_payment, v, e)
         except ValidationError as e:
             r.status, r.errors = "Lỗi", [str(e)]
             saved["loi"].append(f"Thanh toán dòng {r.line}: {e}")

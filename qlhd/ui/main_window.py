@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QPainter
@@ -15,13 +15,19 @@ from .. import APP_NAME, __version__
 from ..core.reports import fmt_date
 from ..developer import DEVELOPER
 from . import icons, style
+from ..core import alerts as al
+from ..core.assets import REVIEW_AFTER_UPGRADE, AssetService
+from ..core.contracts import backfill_vat
 from .accounts_page import AccountsPage
+from .alerts_ui import NotificationsDialog, TelegramDialog, send_digest_async
+from .assets_page import AssetsPage
 from .auth_dialogs import MyAccountDialog, WipeDataDialog
 from .contracts_page import CatalogPage, ContractsPage
 from .finance_page import FinancePage
 from .home_page import HomePage, reminder_text
 from .invoices_page import InvoicesPage
 from .reports_page import ReportsPage
+from .dup_review_page import DupReviewPage
 from .splash import AboutDialog
 from .sync_page import SyncPage
 from .widgets import confirm, info
@@ -145,7 +151,10 @@ class MainWindow(QMainWindow):
                            ("Hóa đơn đầu ra", "invoice_out", lambda: InvoicesPage(ctx, "ra"), ctx.can("HoaDonDauRa")),
                            ("Hóa đơn đầu vào", "invoice_in", lambda: InvoicesPage(ctx, "vao"),
                             ctx.can("HoaDonDauVao")),
-                           ("Báo cáo", "report", lambda: ReportsPage(ctx), ctx.can("BaoCao"))]),
+                           ("Tài sản, CCDC", "box", lambda: AssetsPage(ctx), ctx.can("TaiSan")),
+                           ("Báo cáo", "report", lambda: ReportsPage(ctx), ctx.can("BaoCao")),
+                           ("Rà soát trùng lặp", "search", lambda: DupReviewPage(ctx),
+                            any(ctx.can(f) for f in ("HopDong", "HoaDonDauRa", "HoaDonDauVao")))]),
             ("TÀI CHÍNH", [("Thu chi (đã khóa)", "lock", self.finance_page, self.finance_page is not None)]),
             ("DỮ LIỆU", [("Đồng bộ", "sync", self.sync_page, ctx.can("DongBo")),
                          ("Danh mục", "catalog", lambda: CatalogPage(ctx), ctx.can("DanhMuc")),
@@ -163,8 +172,12 @@ class MainWindow(QMainWindow):
         if self.finance_page:
             self.finance_page.unlocked.connect(self._finance_changed)
             self.finance_page.locked.connect(self._finance_changed)
+        for page in self.pages:                         # trang nào có liên kết sang hợp đồng thì mở được ngay
+            if page is not self.home and hasattr(page, "open_contract"):
+                page.open_contract.connect(self.show_contract)
         self.home.open_page.connect(self.go_to)
         self.home.open_contract.connect(self.show_contract)
+        self.home.open_review.connect(lambda: self.show_review())
         self.home.add_contract.connect(self._add_contract)
         self.nav.currentRowChanged.connect(self._go)
         self.nav.setCurrentItem(self.items["Tổng quan"])
@@ -177,10 +190,14 @@ class MainWindow(QMainWindow):
         self.startup_timer.timeout.connect(self._startup_notices)
         self.startup_timer.start(500)
         self.last_activity = time.monotonic()
-        QApplication.instance().installEventFilter(_ActivityFilter(self))
+        self.activity_filter = _ActivityFilter(self)
+        QApplication.instance().installEventFilter(self.activity_filter)
         self.idle_timer = QTimer(self)
         self.idle_timer.timeout.connect(self._check_idle)
         self.idle_timer.start(15_000)
+        self.tg_timer = QTimer(self)               # bản tin Telegram hằng ngày đúng giờ đã đặt
+        self.tg_timer.timeout.connect(lambda: self._telegram_tick(False))
+        self.tg_timer.start(60_000)
 
     # ---------------------------------------------------------------- dựng khung
     def _sidebar(self) -> QWidget:
@@ -239,6 +256,14 @@ class MainWindow(QMainWindow):
         self.theme_btn.setIconSize(QSize(18, 18))
         self.theme_btn.clicked.connect(self.toggle_theme)
         lay.addWidget(self.theme_btn)
+        self.font_btn = QToolButton()
+        self.font_btn.setObjectName("IconButton")
+        self.font_btn.setFixedSize(38, 38)
+        self.font_btn.setText("Aa")
+        self.font_btn.setToolTip("Cỡ chữ")
+        self.font_btn.setPopupMode(QToolButton.InstantPopup)
+        self.font_btn.setMenu(self._font_menu())
+        lay.addWidget(self.font_btn)
         self.bell = QToolButton()
         self.bell.setObjectName("IconButton")
         self.bell.setFixedSize(38, 38)
@@ -266,16 +291,21 @@ class MainWindow(QMainWindow):
                    ("Đổi mật khẩu…", "key", lambda: self._my_account(1)), None,
                    ("Bản quyền / Gia hạn…", "key", self._renew),
                    ("Giới thiệu / Nhà phát triển", "info", self._about), None,
-                   ("Chuyển giao diện sáng / tối", "moon", self.toggle_theme),
+                   ("Chuyển giao diện sáng / tối", "moon", self.toggle_theme), "font",
+                   ("Thông báo…", "bell", self._bell_menu),
                    ("Sao lưu ngay", "save", self._backup), ("Khôi phục từ bản sao lưu…", "import", self._restore),
                    ("Mở thư mục dữ liệu", "folder",
                     lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.ctx.data_dir))))]
         if self.ctx.user["VaiTro"] == "Giám đốc":
-            entries += [None, ("Xóa sạch dữ liệu…", "trash", self._wipe)]
+            entries += [("Cảnh báo qua Telegram…", "bell", self.telegram_settings),
+                        None, ("Xóa sạch dữ liệu…", "trash", self._wipe)]
         entries += [None, ("Đăng xuất", "logout", self._logout), ("Thoát", None, self.close)]
         for e in entries:
             if e is None:
                 m.addSeparator()
+                continue
+            if e == "font":
+                m.addMenu(self._font_menu())
                 continue
             text, icon_name, fn = e
             a = QAction(text, self)
@@ -284,6 +314,26 @@ class MainWindow(QMainWindow):
             a.triggered.connect(fn)
             m.addAction(a)
         return m
+
+    def _font_menu(self) -> QMenu:
+        m = QMenu("Cỡ chữ", self)
+        self.font_actions = {}
+        for key, (label, k) in style.FONT_SIZES.items():
+            a = QAction(f"{label} ({round(k * 100)}%)", self)
+            a.setCheckable(True)
+            a.setChecked(style.font_size() == key)
+            a.triggered.connect(lambda _=False, key=key: self.set_font_size(key))
+            m.addAction(a)
+            self.font_actions[key] = a
+        return m
+
+    def set_font_size(self, key: str) -> None:
+        """Đổi cỡ chữ toàn phần mềm, nhớ cho lần mở sau trên máy này."""
+        style.apply_theme(QApplication.instance(), style.current(), key)
+        self.ctx.db.set_setting("co_chu", key)
+        for k, a in self.font_actions.items():
+            a.setChecked(k == key)
+        self.refresh_all()
 
     def _paint_topbar(self):
         dark = style.current() == "toi"
@@ -353,40 +403,116 @@ class MainWindow(QMainWindow):
             page.refresh()
         self.update_badges()
 
+    def _alert_types(self) -> list[str]:
+        """Ngữ cảnh thông báo tài khoản này theo dõi, trong phạm vi quyền được xem."""
+        types = al.AlertSettings(self.ctx.db).app_types(self.ctx.user["TenDangNhap"])
+        if not self.ctx.can("HopDong"):
+            types = [t for t in types if t == "hddv_xem_lai"]
+        if "Tài sản, CCDC" not in self.items:
+            types = [t for t in types if t != "hddv_xem_lai"]
+        return types
+
     def update_badges(self):
+        backfill_vat(self.ctx.db)          # dữ liệu cũ / nhận từ máy bản cũ đủ dữ kiện mà chưa tính VAT
         today = date.today().isoformat()
-        expiring = self.ctx.cs.expiring(today)
-        tasks = self.ctx.cs.overdue_tasks(today)
-        n = len(expiring) + len(tasks)
+        if "Tài sản, CCDC" in self.items:
+            svc = AssetService(self.ctx.db)
+            svc.backfill()
+            pending = svc.review_count()
+            self.items["Tài sản, CCDC"].setData(BADGE_ROLE, pending or None)
         if "Hợp đồng" in self.items:
-            self.items["Hợp đồng"].setData(BADGE_ROLE, len(expiring) or None)
+            self.items["Hợp đồng"].setData(BADGE_ROLE, len(self.ctx.cs.expiring(today)) or None)
+        self._alerts = al.collect(self.ctx.db, today, self._alert_types())
+        n = len([a for a in self._alerts if a.loai != "hddv_xem_lai"]) + \
+            (1 if any(a.loai == "hddv_xem_lai" for a in self._alerts) else 0)
         self.bell_badge.setText(str(n) if n < 100 else "99")
         self.bell_badge.setVisible(n > 0)
-        self.bell.setToolTip(f"{n} việc cần xử lý" if n else "Không có việc cần nhắc")
-        self._alerts = expiring, tasks
+        self.bell.setToolTip(f"{n} thông báo" if n else "Không có thông báo")
 
     def _bell_menu(self):
-        expiring, tasks = getattr(self, "_alerts", ([], []))
-        m = QMenu(self)
-        if not expiring and not tasks:
-            m.addAction("Không có việc cần nhắc").setEnabled(False)
-        for r in expiring[:10]:
-            a = m.addAction(icons.icon("contract", style.color("warn" if r["ConLai"] > 0 else "danger"), 16),
-                            f"{r['SoHopDong']} – {r['ConLaiText']}")
-            a.triggered.connect(lambda _=False, ma=r["Ma"]: self.show_contract(ma))
-        for r in tasks[:10]:
-            a = m.addAction(icons.icon("alert", style.color("danger"), 16),
-                            f"{r['TenNoiDungCV']} ({r['SoHopDong']}) – quá hạn {r['QuaHan']} ngày")
-            a.triggered.connect(lambda _=False, ma=r["MaHopDong"]: self.show_contract(ma))
-        m.addSeparator()
-        m.addAction("Xem tất cả ở Tổng quan").triggered.connect(lambda: self.go_to("Tổng quan"))
-        m.exec(self.bell.mapToGlobal(self.bell.rect().bottomLeft()))
+        dlg = NotificationsDialog(self.ctx, self)
+        dlg.open_contract.connect(self.show_contract)
+        dlg.open_review.connect(self.show_review)
+        dlg.exec()
+        self.update_badges()
+
+    def show_review(self, code: str | None = None) -> None:
+        page = next((p for p in self.pages if type(p).__name__ == "AssetsPage"), None)
+        if page is not None:
+            self.go_to("Tài sản, CCDC")
+            page.show_review(code)
+
+    def telegram_settings(self):
+        TelegramDialog(self.ctx, self).exec()
+
+    def _telegram_tick(self, opening: bool) -> None:
+        st = al.AlertSettings(self.ctx.db)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if not st.due(now, opening):
+            return
+        st.mark_sent(now[:10])            # đánh dấu trước để không gửi lặp khi mạng chậm
+
+        def done(err: str):
+            if err:
+                st.mark_sent("")           # lỗi: lần sau thử lại
+                self.statusBar().showMessage(err, 15_000)
+            else:
+                self.statusBar().showMessage("Đã gửi bản tin hằng ngày qua Telegram.", 10_000)
+        send_digest_async(self.ctx, done)
 
     def _startup_notices(self):
         st = self.ctx.acc.license_status()
         if st["trang_thai"] == "sap_het":
             info(self, st["thong_bao"], "Sắp hết hạn bản quyền")
         self._daily_reminder()
+        self._pending_reminder()
+        self._upgrade_review()
+        self._telegram_tick(True)
+
+    def _upgrade_review(self):
+        """Sau khi nâng cấp phiên bản: rà soát các dòng hóa đơn đầu vào phần mềm đã tự phân loại, báo dòng nghi ngờ
+        để kế toán xem lại. Chỉ cảnh báo, không đổi dữ liệu. Mỗi phiên bản một lần."""
+        if not self.ctx.can("TaiSan") or "Tài sản, CCDC" not in self.items:
+            return
+        key = "ra_soat_phan_loai_phien_ban"
+        if self.ctx.db.setting(key) == __version__:
+            return
+        self.ctx.db.set_setting(key, __version__)
+        rows = AssetService(self.ctx.db).review_lines(REVIEW_AFTER_UPGRADE)
+        if not rows:
+            return
+        by: dict[str, int] = {}
+        for r in rows:
+            by[r["MaCanhBao"]] = by.get(r["MaCanhBao"], 0) + 1
+        from ..core.assets import FLAGS
+        detail = "\n".join(f"• {FLAGS[c][0]}: {n} dòng" for c, n in by.items())
+        box = QMessageBox(QMessageBox.Information, "Rà soát sau nâng cấp",
+                          f"Phiên bản {__version__} đã rà soát lại hóa đơn đầu vào phần mềm tự phân loại trước đây. "
+                          f"Có {len(rows)} dòng cần kế toán xem lại:\n\n{detail}\n\nPhần mềm không tự đổi phân "
+                          "loại. Mở danh sách để xem lại ngay?", QMessageBox.Yes | QMessageBox.No, self)
+        box.button(QMessageBox.Yes).setText("Mở danh sách")
+        box.button(QMessageBox.No).setText("Để sau")
+        box.setModal(False)
+        yes = box.button(QMessageBox.Yes)
+        box.buttonClicked.connect(lambda b: b is yes and self.show_review())
+        box.open()
+        self.review_box = box
+
+    def _pending_reminder(self):
+        """Báo kế toán (mỗi ngày một lần) khi còn dòng hóa đơn đầu vào phần mềm chưa tự phân loại được."""
+        if not self.ctx.can("TaiSan", "Sua") or "Tài sản, CCDC" not in self.items:
+            return
+        n = AssetService(self.ctx.db).pending_count()
+        key = f"nhac_phan_loai_ngay:{self.ctx.user['TenDangNhap']}"
+        if self.ctx.db.setting("ra_soat_phan_loai_phien_ban") != __version__:
+            return                          # lần đầu chạy bản mới: thông báo rà soát sau nâng cấp thay cho nhắc này
+        today = date.today().isoformat()
+        if not n or self.ctx.db.setting(key) == today:
+            return
+        self.ctx.db.set_setting(key, today)
+        if confirm(self, f"Có {n} dòng hóa đơn đầu vào phần mềm chưa tự phân loại được (chi phí trong kỳ, CCDC hay "
+                         "TSCĐ). Mở màn Tài sản, CCDC để phân loại ngay?", "Cần kế toán phân loại"):
+            self.show_review()
 
     def _daily_reminder(self):
         """Nhắc hợp đồng sắp hết hạn một lần mỗi ngày cho mỗi tài khoản, khi đăng nhập."""
@@ -397,9 +523,10 @@ class MainWindow(QMainWindow):
         if self.ctx.db.setting(key) == today:
             return
         self.ctx.db.set_setting(key, today)
-        text = reminder_text(self.ctx, today)
+        items = al.collect(self.ctx.db, today, [t for t in self._alert_types() if t != "hddv_xem_lai"])
+        text = al.digest_text(items, self.ctx.company, today) if items else reminder_text(self.ctx, today)
         if text:
-            box = QMessageBox(QMessageBox.Information, "Nhắc hợp đồng sắp hết hạn", text, QMessageBox.Ok, self)
+            box = QMessageBox(QMessageBox.Information, "Bản tin hôm nay", text, QMessageBox.Ok, self)
             box.setModal(False)
             box.open()
             self.reminder_box = box
@@ -476,6 +603,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev):
         self.startup_timer.stop()
         self.idle_timer.stop()
+        self.tg_timer.stop()
+        QApplication.instance().removeEventFilter(self.activity_filter)   # đăng xuất / đăng nhập lại không cộng dồn
         if self.finance_page and not self.ctx.wiped:
             self.finance_page.lock()
         self.ctx.lock_finance()

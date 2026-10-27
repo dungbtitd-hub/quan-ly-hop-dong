@@ -13,7 +13,7 @@ from ..core import finance as fin
 from ..core.finance import FinanceError, FinanceStore
 from ..core.reports import fmt_date
 from ..core.sync import (A_BOTH, A_KEEP, A_MERGE, A_SKIP, A_TAKE, ACTION_LABELS, PKG_EXT, ST_CONFLICT, ST_DUP,
-                         ST_SAME, SyncError)
+                         ST_SAME, SyncError, field_label)
 from . import style
 from .widgets import (CheckList, Combo, DataTable, DateEdit, ask_secret, button, confirm, error, hint, info,
                       page_title, toolbar)
@@ -143,15 +143,18 @@ class SyncPage(QWidget):
         lay.addLayout(toolbar(self.b_open, "stretch"))
         lay.addWidget(self.pkg_info)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Nội dung", "Trạng thái", "Trường khác nhau", "Xử lý"])
+        self.tree.setHeaderLabels(["Nội dung", "Trạng thái", "Chi tiết (trường khác nhau, lý do nghi trùng)", "Xử lý"])
         self.tree.setColumnWidth(0, 420)
         self.tree.setColumnWidth(1, 150)
-        self.tree.setColumnWidth(2, 220)
+        self.tree.setColumnWidth(2, 360)
         lay.addWidget(self.tree, 1)
         self.hide_same = QCheckBox("Ẩn các dòng giống nhau")
         self.hide_same.setChecked(True)
         self.hide_same.toggled.connect(self._fill_tree)
         self.b_all = button("Đồng bộ tất cả", self.apply_all, "Primary")
+        self.b_all.setToolTip("Nhận toàn bộ dữ liệu trong gói và cài đặt phần mềm dùng chung (nhắc hạn, mẫu báo cáo, "
+                              "ngữ cảnh thông báo, Tổng quan, giao diện…). Telegram, tên máy, bộ lọc đang chọn vẫn "
+                              "giữ riêng từng máy.")
         self.b_sel = button("Đồng bộ hợp đồng đã tích", self.apply_selected)
         self.b_all.setEnabled(False)
         self.b_sel.setEnabled(False)
@@ -192,6 +195,9 @@ class SyncPage(QWidget):
                f" – phạm vi: {h['pham_vi']}.")
         if self.pkg.is_director:
             txt += " <b>Gói Giám đốc (kèm thu chi đã mã hóa).</b>"
+        if h.get("pham_vi") != "Toàn bộ dữ liệu":
+            txt += (" Gói chỉ có một phần dữ liệu; muốn chuyển toàn bộ dữ liệu thì ở máy gửi chọn phạm vi "
+                    "\"Toàn bộ dữ liệu\".")
         if self.pkg.already_imported:
             txt += " <span style='color:" + style.color("warn") + "'>Gói này đã được nhận trước đây.</span>"
         self.pkg_info.setText(txt)
@@ -224,7 +230,9 @@ class SyncPage(QWidget):
                 g.setFont(0, f)
                 self.tree.addTopLevelItem(g)
                 groups[key] = g
-            row = QTreeWidgetItem([it.label, it.status, ", ".join(it.diff[:6])])
+            row = QTreeWidgetItem([it.label, it.status, it.note or ", ".join(field_label(k) for k in it.diff[:6])])
+            if it.note:
+                row.setToolTip(2, it.note.replace(" · ", "\n"))
             if it.status in STATUS_COLORS:
                 from PySide6.QtGui import QColor
                 row.setForeground(1, QColor(style.color(STATUS_COLORS[it.status])))
@@ -235,7 +243,9 @@ class SyncPage(QWidget):
             combo.currentIndexChanged.connect(lambda _=0, it=it, c=combo: setattr(it, "action", c.value()))
             self.tree.setItemWidget(row, 3, combo)
         self.tree.expandAll()
-        self.counts.setText(" · ".join(f"{k}: {v}" for k, v in stats.items()))
+        n_set = len(self.pkg.body.get("settings") or [])
+        self.counts.setText(" · ".join(f"{k}: {v}" for k, v in stats.items())
+                            + (f" · Cài đặt phần mềm: {n_set} mục (nhận khi bấm Đồng bộ tất cả)" if n_set else ""))
 
     def _decisions(self) -> dict:
         return {(it.table, it.their_ma): it.action for it in self.items if it.action}
@@ -277,6 +287,29 @@ class SyncPage(QWidget):
             if dlg.exec() != QDialog.Accepted:
                 return
             prefer = "gui" if r1.isChecked() else "may_nay"
+        unsure = [it for it in self.items if it.status == ST_DUP and not it.action
+                  and (groups is None or it.group is None or it.group in groups)]
+        if unsure:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Hóa đơn nghi trùng")
+            dl = QVBoxLayout(dlg)
+            dl.addWidget(QLabel(f"Có {len(unsure)} dòng nghi trùng (khớp một phần với dữ liệu máy này) chưa chọn cách "
+                                "xử lý:\n\n" + "\n".join(f"• {it.label}: {it.note}" for it in unsure[:8])
+                                + (f"\n… và {len(unsure) - 8} dòng khác." if len(unsure) > 8 else "")))
+            r1 = QRadioButton("Giữ cả hai (thêm thành bản ghi riêng)")
+            r2 = QRadioButton("Gộp vào bản ghi ở máy này (chỉ bổ sung ô còn trống)")
+            r1.setChecked(True)
+            dl.addWidget(r1)
+            dl.addWidget(r2)
+            row = QHBoxLayout()
+            row.addStretch(1)
+            row.addWidget(button("Tiếp tục", dlg.accept, "Primary"))
+            row.addWidget(button("Quay lại chọn từng dòng", dlg.reject))
+            dl.addLayout(row)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            for it in unsure:
+                it.action = A_BOTH if r1.isChecked() else A_MERGE
         try:
             res = self.ctx.sync.apply(self.pkg, user=self.ctx.user, decisions=self._decisions(), prefer=prefer,
                                       only_groups=groups)

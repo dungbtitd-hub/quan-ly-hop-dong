@@ -25,7 +25,7 @@ def test_match_by_contract_number_in_xml_other_info(company):
     db = company["gd"].db
     d = sample_data(db)
     # đối tác có hai hợp đồng đầu ra: MST thôi chưa đủ, phải nhờ số hợp đồng
-    d["cs"].save_contract({"SoHopDong": "02/2026/HĐTV", "TenHopDong": "Thiết kế nhà thi đấu", "ChieuHopDong": "Đầu ra",
+    d["cs"].save_contract({"ThoiGianThucHien": 6, "SoHopDong": "02/2026/HĐTV", "TenHopDong": "Thiết kế nhà thi đấu", "ChieuHopDong": "Đầu ra",
                            "MaDoiTac": d["cdt"], "GiaTriTruocThue": 1, "NgayKy": "2026-03-01"})
     inv = parse_invoice(_xml(ttkhac="<TTKhac><TTin><TTruong>Số hợp đồng</TTruong><KDLieu>string</KDLieu>"
                                     "<DLieu>02/2026/HDTV</DLieu></TTin></TTKhac>"))

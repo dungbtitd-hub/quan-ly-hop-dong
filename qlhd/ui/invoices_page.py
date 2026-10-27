@@ -3,19 +3,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
-from ..core.contracts import INVOICE_KINDS, TAX_GROUPS, ValidationError, guess_tax_group, rate_from_amounts
+from ..core import in_invoice_excel, invoice_match, pdf_invoice, vat, xml_invoice
+from ..core.assets import AssetService
+from ..core.duplicates import CONFIRM_KEY as DUP_OK
+from ..core.contracts import (DuplicateWarning, INSTALLMENTS, INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
+                              rate_from_amounts)
 from ..core.finance_import import FileNeedsPassword
 from ..core.reports import fmt_date, fmt_money
-from .contracts_page import payment_dialog
+from .contracts_page import edit_payment, payment_dialog
 from . import style
-from .widgets import (Combo, DataTable, EditCombo, FormDialog, ask_secret, button, confirm, error, hint, info,
-                      page_title, run_safely, toolbar)
+from .in_invoice_form import InInvoiceDialog
+from .filter_box import FilterBox
+from .widgets import (VAT_HINT, Combo, DataTable, bulk_edit, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
+                      error, hint, info, rate_field, require,
+                      page_title, run_safely, toolbar, confirm_duplicate, review_duplicates)
 
 
 CHOOSE = "__chon_hop_dong__"
@@ -24,10 +30,129 @@ TAX_GROUP_OPTIONS = [("Chịu thuế GTGT (nhóm 1 bảng kê)", "Chịu thuế"
                      ("Không chịu thuế GTGT (nhóm 5 bảng kê)", "Không chịu thuế")]
 
 
+RATES_FIELD = {"key": "ChiTietThueSuat", "label": "Nhiều mức thuế", "kind": "rates",
+               "hint": "Chỉ khi hóa đơn có hàng hóa chịu nhiều mức thuế (VD 10% và 8%): nhập tiền hàng, VAT theo từng "
+                       "mức; tổng tự điền vào Trước thuế / VAT / Sau thuế."}
+
+
 def _check_chosen(values: dict) -> None:
     if values.get("MaHopDong") == CHOOSE:
         raise ValidationError("Chưa chọn hợp đồng cho hóa đơn. Hãy chọn đúng hợp đồng"
                               " (hóa đơn đầu vào không theo hợp đồng thì chọn \"Không có – mua hàng trực tiếp\").")
+
+
+def contract_label(h) -> str:
+    return f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})"
+
+
+def open_contracts(ctx, kind: str, keep=()) -> list:
+    """Hợp đồng cùng chiều với hóa đơn. Hóa đơn đầu ra: bỏ các hợp đồng đã xuất đủ hóa đơn theo giá trị,
+    luôn giữ các hợp đồng trong `keep` (hợp đồng đang gắn với hóa đơn, hợp đồng gợi ý)."""
+    keep = {k for k in keep if k}
+    out = []
+    for h in ctx.cs.contracts("Đầu ra" if kind == "ra" else "Đầu vào"):
+        s = ctx.cs.summary(h["Ma"]) if kind == "ra" else None
+        if kind != "ra" or h["Ma"] in keep or not s["GiaTriHD"] or s["ConPhaiXuat"] > 0:
+            out.append(h)
+    return out
+
+
+def type_filter_field(ctx, contracts) -> dict:
+    """Ô lọc danh sách hợp đồng theo loại hợp đồng (chỉ để tìm nhanh, không lưu)."""
+    used = {h["MaLoaiHD"] for h in contracts}
+    types = [(t["TenLoaiHD"], t["Ma"]) for t in ctx.cs.contract_types() if t["Ma"] in used]
+    return {"key": "_LoaiHD", "label": "Loại hợp đồng", "kind": "combo", "filter": True,
+            "options": [("(Tất cả loại)", None)] + types + ([("(Chưa phân loại)", "")] if None in used else []),
+            "hint": "Chọn loại để thu gọn danh sách hợp đồng bên dưới. Hợp đồng đã xuất đủ hóa đơn không hiện."}
+
+
+def bind_type_filter(dlg, contracts, head=()) -> None:
+    """Đổi loại hợp đồng thì lọc lại ô Hợp đồng; head: các lựa chọn luôn đứng đầu (Chọn hợp đồng, Không có…)."""
+    combo, kinds = dlg.widget("MaHopDong"), dlg.widget("_LoaiHD")
+    by_ma = {h["Ma"]: h for h in contracts}
+    full = [(combo.itemText(i), combo.itemData(i)) for i in range(combo.count())]
+
+    def apply(*_):
+        loai, cur = kinds.value(), combo.value()
+        opts = [o for o in full if o[1] not in by_ma or loai is None or (by_ma[o[1]]["MaLoaiHD"] or "") == loai]
+        combo.set_options(opts, cur if any(o[1] == cur for o in opts) else (opts[0][1] if opts else None))
+    kinds.currentIndexChanged.connect(apply)
+
+
+NO_BUYER = "__chua_ghi__"
+
+
+def _person(name) -> str:
+    return " ".join((name or "").split())
+
+
+def out_invoice_row(ctx, inv) -> dict:
+    """Hóa đơn đầu ra kèm tình trạng thanh toán: đã thu, còn phải thu, ngày thanh toán, số tham chiếu sao kê."""
+    r = dict(inv)
+    pays = ctx.cs.invoice_payments(inv["Ma"])
+    r["_pays"] = pays
+    r["DaThu"] = sum(p["SoTien"] for p in pays)
+    r["ConPhaiThu"] = inv["GiaTriSauThue"] - r["DaThu"] if inv["TinhChatHD"] != "Đã hủy" else 0
+    r["TTThanhToan"] = "Đã hủy" if inv["TinhChatHD"] == "Đã hủy" else payment_status(inv["GiaTriSauThue"], r["DaThu"])
+    r["NgayTT"] = ", ".join(fmt_date(p["NgayThanhToan"]) for p in pays)
+    r["SoThamChieuSK"] = ", ".join(p["SoThamChieuSK"] for p in pays if p["SoThamChieuSK"])
+    return r
+
+
+def advance_dialog(parent, r: dict, adv: list) -> int | None:
+    """Hỏi số tiền tạm ứng khấu trừ vào hóa đơn: mặc định tối đa có thể, nhập thấp hơn tùy ý; 0 = không khấu trừ."""
+    tong = sum(a["SoTien"] for a in adv)
+    most = min(tong, max(r["ConPhaiThu"], 0))
+    lines = "\n".join(f"• {fmt_date(a['NgayThanhToan'])}: {fmt_money(a['SoTien'])} đ" for a in adv[:8])
+    dlg = FormDialog("Khấu trừ tạm ứng", [
+        {"key": "SoTien", "label": f"Khấu trừ vào hóa đơn số {r['SoHoaDon']}", "kind": "money",
+         "hint": f"Hợp đồng có {fmt_money(tong)} đ tạm ứng chưa khấu trừ:\n{lines}\n\nTối đa {fmt_money(most)} đ "
+                 f"(hóa đơn còn phải thu {fmt_money(max(r['ConPhaiThu'], 0))} đ). Nhập số thấp hơn để khấu trừ một "
+                 "phần; 0 = không khấu trừ. Phần còn phải thu ghi ở bước sau."}],
+        {"SoTien": most}, parent,
+        validate=lambda v: require(0 <= (v["SoTien"] or 0) <= most,
+                                   f"Chỉ khấu trừ được từ 0 đến {fmt_money(most)} đ."))
+    left = QLabel()                                   # tự tính tạm ứng còn phải khấu trừ theo số đang nhập
+    left.setObjectName("Warn")
+
+    def show_left(v=None):
+        v = dlg.widget("SoTien").value() if v is None else v
+        left.setText(f"Sau lần này: tạm ứng còn phải khấu trừ {fmt_money(max(tong - (v or 0), 0))} đ · "
+                     f"hóa đơn còn phải thu {fmt_money(max(r['ConPhaiThu'] - (v or 0), 0))} đ")
+    dlg.widget("SoTien").valueChanged.connect(show_left)
+    show_left()
+    dlg.layout().insertWidget(dlg.layout().count() - 1, left)
+    if dlg.exec() != QDialog.Accepted:
+        return None
+    return int(dlg.values()["SoTien"] or 0)
+
+
+def invoice_payment(ctx, parent, r: dict) -> bool:
+    """Ghi nhận thanh toán cho một hóa đơn đầu ra; đã có lần thanh toán thì mở chi tiết (sửa / xóa / thu thêm)."""
+    if ctx.cs.invoice_payments(r["Ma"]):
+        dlg = InvoicePaymentsDialog(ctx, r, parent)
+        dlg.exec()
+        return dlg.changed
+    changed = False
+    adv = ctx.cs.advances(r["MaHopDong"]) if r["ConPhaiThu"] > 0 else []
+    if adv:
+        amount = advance_dialog(parent, r, adv)
+        if amount:
+            done = ctx.cs.apply_advances(r["MaHopDong"], r["Ma"], amount)
+            ctx.db.log(ctx.user["TenDangNhap"] if ctx.user else None, "Khấu trừ tạm ứng",
+                       f"{fmt_money(done)} đ vào hóa đơn {r['SoHoaDon']}")
+            changed = True
+            r = out_invoice_row(ctx, ctx.db.get("HoaDonDauRa", r["Ma"]))
+            con = sum(a["SoTien"] for a in ctx.cs.advances(r["MaHopDong"]))
+            info(parent, f"Đã khấu trừ {fmt_money(done)} đ tạm ứng vào hóa đơn số {r['SoHoaDon']}.\n"
+                         f"Tạm ứng còn phải khấu trừ: {fmt_money(con)} đ.\n"
+                         + ("Hóa đơn đã đủ, không cần ghi thêm." if r["ConPhaiThu"] <= 0
+                            else f"Hóa đơn còn phải thu {fmt_money(r['ConPhaiThu'])} đ: ghi ở bước tiếp theo."))
+            if r["ConPhaiThu"] <= 0:
+                return True
+    v = payment_dialog(ctx, parent, r["MaHopDong"], {"MaHDDauRa": r["Ma"], "SoTien": max(r["ConPhaiThu"], 0),
+                                                     "HinhThuc": "Chuyển khoản"})
+    return bool(v and run_safely(parent, ctx.cs.save_payment, v)) or changed
 
 
 def parse_invoice_file(path: str) -> dict:
@@ -50,9 +175,23 @@ def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[di
     if d.get("ThieuTruong"):
         notes.append("Chưa đọc được: " + ", ".join(d["ThieuTruong"]) + ". Hãy kiểm tra và nhập bổ sung.")
     rate = d.get("ThueSuatHD") or rate_from_amounts(d["GiaTriTruocThue"], d["VAT"])
+    try:
+        rate = vat.parse_rate(rate)
+    except ValueError:
+        notes.append(f"Thuế suất \"{rate}\" chưa nhận ra, hãy chọn lại.")
+        rate = ""
     common = {"KyHieuMauSo": d["KyHieuMauSo"], "KyHieuHD": d["KyHieuHD"], "GiaTriTruocThue": d["GiaTriTruocThue"],
               "VAT": d["VAT"], "GiaTriSauThue": d["GiaTriSauThue"], "MatHang": d.get("MatHang") or "",
-              "ThueSuat": rate, "DuongDanTep": path}
+              "ThueSuat": rate, "DuongDanTep": path, "ChiTietThueSuat": None}
+    lines = vat.load_breakdown(d.get("ChiTietThueSuat"))
+    if len(lines) > 1:            # nhiều mức thuế: giữ chi tiết từng mức nếu cộng lại khớp tổng hóa đơn
+        b, t = sum(x["TruocThue"] for x in lines), sum(x["VAT"] for x in lines)
+        if abs(b - d["GiaTriTruocThue"]) <= len(lines) and abs(t - d["VAT"]) <= len(lines):
+            common.update(ChiTietThueSuat=vat.dump_breakdown(lines), ThueSuat=vat.breakdown_rate(lines))
+            notes.append("Hóa đơn nhiều mức thuế: " + "; ".join(
+                f"{x['ThueSuat']}: tiền hàng {fmt_money(x['TruocThue'])}, VAT {fmt_money(x['VAT'])}" for x in lines) + ".")
+        else:
+            notes.append(f"Hóa đơn nhiều mức thuế ({rate}): chi tiết từng mức không khớp tổng, chỉ lưu tổng tiền.")
     if kind == "ra":
         if mst_cty and d["MSTNguoiBan"] and d["MSTNguoiBan"] != mst_cty:
             notes.append(f"MST người bán {d['MSTNguoiBan']} khác MST công ty {mst_cty}.")
@@ -60,12 +199,17 @@ def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[di
                     MSTNguoiMua=d["MSTNguoiMua"], TinhChatHD="Gốc"), notes
     if mst_cty and d["MSTNguoiMua"] and d["MSTNguoiMua"] != mst_cty:
         notes.append(f"MST người mua {d['MSTNguoiMua']} khác MST công ty {mst_cty}: hóa đơn có thể không phải của công ty.")
+    if d.get("PhiKhac"):
+        common.update(PhiKhac=d["PhiKhac"], TenPhiKhac=d.get("TenPhiKhac") or "Phí bảo vệ môi trường")
+        notes.append(f"Hóa đơn có {common['TenPhiKhac']} {fmt_money(d['PhiKhac'])} đ ngoài thuế GTGT.")
     return dict(common, SoHoaDonGoc=d["SoHoaDon"], TenNhaCungCap=d["TenNguoiBan"], MaThueNCC=d["MSTNguoiBan"],
-                NgayNhanHD=d["NgayLap"] or None, NhomThue=guess_tax_group(d["VAT"])), notes
+                NgayNhanHD=d["NgayLap"] or None, NhomThue=guess_tax_group(d["VAT"]), _Dong=d.get("Dong") or None), notes
 
 
 class InvoicesPage(QWidget):
     """kind = 'ra' (hóa đơn đầu ra) hoặc 'vao' (hóa đơn đầu vào)."""
+
+    open_contract = Signal(str)       # Ma hợp đồng – mở trang Hợp đồng tại hợp đồng đó
 
     def __init__(self, ctx, kind: str, parent=None):
         super().__init__(parent)
@@ -74,17 +218,46 @@ class InvoicesPage(QWidget):
         self.feature = "HoaDonDauRa" if kind == "ra" else "HoaDonDauVao"
         lay = QVBoxLayout(self)
         lay.addWidget(page_title("Hóa đơn đầu ra" if kind == "ra" else "Hóa đơn đầu vào"))
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Tìm số hóa đơn, đối tác, MST, mặt hàng…")
-        self.search.setMinimumWidth(280)
-        self.search.textChanged.connect(self.refresh)
+        # ô tìm kiếm có sẵn kèm bộ lọc đa ngữ cảnh (Lọc ▾)
+        if kind == "ra":
+            self.box = FilterBox(ctx, "hoa_don_ra", "Tìm số hóa đơn, người mua, MST, mặt hàng, số tiền…", [
+                ("Số hóa đơn", "SoHoaDon"), ("Ký hiệu", "KyHieuHD"), ("Người mua", "TenNguoiMua"),
+                ("MST người mua", "MSTNguoiMua"), ("Số HĐ", "SoHopDong"), ("Mặt hàng", "MatHang"),
+                ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue")],
+                money_keys=("GiaTriSauThue", "GiaTriTruocThue", "ConPhaiThu"), date_key="NgayXuatHD",
+                date_label="Ngày lập", filters=[
+                    {"key": "tt", "label": "Thanh toán", "options": [
+                        ("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du"),
+                        ("Đã thu, chưa có số tham chiếu sao kê", "chua_sk")]},
+                    {"key": "hd", "label": "Hợp đồng", "options": [("Mọi hợp đồng", None)]}])
+        else:
+            self.box = FilterBox(ctx, "hoa_don_vao", "Tìm số hóa đơn, người bán, MST, mặt hàng, số tiền…", [
+                ("Số hóa đơn", "SoHoaDonGoc"), ("Ký hiệu", "KyHieuHD"), ("Người bán", "TenNhaCungCap"),
+                ("MST người bán", "MaThueNCC"), ("Số HĐ", "SoHopDong"), ("Mặt hàng", "MatHang"),
+                ("Người mua hàng", "NguoiMuaHang"), ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue")],
+                money_keys=("GiaTriSauThue", "GiaTriTruocThue"), date_key="NgayNhanHD", date_label="Ngày",
+                filters=[
+                    {"key": "co_hd", "label": "Hợp đồng", "options": [
+                        ("Tất cả", None), ("Có hợp đồng", "co"), ("Mua trực tiếp (không HĐ)", "khong")]},
+                    {"key": "thue", "label": "Nhóm thuế", "options": [
+                        ("Mọi nhóm thuế", None), ("Chịu thuế GTGT", "Chịu thuế"),
+                        ("Không chịu thuế GTGT", "Không chịu thuế")]},
+                    {"key": "tt", "label": "Thanh toán", "options": [
+                        ("Tất cả", None), ("Đã trả (có số sao kê)", "da"), ("Chưa có số sao kê", "chua")]},
+                    {"key": "ncc", "label": "Người bán", "options": [("Mọi người bán", None)]},
+                    {"key": "nguoi_mua", "label": "Người mua hàng", "options": [("Mọi người mua hàng", None)]}])
+        self.box.changed.connect(self.refresh)
+        self.search = self.box.edit
         add_ok = ctx.can(self.feature, "Them")
         b_add = button("Nhập tay", self.add_manual, "Primary")
         b_file = button("Nhập từ file XML / PDF (chọn nhiều file)…", self.add_from_files)
         b_edit = button("Sửa", self.edit)
         b_del = button("Xóa", self.delete, "Danger")
         b_open = button("Mở tệp gốc", self.open_file)
-        btns = [b_add, b_file, b_edit, b_del, b_open]
+        b_hd = button("Mở hợp đồng", self.go_contract)
+        b_hd.setToolTip("Mở hợp đồng của hóa đơn đang chọn để xem, sửa hợp đồng, công việc, thanh toán")
+        b_hd.setEnabled(ctx.can("HopDong"))
+        btns = [b_add, b_file, b_edit, b_del, b_open, b_hd]
         b_add.setEnabled(add_ok)
         b_file.setEnabled(add_ok)
         if kind == "vao":
@@ -95,29 +268,36 @@ class InvoicesPage(QWidget):
         b_del.setEnabled(ctx.can(self.feature, "Xoa"))
         if kind == "ra":
             b_pay = button("Ghi nhận thanh toán", self.add_payment)
+            b_pays = button("Thanh toán đã ghi…", self.show_payments)
             b_pay.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
-            btns.insert(4, b_pay)
-            self.only = Combo([("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du")])
-        else:
-            self.only = Combo([("Tất cả", None), ("Có hợp đồng", "co"), ("Mua trực tiếp (không HĐ)", "khong"),
-                               ("Chịu thuế GTGT", "Chịu thuế"), ("Không chịu thuế GTGT", "Không chịu thuế")])
-        self.only.currentIndexChanged.connect(self.refresh)
-        lay.addLayout(toolbar(*btns, "stretch", self.only, self.search))
+            btns[4:4] = [b_pay, b_pays]
+            b_ref = button("Cập nhật số sao kê…", self.update_refs)
+            b_ref.setEnabled(ctx.can("HoaDonDauRa", "Sua"))
+            btns.insert(6, b_ref)
+        self.only = self.box.combo("tt")
+        top = toolbar(*btns, "stretch")
+        top.addWidget(self.box, 0, Qt.AlignTop)
+        lay.addLayout(top)
         if kind == "ra":
-            cols = [("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"), ("NgayXuatHD", "Ngày lập", "date"),
+            cols = [("STT", "STT", "int"),
+                    ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"), ("NgayXuatHD", "Ngày lập", "date"),
                     ("SoHopDong", "Số HĐ", "text"), ("TenNguoiMua", "Người mua", "text"),
                     ("MatHang", "Mặt hàng", "text"), ("ThueSuat", "Thuế suất", "text"),
                     ("GiaTriTruocThue", "Trước thuế", "money"), ("VAT", "VAT", "money"),
                     ("GiaTriSauThue", "Sau thuế", "money"), ("DaThu", "Đã thu", "money"),
-                    ("ConPhaiThu", "Còn phải thu", "money"), ("TinhChatHD", "Tính chất", "text")]
+                    ("ConPhaiThu", "Còn phải thu", "money"), ("TTThanhToan", "Tình trạng thanh toán", "text"),
+                    ("NgayTT", "Ngày thanh toán", "text"), ("SoThamChieuSK", "Số tham chiếu sao kê", "text"),
+                    ("TinhChatHD", "Tính chất", "text"), ("DotThanhToan", "Đợt thanh toán", "text")]
         else:
-            cols = [("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDonGoc", "Số", "text"), ("NgayNhanHD", "Ngày", "date"),
+            cols = [("STT", "STT", "int"),
+                    ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDonGoc", "Số", "text"), ("NgayNhanHD", "Ngày", "date"),
                     ("TenNhaCungCap", "Tên người bán", "text"), ("MaThueNCC", "MST người bán", "text"),
                     ("MatHang", "Mặt hàng", "text"), ("GiaTriTruocThue", "Trước thuế", "money"),
-                    ("ThueSuat", "Thuế suất", "text"), ("VAT", "VAT", "money"), ("GiaTriSauThue", "Sau thuế", "money"),
+                    ("ThueSuat", "Thuế suất", "text"), ("VAT", "VAT", "money"), ("PhiKhac", "Phí BVMT", "money"),
+                    ("GiaTriSauThue", "Sau thuế", "money"),
                     ("NhomThue", "Nhóm thuế", "text"), ("NguoiMuaHang", "Người mua hàng", "text"),
                     ("SoThamChieuSK", "Số sao kê", "text"), ("SoHopDong", "Số HĐ đầu vào", "text")]
-        self.table = DataTable(cols)
+        self.table = DataTable(cols, multi=True)      # chọn nhiều dòng (Ctrl / Shift) để sửa cùng lúc
         self.table.activated_row.connect(lambda _: self.edit())
         lay.addWidget(self.table, 1)
         self.total = QLabel()
@@ -125,40 +305,52 @@ class InvoicesPage(QWidget):
 
     def refresh(self):
         contracts = {r["Ma"]: r["SoHopDong"] for r in self.ctx.db.query("SELECT Ma, SoHopDong FROM HopDong")}
-        k = self.search.text().strip().lower()
         rows = []
         if self.kind == "ra":
-            for inv in self.ctx.cs.out_invoices():
-                r = dict(inv)
+            invs = self.ctx.cs.out_invoices()
+            used = sorted({i["MaHopDong"] for i in invs if i["MaHopDong"]}, key=lambda m: contracts.get(m, ""))
+            self.box.set_options("hd", [("Mọi hợp đồng", None)] + [(contracts.get(m, m), m) for m in used])
+            tt, hd = self.box.value("tt"), self.box.value("hd")
+            for inv in invs:
+                if hd and inv["MaHopDong"] != hd:
+                    continue
+                r = out_invoice_row(self.ctx, inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "")
-                r["DaThu"] = self.ctx.cs.invoice_paid(inv["Ma"])
-                r["ConPhaiThu"] = inv["GiaTriSauThue"] - r["DaThu"] if inv["TinhChatHD"] != "Đã hủy" else 0
-                if self.only.value() == "con" and r["ConPhaiThu"] <= 0 or self.only.value() == "du" and r["ConPhaiThu"] > 0:
+                pays = r.pop("_pays")
+                if tt == "con" and r["ConPhaiThu"] <= 0 or tt == "du" and r["ConPhaiThu"] > 0:
                     continue
-                if k and k not in " ".join(str(r.get(x) or "") for x in ("SoHoaDon", "KyHieuHD", "TenNguoiMua",
-                                                                          "MSTNguoiMua", "SoHopDong", "MatHang")).lower():
+                if tt == "chua_sk" and not any(
+                        p["HinhThuc"] == "Chuyển khoản" and not (p["SoThamChieuSK"] or "").strip() for p in pays):
                     continue
-                rows.append(r)
+                if self.box.matches(r):
+                    rows.append(r)
         else:
-            for inv in self.ctx.cs.in_invoices():
+            invs = self.ctx.cs.in_invoices()
+            self.box.set_options("ncc", [("Mọi người bán", None)] + [
+                (n, n) for n in sorted({i["TenNhaCungCap"] for i in invs if i["TenNhaCungCap"]})])
+            buyers = sorted({_person(i["NguoiMuaHang"]) for i in invs if _person(i["NguoiMuaHang"])}, key=str.lower)
+            self.box.set_options("nguoi_mua", [("Mọi người mua hàng", None), ("(Chưa ghi người mua hàng)", NO_BUYER)]
+                                 + [(n, n) for n in buyers])
+            co_hd, thue, tt, ncc, buyer = (self.box.value(k) for k in ("co_hd", "thue", "tt", "ncc", "nguoi_mua"))
+            for inv in invs:
+                if buyer and _person(inv["NguoiMuaHang"]) != ("" if buyer == NO_BUYER else buyer):
+                    continue
                 r = dict(inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "") if inv["MaHopDong"] else "(Mua trực tiếp)"
-                only = self.only.value()
-                if only == "co" and not inv["MaHopDong"] or only == "khong" and inv["MaHopDong"] \
-                        or only in TAX_GROUPS and inv["NhomThue"] != only:
+                paid = bool((inv["SoThamChieuSK"] or "").strip())
+                if co_hd == "co" and not inv["MaHopDong"] or co_hd == "khong" and inv["MaHopDong"] \
+                        or thue and inv["NhomThue"] != thue or ncc and inv["TenNhaCungCap"] != ncc \
+                        or tt == "da" and not paid or tt == "chua" and paid:
                     continue
-                if k and k not in " ".join(str(r.get(x) or "") for x in (
-                        "SoHoaDonGoc", "KyHieuHD", "TenNhaCungCap", "MaThueNCC", "SoHopDong", "MatHang",
-                        "NguoiMuaHang", "SoThamChieuSK")).lower():
-                    continue
-                rows.append(r)
+                if self.box.matches(r):
+                    rows.append(r)
         self.table.set_rows(rows)
         self.total.setText(f"{len(rows)} hóa đơn · Tổng sau thuế {fmt_money(sum(r['GiaTriSauThue'] for r in rows))} đ")
 
     # ---- biểu mẫu
-    def _fields(self, contract_hint: str = "", must_choose: bool = False, suggested=()):
+    def _fields(self, contract_hint: str = "", must_choose: bool = False, suggested=(), keep=None):
         """must_choose: chưa xác định được hợp đồng, buộc người nhập tự chọn (không điền sẵn)."""
-        fields = self._base_fields()
+        fields = self._base_fields(keep=[keep] + [h["Ma"] for h in suggested])
         f = next(f for f in fields if f["key"] == "MaHopDong")
         if must_choose or self.kind == "ra":
             ids = [h["Ma"] for h in suggested]
@@ -169,26 +361,28 @@ class InvoicesPage(QWidget):
             f["hint"] = contract_hint
         return fields
 
-    def _base_fields(self):
+    def _base_fields(self, keep=()):
+        self._contracts = open_contracts(self.ctx, self.kind, keep)
+        contracts = [(contract_label(h), h["Ma"]) for h in self._contracts]
         if self.kind == "ra":
-            contracts = [(f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
-                         for h in self.ctx.cs.contracts("Đầu ra")]
-            return [{"key": "MaHopDong", "label": "Hợp đồng đầu ra", "kind": "combo", "options": contracts},
+            return [type_filter_field(self.ctx, self._contracts),
+                    {"key": "MaHopDong", "label": "Hợp đồng đầu ra", "kind": "combo", "options": contracts},
                     {"key": "KyHieuMauSo", "label": "Ký hiệu mẫu số"}, {"key": "KyHieuHD", "label": "Ký hiệu hóa đơn"},
                     {"key": "SoHoaDon", "label": "Số hóa đơn", "required": True},
                     {"key": "NgayXuatHD", "label": "Ngày xuất", "kind": "date"},
                     {"key": "TenNguoiMua", "label": "Tên người mua"}, {"key": "MSTNguoiMua", "label": "MST người mua"},
-                    {"key": "MatHang", "label": "Mặt hàng"}, {"key": "ThueSuat", "label": "Thuế suất",
-                                                               "hint": "VD 10%, 8%, 0%, KCT."},
+                    {"key": "MatHang", "label": "Mặt hàng"}, rate_field(), dict(RATES_FIELD),
                     {"key": "GiaTriTruocThue", "label": "Trước thuế", "kind": "money"},
                     {"key": "VAT", "label": "VAT", "kind": "money"},
                     {"key": "GiaTriSauThue", "label": "Sau thuế", "kind": "money",
-                     "hint": "Để 0 thì phần mềm tự tính = trước thuế + VAT."},
+                     "hint": VAT_HINT},
                     {"key": "TinhChatHD", "label": "Tính chất", "kind": "combo", "options": list(INVOICE_KINDS)},
+                    {"key": "DotThanhToan", "label": "Đợt thanh toán", "kind": "combo", "options": INSTALLMENTS,
+                     "hint": "Hóa đơn cho đợt nào của hợp đồng. Hợp đồng chỉ có một hóa đơn mà chưa ghi đợt thì "
+                             "coi là thanh toán toàn bộ: tổng lệch giá trị hợp đồng sẽ được cảnh báo."},
                     {"key": "DuongDanTep", "label": "Tệp gốc (XML/PDF)"},
                     {"key": "GhiChuHDDR", "label": "Ghi chú"}]
-        contracts = [("(Không có – mua hàng trực tiếp)", None)] + [
-            (f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"]) for h in self.ctx.cs.contracts("Đầu vào")]
+        contracts = [("(Không có – mua hàng trực tiếp)", None)] + contracts
         return [{"key": "KyHieuMauSo", "label": "Ký hiệu mẫu số"}, {"key": "KyHieuHD", "label": "Ký hiệu hóa đơn"},
                 {"key": "SoHoaDonGoc", "label": "Số hóa đơn", "required": True},
                 {"key": "TenNhaCungCap", "label": "Tên người bán", "required": True},
@@ -196,10 +390,14 @@ class InvoicesPage(QWidget):
                 {"key": "NgayNhanHD", "label": "Ngày hóa đơn", "kind": "date"},
                 {"key": "MatHang", "label": "Mặt hàng"},
                 {"key": "GiaTriTruocThue", "label": "Trước thuế", "kind": "money"},
-                {"key": "ThueSuat", "label": "Thuế suất", "hint": "VD 10%, 8%, 0%, KCT."},
+                rate_field(), dict(RATES_FIELD),
                 {"key": "VAT", "label": "VAT", "kind": "money"},
+                {"key": "PhiKhac", "label": "Phí BVMT / phí khác", "kind": "money",
+                 "hint": "Chỉ hóa đơn có phí ngoài VAT (VD nước sạch: phí bảo vệ môi trường). Không có thì để 0."},
+                {"key": "TyLePhiKhac", "label": "Tỷ lệ phí", "kind": "combo_edit", "options": ["10%"],
+                 "hint": "Nhập tỷ lệ thì phí = tỷ lệ × trước thuế."},
                 {"key": "GiaTriSauThue", "label": "Sau thuế", "kind": "money",
-                 "hint": "Để 0 thì phần mềm tự tính = trước thuế + VAT."},
+                 "hint": VAT_HINT},
                 {"key": "NhomThue", "label": "Nhóm thuế GTGT", "kind": "combo", "options": TAX_GROUP_OPTIONS,
                  "hint": "Dùng để tách nhóm khi xuất bảng kê hóa đơn mua vào."},
                 {"key": "NguoiMuaHang", "label": "Người mua hàng", "kind": "combo_edit", "options": self.buyers(),
@@ -217,26 +415,49 @@ class InvoicesPage(QWidget):
         return sorted(set(names), key=str.lower)
 
     def _save(self, values: dict, ma: str | None = None, contract_hint: str = "", must_choose: bool = False,
-              suggested=()) -> bool:
+              suggested=(), parent=None) -> bool:
         fn = self.ctx.cs.save_out_invoice if self.kind == "ra" else self.ctx.cs.save_in_invoice
         values = dict(values)
         if must_choose or (self.kind == "ra" and not values.get("MaHopDong")):
             values["MaHopDong"] = CHOOSE
-        dlg = FormDialog("Hóa đơn đầu ra" if self.kind == "ra" else "Hóa đơn đầu vào",
-                         self._fields(contract_hint, must_choose, suggested), values, self, validate=_check_chosen)
+        fields = self._fields(contract_hint, must_choose, suggested, keep=values.get("MaHopDong"))
+        if self.kind == "ra":
+            dlg = FormDialog("Hóa đơn đầu ra", fields, values, parent or self, validate=_check_chosen)
+            bind_type_filter(dlg, self._contracts)
+        else:           # một biểu mẫu: thông tin hóa đơn và phân loại từng dòng hàng
+            dlg = InInvoiceDialog(self.ctx, "Hóa đơn đầu vào", fields, values, parent or self,
+                                  validate=_check_chosen, ma=ma)
         while dlg.exec() == QDialog.Accepted:
+            v = dlg.values()
+            v.pop("_LoaiHD", None)
+            data = dict(v, _Dong=values.get("_Dong")) if self.kind == "vao" else v
             try:
-                fn(dlg.values(), ma)
-                return True
+                try:
+                    saved = fn(dict(data), ma)
+                except DuplicateWarning as e:     # giống hóa đơn đã có: rà soát xác nhận mới thêm
+                    if not confirm_duplicate(parent or self, e):
+                        continue
+                    saved = fn(dict(data, **{DUP_OK: True}), ma)
             except ValidationError as e:
-                error(self, str(e))
+                error(parent or self, str(e))
+                continue
+            if self.kind == "vao":
+                errors = dlg.save_classes(saved or ma)
+                if errors:
+                    error(parent or self, "Đã lưu hóa đơn, nhưng chưa lưu được phân loại:\n" + "\n".join(errors[:10]))
+            return True
         return False
 
     def add_manual(self):
         if self.kind == "ra" and not self.ctx.cs.contracts("Đầu ra"):
             return info(self, "Chưa có hợp đồng đầu ra nào. Hãy thêm hợp đồng trước.")
-        if self._save({"TinhChatHD": "Gốc"}):
+        values = {"TinhChatHD": "Gốc"}
+        cur = self.table.current() if self.kind == "ra" else None
+        if cur and cur.get("MaHopDong"):             # đang chọn hóa đơn của hợp đồng nào thì điền sẵn hợp đồng đó
+            values["MaHopDong"] = cur["MaHopDong"]
+        if self._save(values):
             self.refresh()
+            self.notify_pending()
 
     def add_from_files(self):
         if self.kind == "ra" and not self.ctx.cs.contracts("Đầu ra"):
@@ -249,6 +470,7 @@ class InvoicesPage(QWidget):
             dlg = BatchInvoiceDialog(self, paths)
             if dlg.exec() == QDialog.Accepted:
                 self.refresh()
+                self.notify_pending()
             return
         path = paths[0]
         d = read_invoice_file(self, path)
@@ -264,6 +486,7 @@ class InvoicesPage(QWidget):
             info(self, f"{Path(path).name}\n\n" + "\n".join(notes), "Lưu ý")
         if self._save(values, contract_hint=m.note, must_choose=not m.ma, suggested=m.goi_y):
             self.refresh()
+            self.notify_pending()
 
     def save_excel_template(self):
         path, _ = QFileDialog.getSaveFileName(self, "Lưu file mẫu", "Mau_nhap_hoa_don_dau_vao.xlsx", "Excel (*.xlsx)")
@@ -292,6 +515,7 @@ class InvoicesPage(QWidget):
         dlg = BatchInvoiceDialog(self, items=self.excel_items(rows), source=Path(path).name)
         if dlg.exec() == QDialog.Accepted:
             self.refresh()
+            self.notify_pending()
 
     def excel_items(self, rows) -> list[dict]:
         """Dòng đọc từ Excel → dòng của màn hình nhập nhiều hóa đơn (kèm gắn hợp đồng)."""
@@ -309,10 +533,29 @@ class InvoicesPage(QWidget):
                 v["MaHopDong"] = m.ma or CHOOSE
                 goi_y = m.goi_y
                 notes.append(m.note)
+            if r.loai_hang is not None:
+                v["_LoaiHang"] = (r.loai_hang.phan_loai, r.loai_hang.nhom.ma, r.loai_hang.so_thang)
             items.append({"path": None, "file": f"{r.sheet} – dòng {r.line}", "values": v, "status": "moi",
                           "errors": list(r.errors), "notes": r.errors + r.notes + notes, "goi_y": goi_y})
         mark_duplicates(self.ctx, "vao", items)
         return items
+
+    def notify_pending(self) -> None:
+        """Sau khi nhập hóa đơn đầu vào: báo ngay nếu có dòng hàng phần mềm chưa tự phân loại được."""
+        if self.kind != "vao":
+            return
+        n = AssetService(self.ctx.db).pending_count()
+        win = self.window()
+        if hasattr(win, "update_badges"):
+            win.update_badges()
+        if not n:
+            return
+        text = (f"Có {n} dòng hàng hóa, dịch vụ phần mềm chưa tự phân loại được (chi phí trong kỳ, CCDC hay TSCĐ).")
+        if self.ctx.can("TaiSan", "Sua") and hasattr(win, "go_to"):
+            if confirm(self, text + " Mở màn Tài sản, CCDC để phân loại ngay?", "Cần kế toán phân loại"):
+                win.go_to("Tài sản, CCDC")
+        else:
+            info(self, text + " Kế toán sẽ phân loại ở màn Tài sản, CCDC.", "Cần kế toán phân loại")
 
     def company_mst(self) -> str:
         row = self.ctx.acc.license()
@@ -320,10 +563,59 @@ class InvoicesPage(QWidget):
 
     def edit(self):
         r = self.table.current()
-        if not r or not self.ctx.can(self.feature, "Sua"):
+        rows = [x for x in self.table.selected() if not x.get("_kieu")]
+        if not (r or rows) or not self.ctx.can(self.feature, "Sua"):
             return
+        if len(rows) > 1:
+            return self.bulk_edit(rows)
         table = "HoaDonDauRa" if self.kind == "ra" else "HoaDonDauVao"
         if self._save(dict(self.ctx.db.get(table, r["Ma"])), r["Ma"]):
+            self.refresh()
+
+    def bulk_edit(self, rows: list[dict]):
+        """Sửa cùng lúc hợp đồng, nhóm thuế, người mua hàng… cho các hóa đơn đã chọn."""
+        table = "HoaDonDauRa" if self.kind == "ra" else "HoaDonDauVao"
+        full = [dict(self.ctx.db.get(table, r["Ma"])) for r in rows]
+        base = {f["key"]: f for f in self._base_fields(keep=[r["MaHopDong"] for r in full if r["MaHopDong"]])}
+        keys = (["MaHopDong", "TinhChatHD", "DotThanhToan", "TenNguoiMua", "MSTNguoiMua", "GhiChuHDDR"] if self.kind == "ra" else
+                ["MaHopDong", "NhomThue", "NguoiMuaHang", "GhiChuHDDV"])
+        fields = [{k: v for k, v in base[k].items() if k != "hint"} for k in keys]
+        num = "SoHoaDon" if self.kind == "ra" else "SoHoaDonGoc"
+        for r in full:
+            r["_nhan"] = f"Hóa đơn {r['KyHieuHD'] or ''} {r[num]}".strip()
+        fn = self.ctx.cs.save_out_invoice if self.kind == "ra" else self.ctx.cs.save_in_invoice
+
+        def save(r, ch):
+            v = {k: val for k, val in r.items() if k != "_nhan"}
+            v.update(ch)
+            fn(v, r["Ma"])
+
+        n = bulk_edit(self, f"Sửa {len(rows)} hóa đơn đã chọn", fields, full, save)
+        if n:
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Sửa nhiều hóa đơn " + ("đầu ra" if self.kind == "ra"
+                                                                                  else "đầu vào"), f"{n} hóa đơn")
+            self.refresh()
+
+    def go_contract(self):
+        r = self.table.current()
+        if not r:
+            return info(self, "Chọn một hóa đơn trước.")
+        if not r.get("MaHopDong"):
+            return info(self, "Hóa đơn này không gắn với hợp đồng (mua hàng trực tiếp). Bấm Sửa để chọn hợp đồng.")
+        self.open_contract.emit(r["MaHopDong"])
+
+    def classify_lines(self):
+        r = self.table.current()
+        if not r:
+            return info(self, "Chọn một hóa đơn trước.")
+        from .assets_page import classify_lines
+        svc = AssetService(self.ctx.db)
+        if not svc.lines_of(r["Ma"]):
+            svc.ensure_lines(r["Ma"])
+        lines = svc._line_rows("d.MaHoaDon = ?", (r["Ma"],))
+        if not lines:
+            return info(self, "Hóa đơn chưa có dòng hàng để phân loại.")
+        if classify_lines(self.ctx, self, lines):
             self.refresh()
 
     def delete(self):
@@ -331,7 +623,20 @@ class InvoicesPage(QWidget):
         if not r:
             return
         so = r.get("SoHoaDon") or r.get("SoHoaDonGoc")
-        if confirm(self, f"Xóa hóa đơn số {so}?"):
+        if self.kind == "ra":
+            pays = self.ctx.cs.invoice_payments(r["Ma"])
+            details = [f"Người mua: {r.get('TenNguoiMua') or r.get('TenDoiTac') or ''}",
+                       f"Hóa đơn đã có {len(pays)} lần thanh toán: các lần này vẫn giữ ở hợp đồng (thành tạm ứng "
+                       "chưa gắn hóa đơn)." if pays else ""]
+        else:
+            n_ts = self.ctx.db.one("SELECT COUNT(*) AS n FROM TaiSan t JOIN DongHoaDonDauVao d ON d.Ma = t.MaDongHD "
+                                   "WHERE t.DaXoa = 0 AND d.MaHoaDon = ?", (r["Ma"],))["n"]
+            details = [f"Người bán: {r.get('TenNhaCungCap') or ''}",
+                       "Các dòng hàng và phân loại của hóa đơn cũng bị xóa.",
+                       f"{n_ts} tài sản / CCDC sinh ra từ hóa đơn này bị bỏ khỏi sổ." if n_ts else ""]
+        if confirm_delete(self, f"hóa đơn đầu {'ra' if self.kind == 'ra' else 'vào'} số {so} "
+                                f"({fmt_money(r.get('GiaTriSauThue') or 0)} đ)",
+                          details + ["Xóa cả trên các máy khác ở lần đồng bộ sau."]):
             (self.ctx.cs.delete_out_invoice if self.kind == "ra" else self.ctx.cs.delete_in_invoice)(r["Ma"])
             self.refresh()
 
@@ -339,9 +644,27 @@ class InvoicesPage(QWidget):
         r = self.table.current()
         if not r:
             return info(self, "Chọn một hóa đơn trước.")
-        v = payment_dialog(self.ctx, self, r["MaHopDong"], {"MaHDDauRa": r["Ma"], "SoTien": max(r["ConPhaiThu"], 0),
-                                                            "HinhThuc": "Chuyển khoản"})
-        if v and run_safely(self, self.ctx.cs.save_payment, v):
+        if invoice_payment(self.ctx, self, r):           # đã có thanh toán: xem chi tiết, sửa / xóa / thu thêm
+            self.refresh()
+
+    def update_refs(self):
+        rows = self.ctx.cs.payments_missing_ref()
+        if not rows:
+            return info(self, "Mọi lần thu chuyển khoản đều đã có số tham chiếu sao kê.")
+        dlg = BankRefDialog(self.ctx, rows, self)
+        dlg.exec()
+        if dlg.saved:
+            self.refresh()
+
+    def show_payments(self):
+        r = self.table.current()
+        if not r:
+            return info(self, "Chọn một hóa đơn trước.")
+        if not self.ctx.cs.invoice_payments(r["Ma"]):
+            return info(self, f"Hóa đơn số {r['SoHoaDon']} chưa ghi nhận lần thanh toán nào.")
+        dlg = InvoicePaymentsDialog(self.ctx, r, self)
+        dlg.exec()
+        if dlg.changed:
             self.refresh()
 
     def open_file(self):
@@ -397,6 +720,19 @@ class BatchInvoiceDialog(QDialog):
         lay = QVBoxLayout(self)
         self.summary = hint("")
         lay.addWidget(self.summary)
+        self.type_filter = None
+        if self.kind == "ra":
+            f = type_filter_field(self.ctx, open_contracts(self.ctx, "ra"))
+            row = QHBoxLayout()
+            row.addWidget(QLabel("Loại hợp đồng"))
+            self.type_filter = Combo(f["options"])
+            self.type_filter.setMinimumWidth(220)
+            self.type_filter.setToolTip(f["hint"])
+            self.type_filter.currentIndexChanged.connect(self._type_changed)
+            row.addWidget(self.type_filter)
+            row.addWidget(hint("Chọn loại để thu gọn danh sách hợp đồng ở cột Hợp đồng; hợp đồng đã xuất đủ hóa đơn "
+                               "không hiện."), 1)
+            lay.addLayout(row)
         if self.kind == "vao":
             row = QHBoxLayout()
             row.addWidget(QLabel("Cho các dòng đã tích:  Hợp đồng"))
@@ -458,15 +794,23 @@ class BatchInvoiceDialog(QDialog):
             self.items.append(it)
         mark_duplicates(self.ctx, self.kind, self.items)
 
-    def _contract_options(self, suggested):
-        if self.kind == "ra":
-            base = [(f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
-                    for h in self.ctx.cs.contracts("Đầu ra")]
-        else:
-            base = [("(Không có – mua hàng trực tiếp)", None)] + [
-                (f"{h['SoHopDong']} – {h['TenHopDong']} ({h['TenDoiTac']})", h["Ma"])
-                for h in self.ctx.cs.contracts("Đầu vào")]
+    def _type_changed(self, *_):
+        for i, it in enumerate(self.items):
+            combo = self.table.cellWidget(i, 8)
+            if combo is not None:
+                it["values"]["MaHopDong"] = combo.value()
+        self._fill()
+        self._update()
+
+    def _contract_options(self, suggested, current=None):
         ids = [h["Ma"] for h in suggested]
+        loai = self.type_filter.value() if self.type_filter is not None else None
+        rows = open_contracts(self.ctx, self.kind, ids + [current])
+        if loai is not None:
+            rows = [h for h in rows if h["Ma"] in ids or h["Ma"] == current or (h["MaLoaiHD"] or "") == loai]
+        base = [(contract_label(h), h["Ma"]) for h in rows]
+        if self.kind != "ra":
+            base = [("(Không có – mua hàng trực tiếp)", None)] + base
         top = [(f"★ Gợi ý: {h['SoHopDong']} – {h['TenHopDong']}", h["Ma"]) for h in suggested]
         return [(CHOOSE_LABEL, CHOOSE)] + top + [o for o in base if o[1] not in ids]
 
@@ -492,7 +836,7 @@ class BatchInvoiceDialog(QDialog):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(i, j, item)
             if it["status"] != "loi":
-                combo = Combo(self._contract_options(it["goi_y"]), v.get("MaHopDong"))
+                combo = Combo(self._contract_options(it["goi_y"], v.get("MaHopDong")), v.get("MaHopDong"))
                 combo.currentIndexChanged.connect(lambda _=0, i=i: self._contract_changed(i))
                 self.table.setCellWidget(i, 8, combo)
                 if self.kind == "vao":
@@ -572,10 +916,14 @@ class BatchInvoiceDialog(QDialog):
         it = self.items[i]
         values = self._collect(i)
         dlg = FormDialog("Hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào"),
-                         self.page._fields(" ".join(it["notes"]), True, it["goi_y"]), values, self,
-                         validate=_check_chosen)
+                         self.page._fields(" ".join(it["notes"]), True, it["goi_y"], keep=values.get("MaHopDong")),
+                         values, self, validate=_check_chosen)
+        if self.kind == "ra":
+            bind_type_filter(dlg, self.page._contracts)
         if dlg.exec() == QDialog.Accepted:
-            it["values"].update(dlg.values())
+            v = dlg.values()
+            v.pop("_LoaiHD", None)
+            it["values"].update(v)
             if self.kind == "vao" and it.get("errors"):
                 it["errors"] = [f"Thiếu {label}" for key, label in REQUIRED_IN if not it["values"].get(key)]
                 it["notes"] = list(it["errors"])
@@ -594,14 +942,17 @@ class BatchInvoiceDialog(QDialog):
             return error(self, "Chưa chọn hợp đồng cho các hóa đơn:\n" + "\n".join(missing[:15]) +
                          "\n\nChọn đúng hợp đồng ở cột Hợp đồng (dòng tô vàng), hoặc bỏ tích dòng đó.")
         fn = self.ctx.cs.save_out_invoice if self.kind == "ra" else self.ctx.cs.save_in_invoice
-        saved, errors = 0, []
+        saved, errors, dups = 0, [], []
         for i in rows:
             try:
                 fn(self._collect(i))
                 saved += 1
                 self.items[i]["status"] = "da_co"
+            except DuplicateWarning as e:       # không tự thêm: gom lại để rà soát sau
+                dups.append((self.items[i]["file"], e.matches, fn, self._collect(i)))
             except ValidationError as e:
                 errors.append(f"{self.items[i]['file']}: {e}")
+        saved += review_duplicates(self, dups)
         self.ctx.db.log(self.ctx.user["TenDangNhap"] if self.ctx.user else None,
                         "Nhập nhiều hóa đơn " + ("đầu ra" if self.kind == "ra" else "đầu vào"),
                         f"{saved} hóa đơn" + (f" từ {self.source}" if self.source else ""))
@@ -609,4 +960,138 @@ class BatchInvoiceDialog(QDialog):
             error(self, f"Đã nhập {saved} hóa đơn. Không lưu được:\n" + "\n".join(errors[:20]))
         else:
             info(self, f"Đã nhập {saved} hóa đơn.")
+        self.accept()
+
+
+class InvoicePaymentsDialog(QDialog):
+    """Các lần thanh toán đã ghi cho một hóa đơn đầu ra: sửa hoặc xóa lần ghi nhầm."""
+
+    def __init__(self, ctx, inv: dict, parent=None):
+        super().__init__(parent)
+        self.ctx, self.inv, self.changed = ctx, inv, False
+        self.setWindowTitle(f"Thanh toán của hóa đơn số {inv['SoHoaDon']}")
+        self.resize(760, 360)
+        lay = QVBoxLayout(self)
+        self.head = hint("")
+        lay.addWidget(self.head)
+        self.table = DataTable([("NgayThanhToan", "Ngày tiền về", "date"), ("SoTien", "Số tiền", "money"),
+                                ("HinhThuc", "Hình thức", "text"), ("SoThamChieuSK", "Số sao kê", "text"),
+                                ("GhiChu", "Ghi chú", "text")])
+        self.table.activated_row.connect(lambda _: self.edit())
+        can = ctx.can("HoaDonDauRa", "Sua")
+        b_add = button("Ghi nhận thêm lần thu…", self.add, "Primary")
+        b_edit, b_del = button("Sửa…", self.edit), button("Xóa thông tin thanh toán", self.delete, "Danger")
+        for b in (b_add, b_edit, b_del):
+            b.setEnabled(can)
+        lay.addLayout(toolbar(b_add, b_edit, b_del, "stretch"))
+        lay.addWidget(self.table, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.button(QDialogButtonBox.Close).setText("Đóng")
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.reload()
+
+    def reload(self):
+        rows = self.ctx.cs.invoice_payments(self.inv["Ma"])
+        self.table.set_rows(rows)
+        paid = sum(r["SoTien"] for r in rows)
+        self.head.setText(f"Hóa đơn {fmt_money(self.inv['GiaTriSauThue'])} đ · đã thu {fmt_money(paid)} đ · "
+                          f"còn phải thu {fmt_money(self.inv['GiaTriSauThue'] - paid)} đ. "
+                          "Ghi nhầm thì chọn dòng rồi bấm Sửa (đổi số tiền, ngày, hóa đơn liên quan…) hoặc Xóa.")
+
+    def add(self):
+        paid = sum(r["SoTien"] for r in self.ctx.cs.invoice_payments(self.inv["Ma"]))
+        v = payment_dialog(self.ctx, self, self.inv["MaHopDong"],
+                           {"MaHDDauRa": self.inv["Ma"], "SoTien": max(self.inv["GiaTriSauThue"] - paid, 0),
+                            "HinhThuc": "Chuyển khoản"})
+        if v and run_safely(self, self.ctx.cs.save_payment, v):
+            self.changed = True
+            self.reload()
+
+    def edit(self):
+        p = self.table.current()
+        if not p:
+            return info(self, "Chọn một lần thanh toán.")
+        if self.ctx.can("HoaDonDauRa", "Sua") and edit_payment(self.ctx, self, p["Ma"]):
+            self.changed = True
+            self.reload()
+
+    def delete(self):
+        p = self.table.current()
+        if not p:
+            return info(self, "Chọn một lần thanh toán.")
+        if confirm_delete(self, f"thông tin thanh toán {fmt_money(p['SoTien'])} đ ngày {fmt_date(p['NgayThanhToan'])}"
+                                + (f", số tham chiếu {p['SoThamChieuSK']}" if p["SoThamChieuSK"] else "")
+                                + " của hóa đơn này",
+                          ["Sau khi xóa, hóa đơn được tính lại số còn phải thu."]):
+            self.ctx.cs.delete_payment(p["Ma"])
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Xóa lần thanh toán", fmt_money(p["SoTien"]))
+            self.changed = True
+            self.reload()
+
+
+class BankRefDialog(QDialog):
+    """Đối chiếu sao kê: các lần thu chuyển khoản chưa có số tham chiếu, gõ số tham chiếu ngay trên bảng rồi lưu."""
+
+    COLS = [("NgayThanhToan", "Ngày tiền về"), ("SoTien", "Số tiền"), ("SoHopDong", "Số HĐ"), ("TenDoiTac", "Đối tác"),
+            ("HoaDon", "Hóa đơn"), ("GhiChu", "Ghi chú"), ("SoThamChieuSK", "Số tham chiếu sao kê")]
+
+    def __init__(self, ctx, rows: list[dict], parent=None):
+        super().__init__(parent)
+        self.ctx, self.rows, self.saved = ctx, rows, 0
+        self.setWindowTitle("Cập nhật số tham chiếu sao kê")
+        self.resize(980, 520)
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint(f"{len(rows)} lần thu chuyển khoản chưa có số tham chiếu. Mở sao kê ngân hàng, tìm giao dịch"
+                           " theo ngày và số tiền rồi gõ số tham chiếu vào cột cuối; dòng để trống thì giữ nguyên."))
+        self.table = QTableWidget(len(rows), len(self.COLS))
+        self.table.setHorizontalHeaderLabels([c[1] for c in self.COLS])
+        self.table.verticalHeader().setVisible(False)
+        for i, r in enumerate(rows):
+            r["HoaDon"] = f"{r['KyHieuHD'] or ''} {r['SoHoaDon']}".strip() if r["SoHoaDon"] else "(tạm ứng)"
+            for j, (key, _) in enumerate(self.COLS):
+                val = r.get(key)
+                text = fmt_date(val) if key == "NgayThanhToan" else fmt_money(val) if key == "SoTien" else (val or "")
+                item = QTableWidgetItem(str(text))
+                if key != "SoThamChieuSK":
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if key == "SoTien":
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(i, j, item)
+        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(len(self.COLS) - 1, 220)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self.table, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Lưu số tham chiếu")
+        bb.button(QDialogButtonBox.Cancel).setText("Đóng")
+        bb.accepted.connect(self.save)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def save(self):
+        col = len(self.COLS) - 1
+        filled = [(i, self.table.item(i, col).text().strip()) for i in range(len(self.rows))]
+        filled = [(i, ref) for i, ref in filled if ref]
+        if not filled:
+            return self.reject()
+        if not confirm_changes(self, [(f"{fmt_date(self.rows[i]['NgayThanhToan'])} – "
+                                       f"{fmt_money(self.rows[i]['SoTien'])} đ", "", ref) for i, ref in filled],
+                               "số tham chiếu sao kê"):
+            return
+        errors = []
+        for i, r in enumerate(self.rows):
+            ref = self.table.item(i, col).text().strip()
+            if not ref:
+                continue
+            try:
+                self.ctx.cs.set_payment_ref(r["Ma"], ref)
+                self.saved += 1
+            except ValidationError as e:
+                errors.append(f"Dòng {i + 1}: {e}")
+        if self.saved:
+            self.ctx.db.log(self.ctx.user["TenDangNhap"], "Cập nhật số tham chiếu sao kê", f"{self.saved} lần thu")
+        if errors:
+            error(self, "Chưa lưu được:\n" + "\n".join(errors[:15]))
+            return
         self.accept()

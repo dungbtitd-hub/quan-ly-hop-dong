@@ -6,10 +6,11 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
                                QGroupBox, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QVBoxLayout, QWidget)
 
 from ..core.auth import ACTIONS, FEATURES, ROLES, AuthError, default_permissions
-from .widgets import (Combo, DataTable, DateEdit, button, confirm, copy_text, error, hint, info, page_title,
+from .widgets import (Combo, DataTable, DateEdit, button, confirm, confirm_delete, copy_text, error, hint, info, page_title,
                       toolbar)
 
 FEATURE_LABELS = {"HopDong": "Hợp đồng", "HoaDonDauRa": "Hóa đơn đầu ra / thanh toán", "HoaDonDauVao": "Hóa đơn đầu vào",
+                  "TaiSan": "Tài sản, CCDC (phân loại hóa đơn)",
                   "BaoCao": "Báo cáo", "DanhMuc": "Danh mục", "SaoLuu": "Sao lưu", "DongBo": "Đồng bộ",
                   "ThuChi": "Thu chi (bảo mật)", "TaiKhoan": "Tài khoản"}
 ACTION_LABELS = {"Xem": "Xem", "Them": "Thêm", "Sua": "Sửa", "Xoa": "Xóa", "Xuat": "Xuất"}
@@ -161,8 +162,9 @@ class WipeOrderDialog(QDialog):
         m = self.machine.text().strip()
         if not m:
             return error(self, "Chọn máy hoặc nhập Mã máy cần xóa dữ liệu.")
-        if not confirm(self, f"Tạo lệnh xóa sạch toàn bộ dữ liệu trên máy {m}? Dữ liệu trên máy đó sẽ không "
-                             "khôi phục được."):
+        if not confirm_delete(self, f"sạch toàn bộ dữ liệu trên máy {m} (tạo lệnh xóa)",
+                              ["Máy đó xóa dữ liệu khi nhận lệnh, không khôi phục được.",
+                               "Giữ bản quyền trên máy đó." if self.keep.isChecked() else "Xóa cả bản quyền."]):
             return
         try:
             self.token, self.order = self.ctx.acc.issue_wipe_order(

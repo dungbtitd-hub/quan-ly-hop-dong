@@ -88,7 +88,9 @@ def test_excel_duplicate_invoice_numbers(company, tmp_path):
     assert [r.status for r in rows] == ["Trùng", "Hợp lệ", "Nghi trùng", "Hợp lệ", "Trùng"], \
         [(r.status, r.errors) for r in rows]
     assert "đã có trong phần mềm" in rows[0].errors[0] and "dòng 5" in rows[4].errors[0]
-    assert rows[1].errors[0].startswith("Lưu ý")
+    assert any(e.startswith("Lưu ý: cùng số") for e in rows[1].errors)
     assert len(duplicate_invoice_rows(rows)) == 3
     rows[2].force = True
-    assert import_rows(db, rows)["Hóa đơn đầu ra"] == 3
+    res = import_rows(db, rows)
+    assert res["Hóa đơn đầu ra"] == 2          # số 99 cùng hợp đồng, ngày lập, số tiền với dòng 3: chờ rà soát
+    assert [x[0] for x in res["trung"]] == ["Hóa đơn dòng 5"]
