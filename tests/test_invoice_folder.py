@@ -332,15 +332,19 @@ def test_pdf_without_xml_goes_to_gemini_even_first_scan(company, tmp_path, monke
     f = InvoiceFolders(db)
     f.save_settings({"vao": str(root)})
     items = InvoiceFolders.read("vao", f.new_files("vao"), gem, known=fo.known_keys(db, "vao"))
-    assert [Path(c[1]).name for c in gem.calls] == ["quet.pdf"]     # hóa đơn đã có: không gửi Gemini
+    # có Gemini: mọi PDF đều gửi Gemini đọc (kể cả PDF có lớp chữ, hóa đơn đã có)
+    assert sorted(Path(c[1]).name for c in gem.calls) == ["co_san.pdf", "quet.pdf"]
+    items = [it for it in items if Path(it.path).name == "quet.pdf"] + [
+        it for it in InvoiceFolders.read("vao", [x for x in f.new_files("vao") if x[0] == "co_san.pdf"], None)]
     r = f.process("vao", items)
     assert r["lan_dau"] and r["co_san"] == 1 and r["can_xem"] == 1
     rv = f.files("vao", F_REVIEW)[0]
     assert rv["Data"]["raw"]["SoHoaDon"] == "55" and rv["Data"]["src"] == SRC_GEMINI
     # xét lại lần sau dùng số liệu đã đọc, không gửi Gemini nữa
     again = f.recheck_files("vao")
+    n = len(gem.calls)
     InvoiceFolders.read("vao", again, gem, cache=f.cache("vao", [x for x, _ in again]))
-    assert len(gem.calls) == 1
+    assert len(gem.calls) == n                                        # Gemini đã đọc rồi: không gửi lại
 
 
 def test_gemini_full_fields_multi_rate_fees_discount():
@@ -675,3 +679,24 @@ def test_gemini_reread_of_conflict_pdf_clears_misread(company, tmp_path, monkeyp
     f.process("vao", items, user_asked=True)
     assert gem.calls and f.files("vao")[0]["TrangThai"] == F_EXISTS
     assert db.get("HoaDonDauVao", ma)["GiaTriTruocThue"] == 3_268_250
+
+
+def test_pdf_always_gemini_except_when_xml_of_same_invoice(company, tmp_path, monkeypatch):
+    from qlhd.core import pdf_invoice
+    db = company["kt"].db
+    sample_data(db)
+    root = tmp_path / "vao"
+    _xml(root / "hd901.xml", 901)
+    (root / "hd901.pdf").write_bytes(b"%PDF-1.4 cung ten")            # cùng tên với XML: gắn kèm, không gửi Gemini
+    (root / "le.pdf").write_bytes(b"%PDF-1.4 le")
+    monkeypatch.setattr(pdf_invoice, "parse_invoice",
+                        lambda p: (_ for _ in ()).throw(pdf_invoice.InvoicePDFError("PDF quét")))
+    gem = FakeGemini(extract={"la_hoa_don": True, "ky_hieu": "C26TLL", "so_hoa_don": "77", "ngay_lap": "2026-11-02",
+                              "ten_nguoi_ban": "NCC L", "mst_nguoi_ban": "0500000005", "tien_truoc_thue": 100_000,
+                              "tien_thue": 10_000, "tong_thanh_toan": 110_000, "thue_suat": "10%"})
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root)})
+    items = InvoiceFolders.read("vao", f.new_files("vao"), gem)
+    assert [Path(c[1]).name for c in gem.calls] == ["le.pdf"]
+    xml = [it for it in items if it.rel == "hd901.xml"][0]
+    assert xml.kem == ["hd901.pdf"]                                     # mở được cả file PDF gốc

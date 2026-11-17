@@ -302,6 +302,7 @@ class Item:
     not_invoice: bool = False                   # Gemini trả lời file không phải hóa đơn (không gửi lại)
     again: bool = False                         # file đã quét trước đây, nay xét lại
     old: dict | None = None                     # dòng TepDaQuet cũ (khi xét lại)
+    by_gemini: bool = False                     # số liệu do Gemini đọc (không gửi lại lần sau)
 
 
 # ------------------------------------------------------------------------ quét thư mục
@@ -473,8 +474,9 @@ class InvoiceFolders:
             if rel in fresh:
                 out[rel] = {"row": r, "raw": None, "src": "", "not_invoice": False, "prev": data.get("raw")}
                 continue
-            out[rel] = {"row": r, "raw": data.get("raw"), "src": data.get("src") or "",
-                        "not_invoice": bool(data.get("not_invoice"))}
+            src = data.get("src") or ""
+            out[rel] = {"row": r, "raw": data.get("raw"), "src": src, "not_invoice": bool(data.get("not_invoice")),
+                        "gem": bool(data.get("gem")) or src.startswith(SRC_GEMINI)}
         return out
 
     # ---- đọc (chạy được ở luồng nền: không dùng CSDL)
@@ -546,12 +548,13 @@ class InvoiceFolders:
             if stem in by_stem and by_stem[stem].data:
                 return False
             c = cache.get(rel) or {}
-            if (c.get("raw") or c.get("not_invoice")) and not force_gemini:
-                return False
+            if force_gemini:
+                return True
+            if c.get("not_invoice") or (c.get("raw") and c.get("gem")):
+                return False                  # Gemini đã đọc file này rồi: không gửi lại
             text, _ = text_of(rel, path)
-            if text is not None and pairs(text):
-                return False
-            return force_gemini or not (_complete(text) and loose_key(kind, text) in known)
+            # PDF / ảnh luôn ưu tiên Gemini đọc (lớp chữ PDF hay bắt nhầm số); chỉ bỏ qua khi đã có XML cùng hóa đơn
+            return not (text is not None and pairs(text))
 
         # Gửi Gemini song song vài file một lúc (mỗi file Gemini đọc mất vài chục giây): quét nhanh hơn nhiều lần.
         gem_results: dict[str, object] = {}
@@ -598,12 +601,12 @@ class InvoiceFolders:
                 continue
             it = new_item(rel, path)
             c = cache.get(rel) or {}
-            if c.get("raw") and not force_gemini:
-                it.data, it.source = c["raw"], c.get("src") or SRC_PDF
+            if c.get("raw") and not force_gemini and rel not in gem_results:
+                it.data, it.source, it.by_gemini = c["raw"], c.get("src") or SRC_PDF, bool(c.get("gem"))
                 if not pair(it):
                     items.append(it)
                 continue
-            if c.get("not_invoice") and not force_gemini:
+            if c.get("not_invoice") and not force_gemini and rel not in gem_results:
                 it.error, it.not_invoice = "Gemini: file này không phải hóa đơn.", True
                 items.append(it)
                 continue
@@ -627,6 +630,7 @@ class InvoiceFolders:
                     else:
                         gd = from_gemini(g)
                         it.data, it.source, it.error = _merge(gd, text, it), SRC_GEMINI, ""
+                        it.by_gemini = True
                         if gd.get("LechTien") and not it.warn:
                             it.warn = gd["LechTien"]       # số tiền không khớp: để nhân viên xem, không tự thêm
                         if _complete(text) and not it.warn:
@@ -834,7 +838,7 @@ class InvoiceFolders:
                            data={"not_invoice": True} if it.not_invoice else None)
                 res["can_xem"] += 1
                 continue
-            raw = {"raw": it.data, "src": it.source}
+            raw = {"raw": it.data, "src": it.source, "gem": it.by_gemini}
             try:
                 values, notes = self.values_for(kind, it, mst_cty)
                 inv = self._existing(kind, values, idx)
@@ -977,7 +981,7 @@ def _dump(values: dict, notes: list[str], it: Item | None = None) -> dict:
     v = {k: val for k, val in values.items() if k not in ("_Dong", "_GoiY")}
     out = {"values": v, "dong": values.get("_Dong"), "notes": notes}
     if it is not None:
-        out.update(raw=it.data, src=it.source)
+        out.update(raw=it.data, src=it.source, gem=it.by_gemini)
     return out
 
 

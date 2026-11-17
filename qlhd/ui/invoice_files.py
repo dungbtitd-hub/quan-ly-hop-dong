@@ -799,7 +799,7 @@ class FolderSettingsDialog(QDialog):
         self.auto_class = QCheckBox("Tự phân loại dòng hóa đơn đầu vào theo danh mục (CCDC / TSCĐ / chi phí); dòng kế "
                                     "toán đã chọn không bị ghi đè")
         self.auto_class.setChecked(g["tu_phan_loai"])
-        self.auto_read = QCheckBox("Đọc số liệu file ảnh / PDF quét (không có XML)")
+        self.auto_read = QCheckBox("Tự động đọc mọi file PDF / ảnh bằng Gemini (chỉ bỏ qua file đã có XML)")
         self.auto_read.setChecked(g["doc_anh"])
         for b in (self.auto_check, self.auto_class, self.auto_read):
             f.addRow(b)
