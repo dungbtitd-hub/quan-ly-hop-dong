@@ -20,7 +20,7 @@ class AlertRow(QFrame):
         super().__init__(parent)
         tagged(self, "AlertRow", a.muc)
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("Bấm để mở" if a.ma_hd or a.loai == "hddv_xem_lai" else "")
+        self.setToolTip("Bấm để mở" if a.ma_hd or a.loai in ("hddv_xem_lai", *al.APP_TYPES) else "")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 6, 4, 6)
         col = QVBoxLayout()
@@ -44,12 +44,12 @@ class TypePicker(QWidget):
     """Ô tích chọn các ngữ cảnh thông báo."""
     changed = Signal()
 
-    def __init__(self, chosen, counts: dict | None = None, parent=None):
+    def __init__(self, chosen, counts: dict | None = None, parent=None, types=None):
         super().__init__(parent)
         grid = QGridLayout(self)
         grid.setContentsMargins(0, 0, 0, 0)
         self.boxes = {}
-        for i, (code, (name, desc)) in enumerate(al.ALERT_TYPES.items()):
+        for i, (code, (name, desc)) in enumerate((types or al.ALERT_TYPES).items()):
             n = (counts or {}).get(code)
             b = QCheckBox(name + (f" ({n})" if n else ""))
             b.setToolTip(desc)
@@ -66,6 +66,7 @@ class NotificationsDialog(QDialog):
     """Bảng thông báo: chọn ngữ cảnh muốn theo dõi, bấm dòng để mở hợp đồng / màn hình liên quan."""
     open_contract = Signal(str)
     open_review = Signal()
+    open_action = Signal(str)          # ngữ cảnh chỉ trên phần mềm: dong_bo / gemini / thu_muc_hd
 
     def __init__(self, ctx, parent=None, title: str = "Thông báo"):
         super().__init__(parent)
@@ -75,9 +76,10 @@ class NotificationsDialog(QDialog):
         self.setWindowTitle(title)
         self.resize(760, 640)
         lay = QVBoxLayout(self)
-        self.all = al.collect(ctx.db)
-        lay.addWidget(QLabel("Ngữ cảnh thông báo (tích để theo dõi, phần mềm nhớ cho tài khoản này):"))
-        self.picker = TypePicker(self.settings.app_types(self.user), al.counts(self.all))
+        self.all = al.collect(ctx.db, types=al.ALL_TYPES)
+        lay.addWidget(QLabel("Ngữ cảnh thông báo (tích để theo dõi, phần mềm nhớ cho tài khoản này). Đồng bộ tự "
+                             "động, Gemini, Thư mục hóa đơn chỉ báo trên phần mềm, không gửi Telegram:"))
+        self.picker = TypePicker(self.settings.app_types(self.user), al.counts(self.all), types=al.ALL_TYPES)
         self.picker.changed.connect(self._changed)
         lay.addWidget(self.picker)
         scroll = QScrollArea()
@@ -111,7 +113,7 @@ class NotificationsDialog(QDialog):
                 it.widget().deleteLater()
         chosen = set(self.picker.values())
         items = [a for a in self.all if a.loai in chosen]
-        for code, (name, _) in al.ALERT_TYPES.items():
+        for code, (name, _) in al.ALL_TYPES.items():
             group = [a for a in items if a.loai == code]
             if not group:
                 continue
@@ -134,6 +136,9 @@ class NotificationsDialog(QDialog):
             self.accept()
         elif a.loai == "hddv_xem_lai":
             self.open_review.emit()
+            self.accept()
+        elif a.loai in al.APP_TYPES:
+            self.open_action.emit(a.loai)
             self.accept()
 
 

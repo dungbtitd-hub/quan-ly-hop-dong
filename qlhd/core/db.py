@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,7 +20,9 @@ SYNC_COLS = """
     DaXoa INTEGER NOT NULL DEFAULT 0,
     NgayXoa TEXT"""
 
-SYNC_FIELDS = ("NgayTao", "NgaySua", "MaMaySua", "PhienBan", "DaXoa", "NgayXoa")
+SYNC_FIELDS = ("NgayTao", "NgaySua", "MaMaySua", "PhienBan", "DaXoa", "NgayXoa", "SuaTay")
+# SuaTay: giờ (UTC) người dùng sửa bản ghi lần gần nhất; trống = bản ghi chỉ do phần mềm tự tạo / tự cập nhật
+# (quét thư mục, đọc XML / PDF, Gemini, tự tính lại). Khi đồng bộ, dữ liệu người dùng đã sửa thắng dữ liệu tự động.
 
 # Bảng nghiệp vụ được đồng bộ giữa các máy, theo thứ tự phụ thuộc khóa ngoại.
 SYNCED_TABLES = [
@@ -306,6 +309,18 @@ CREATE TABLE IF NOT EXISTS CaiDat (
     Khoa TEXT PRIMARY KEY,
     GiaTri TEXT
 );
+CREATE TABLE IF NOT EXISTS TepDaQuet (      -- file hóa đơn trong thư mục đã xử lý (máy này): quét lại thì bỏ qua
+    Chieu TEXT NOT NULL,                    -- 'ra' / 'vao'
+    DuongDan TEXT NOT NULL,                 -- đường dẫn tương đối trong thư mục hóa đơn (dấu /)
+    KichThuoc INTEGER,
+    NgaySuaTep REAL,
+    TrangThai TEXT NOT NULL,                -- da_them / co_san / can_xem / bo_qua / tep_kem
+    MaHoaDon TEXT,
+    GhiChu TEXT,
+    DuLieu TEXT,                            -- JSON số liệu đọc được (dòng cần xem)
+    ThoiDiem TEXT NOT NULL,
+    PRIMARY KEY (Chieu, DuongDan)
+);
 """
 
 
@@ -330,8 +345,24 @@ ADDED_COLUMNS = [
     ("HoaDonDauVao", "TyLePhiKhac", "TEXT"),           # tỷ lệ phí trên giá trị trước thuế, VD '10%'
     ("HoaDonDauVao", "TenPhiKhac", "TEXT"),
     ("TaiSan", "XoaKhoiSoNam", "INTEGER"),
-    ("CaiDat", "NgaySua", "TEXT"),                     # giờ sửa (UTC): khi đồng bộ, cài đặt sửa sau được giữ             # đã hết khấu hao, xóa khỏi sổ từ năm này (năm trước vẫn hiện)
-]
+    ("CaiDat", "NgaySua", "TEXT"),
+    # tệp gốc trong thư mục hóa đơn (đường dẫn tương đối, mỗi máy tự ghép với thư mục của máy mình)
+    ("HoaDonDauRa", "TepTuongDoi", "TEXT"),
+    ("HoaDonDauRa", "TepKem", "TEXT"),                 # file PDF / ảnh đi kèm file XML cùng hóa đơn (tương đối)
+    ("HoaDonDauVao", "TepTuongDoi", "TEXT"),
+    ("HoaDonDauVao", "TepKem", "TEXT"),
+    ("HoaDonDauRa", "NguonSoLieu", "TEXT"),            # XML / PDF / Gemini (đọc ảnh) / trống = nhập tay
+    ("HoaDonDauVao", "NguonSoLieu", "TEXT"),
+    ("HoaDonDauRa", "GeminiTT", "TEXT"),               # OK / Có vấn đề / Đã xem (trống = chưa kiểm)
+    ("HoaDonDauVao", "GeminiTT", "TEXT"),
+    ("HoaDonDauRa", "GeminiKQ", "TEXT"),               # JSON kết quả kiểm tra
+    ("HoaDonDauVao", "GeminiKQ", "TEXT"),
+    ("HoaDonDauRa", "GeminiLuc", "TEXT"),
+    ("HoaDonDauVao", "GeminiLuc", "TEXT"),
+    ("DongHoaDonDauVao", "GeminiTT", "TEXT"),          # dong_y / da_doi / khong_chac / khac / (trống = chưa rà soát)
+    ("DongHoaDonDauVao", "GeminiGoiY", "TEXT"),        # JSON {ma, phan_loai, so_thang, ly_do, do_chac}
+    ("DongHoaDonDauVao", "PLTruocGemini", "TEXT"),     # JSON phân loại trước khi Gemini đổi (để trả về)
+] + [(t, "SuaTay", "TEXT") for t in SYNCED_TABLES]
 
 
 def now_iso() -> str:
@@ -351,6 +382,26 @@ class Store:
         self.conn = conn
         self.machine_id = machine_id
         self.conn.row_factory = sqlite3.Row
+        self._auto = 0
+        self._has_manual: dict[str, bool] = {}
+
+    @contextmanager
+    def auto(self):
+        """Ghi trong khối này là phần mềm tự cập nhật (không đánh dấu người dùng đã sửa)."""
+        self._auto += 1
+        try:
+            yield self
+        finally:
+            self._auto -= 1
+
+    @property
+    def is_auto(self) -> bool:
+        return self._auto > 0
+
+    def _manual_col(self, table: str) -> bool:
+        if table not in self._has_manual:
+            self._has_manual[table] = "SuaTay" in self.columns(table)
+        return self._has_manual[table]
 
     def close(self) -> None:
         self.conn.close()
@@ -378,6 +429,8 @@ class Store:
         row.setdefault("NgayTao", ts)
         row.setdefault("NgaySua", ts)
         row.setdefault("MaMaySua", self.machine_id)
+        if self._manual_col(table) and not self._auto:
+            row.setdefault("SuaTay", ts)
         cols = ", ".join(row)
         marks = ", ".join("?" for _ in row)
         self.conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", list(row.values()))
@@ -390,6 +443,8 @@ class Store:
         row = {k: v for k, v in values.items() if k not in SYNC_FIELDS and k != "Ma"}
         row["NgaySua"] = now_iso()
         row["MaMaySua"] = self.machine_id
+        if self._manual_col(table) and not self._auto:
+            row["SuaTay"] = row["NgaySua"]
         sets = ", ".join(f"{c} = ?" for c in row)
         self.conn.execute(
             f"UPDATE {table} SET {sets}, PhienBan = PhienBan + 1 WHERE Ma = ?",
@@ -449,6 +504,15 @@ class Database(Store):
         for table, col, kind in ADDED_COLUMNS:
             if col not in self.columns(table):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+                if col == "SuaTay":
+                    self._mark_old_manual(table)
+
+    def _mark_old_manual(self, table: str) -> None:
+        """Dữ liệu có từ trước khi phân biệt người sửa / tự động: coi là người dùng đã nhập, trừ dòng hóa đơn phần
+        mềm tự phân loại và tài sản tự sinh từ hóa đơn (vẫn là tự động). Giờ sửa lấy theo NgaySua nên hai máy cùng
+        nâng cấp cho cùng kết quả."""
+        where = {"DongHoaDonDauVao": " AND TuDong = 0", "TaiSan": " AND MaDongHD IS NULL"}.get(table, "")
+        self.conn.execute(f"UPDATE {table} SET SuaTay = NgaySua WHERE SuaTay IS NULL{where}")
 
     def backup_to(self, dest: str | Path) -> None:
         target = sqlite3.connect(str(dest))
@@ -461,6 +525,7 @@ class Database(Store):
         source.backup(self.conn)
         source.close()
         self._restores += 1
+        self._has_manual.clear()
         self._upgrade()
         self.conn.commit()
 

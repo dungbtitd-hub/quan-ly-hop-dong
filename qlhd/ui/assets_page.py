@@ -1,6 +1,7 @@
 """Màn hình Tài sản, CCDC: dòng hóa đơn chờ kế toán phân loại, bảng kê dòng hóa đơn đầu vào, sổ TSCĐ, sổ CCDC."""
 from __future__ import annotations
 
+import json
 from datetime import date
 
 from PySide6.QtCore import Qt
@@ -11,6 +12,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QComplet
 
 from ..core import asset_catalog as dm
 from ..core import ccdc_excel
+from ..core import gemini as gm
+from ..core.gemini import GeminiService
 from ..core.assets import (A_ADD, A_SKIP, A_UPDATE, ACTION_LABELS, CASES, CCDC_COLS, CCDC_KEYS, EXTRA_COLS, FLAGS, ST_IN_FILE,
                            ST_NEW, ST_SAME_CODE, TSCD_COLS, TSCD_KEYS, AssetError, AssetService)
 from ..core.reports import fmt_date, fmt_money
@@ -23,7 +26,9 @@ LINE_COLS = [("STT", "STT", "int"), ("NgayNhanHD", "Ngày HĐ", "date"), ("SoHoa
              ("TenNhaCungCap", "Người bán", "text"), ("TenHang", "Tên hàng hóa, dịch vụ", "text"),
              ("SoLuong", "SL", "text"), ("DonGiaTinh", "Đơn giá", "money"), ("ThanhTien", "Thành tiền chưa thuế", "money"),
              ("PhanLoai", "Phân loại", "text"), ("NhomDM", "Nhóm danh mục", "text"), ("SoThang", "Số tháng", "int"),
-             ("NhanCanhBao", "Cảnh báo", "text")]
+             ("NhanCanhBao", "Cảnh báo", "text"), ("GeminiNhan", "Gemini", "text")]
+GEMINI_FILTER = [("Mọi trạng thái Gemini", None), ("Chưa được Gemini rà soát", "chua")] + [
+    (label, code) for code, label in gm.CL_LABELS.items() if code]
 FLAG_FILTER = [("Mọi cảnh báo", None)] + [(label, code) for code, (label, _) in FLAGS.items()]
 
 
@@ -37,10 +42,29 @@ def flag_legend() -> QLabel:
     return lbl
 
 
+def gemini_label(r: dict) -> str:
+    st = r.get("GeminiTT") or None
+    text = gm.CL_LABELS.get(st, "")
+    try:
+        g = json.loads(r.get("GeminiGoiY") or "{}")
+    except ValueError:
+        g = {}
+    if st in (gm.CL_CHANGED, gm.CL_DIFF) and g.get("ma"):
+        nhom = dm.BY_CODE.get(g["ma"])
+        text += f": {g['ma']}" + (f" {nhom.ten}" if nhom and st == gm.CL_DIFF else "")
+    if g.get("ly_do"):
+        text += f" ({g['ly_do']})"
+    return text
+
+
 def _label_flags(rows: list[dict]) -> list[dict]:
     for r in rows:
         r["NhanCanhBao"] = FLAGS[r["MaCanhBao"]][0] if r.get("MaCanhBao") else ""
         r["SoLuong"] = _quantity(r["SoLuong"])
+        r["GeminiNhan"] = gemini_label(r)
+        if not r.get("_mau") and r.get("GeminiTT") in (gm.CL_UNSURE, gm.CL_DIFF):
+            r["_mau"] = "warn"
+            r["CanhBao"] = r["GeminiNhan"]
     return rows
 MONEY_KEYS = {"NguyenGia", "GiaTriTinhKH", "TrongKy", "LuyKe", "ConLai", "MucKy"}
 INT_KEYS = {"SoKy", "KyConLai", "SoLuong", "SLDaGiam", "SLConLai", "ThangTrongNam"}
@@ -711,11 +735,21 @@ class AssetsPage(QWidget):
             ("Nhóm danh mục", "NhomDM"), ("Thành tiền", "ThanhTien")], money_keys=("ThanhTien", "DonGiaTinh"),
             date_key="NgayNhanHD", date_label="Ngày hóa đơn", filters=[
                 {"key": "nhom", "label": "Nhóm danh mục", "options": [("Mọi nhóm", None)]},
-                {"key": "canh_bao", "label": "Cảnh báo", "options": FLAG_FILTER}])
+                {"key": "canh_bao", "label": "Cảnh báo", "options": FLAG_FILTER},
+                {"key": "gemini", "label": "Gemini", "options": GEMINI_FILTER}])
         self.l_box.changed.connect(self.refresh)
         top = toolbar(QLabel("Năm"), self.l_year, self.l_cls, "stretch", b, b_x)
         top.addWidget(self.l_box, 0, Qt.AlignTop)
         lay.addLayout(top)
+        self.gem_info = QLabel()
+        self.gem_info.setWordWrap(True)
+        self.b_gem = button("Rà soát bằng Gemini", self.gemini_review)
+        self.b_gem.setToolTip("Gửi các dòng chưa được Gemini rà soát (kèm danh mục phân loại của phần mềm) để Gemini "
+                              "chọn nhóm. Dòng kế toán đã chọn không bị ghi đè; Gemini không chắc thì không đổi.")
+        self.b_revert = button("Trả về phân loại trước khi Gemini đổi", self.gemini_revert)
+        for x in (self.b_gem, self.b_revert):
+            x.setEnabled(self.ctx.can("TaiSan", "Sua"))
+        lay.addLayout(toolbar(self.gem_info, "stretch", self.b_revert, self.b_gem))
         lay.addWidget(flag_legend())
         self.lines = DataTable(LINE_COLS, multi=True)
         self.lines.activated_row.connect(lambda _: self.classify(self.lines))
@@ -741,9 +775,11 @@ class AssetsPage(QWidget):
             rows = _label_flags(self.svc.lines(f"{y}-01-01", f"{y}-12-31", self.l_cls.value()))
             self.l_box.set_options("nhom", [("Mọi nhóm", None)] + [(x, x) for x in sorted({r["NhomDM"] for r in rows
                                                                                             if r.get("NhomDM")})])
-            nhom, cb = self.l_box.value("nhom"), self.l_box.value("canh_bao")
+            nhom, cb, gs = self.l_box.value("nhom"), self.l_box.value("canh_bao"), self.l_box.value("gemini")
             rows = [r for r in rows if (not nhom or r.get("NhomDM") == nhom)
-                    and (not cb or r.get("MaCanhBao") == cb) and self.l_box.matches(r)]
+                    and (not cb or r.get("MaCanhBao") == cb)
+                    and (not gs or (r.get("GeminiTT") or "chua") == gs) and self.l_box.matches(r)]
+            self._gemini_banner()
             self.lines.set_rows(rows)
             by = {}
             for r in rows:
@@ -777,6 +813,56 @@ class AssetsPage(QWidget):
         win = self.window()
         if hasattr(win, "update_badges"):
             win.update_badges()
+        self.refresh()
+
+    def _gemini_banner(self):
+        g = GeminiService(self.ctx.db)
+        n = len(g.unreviewed_lines())
+        st, text = g.state()
+        if st == "chua_cai":
+            msg, tone = ("Chưa cài Gemini (Cài đặt › Thư mục hóa đơn và Gemini): phần mềm vẫn tự phân loại theo danh mục "
+                         f"như hiện tại. {n} dòng chưa được Gemini rà soát." if n else "Chưa cài Gemini."), "Hint"
+        elif st == "loi":
+            msg, tone = text + (f" · {n} dòng chưa được Gemini rà soát: bấm \"Rà soát bằng Gemini\" khi có kết nối "
+                                "lại." if n else ""), "Warn"
+        else:
+            msg, tone = (f"{n} dòng chưa được Gemini rà soát." if n else "Mọi dòng đã được Gemini rà soát."), (
+                "Warn" if n else "Hint")
+        self.gem_info.setText(msg)
+        self.gem_info.setObjectName(tone)
+        self.gem_info.style().unpolish(self.gem_info)
+        self.gem_info.style().polish(self.gem_info)
+        self.b_gem.setEnabled(self.ctx.can("TaiSan", "Sua") and bool(n) and st != "chua_cai")
+
+    def gemini_review(self):
+        from .invoice_files import classify_async
+        self.b_gem.setEnabled(False)
+        self.b_gem.setText("Gemini đang rà soát…")
+
+        def done(r):
+            self.b_gem.setText("Rà soát bằng Gemini")
+            self.refresh()
+            if r is not None:
+                info(self, f"Gemini đã rà soát: tự đổi phân loại {r['doi']} dòng, đồng ý {r['dong_y']}, không chắc "
+                           f"{r['khong_chac']} (tô vàng, kế toán phân loại), gợi ý khác lựa chọn của kế toán {r['khac']} "
+                           "(không ghi đè).")
+        if not classify_async(self.ctx, self, None, done, quiet=False):
+            self.b_gem.setText("Rà soát bằng Gemini")
+            self.refresh()
+
+    def gemini_revert(self):
+        rows = [r for r in self.lines.selected() if r.get("PLTruocGemini")]
+        if not rows:
+            return info(self, "Chọn các dòng Gemini đã đổi phân loại (cột Gemini: \"Gemini đã phân loại\").")
+        changes = []
+        for r in rows[:15]:
+            old = json.loads(r["PLTruocGemini"])
+            changes.append((r["TenHang"][:40], f"{r['PhanLoai']} {r.get('MaNhomDM') or ''}".strip(),
+                            f"{old.get('PhanLoai')} {old.get('MaNhomDM') or ''}".strip()))
+        if not confirm_changes(self, changes, f"Trả {len(rows)} dòng về phân loại trước khi Gemini đổi"):
+            return
+        n = GeminiService(self.ctx.db).revert([r["Ma"] for r in rows])
+        self.ctx.db.log(self.ctx.user["TenDangNhap"], "Trả phân loại trước khi Gemini đổi", f"{n} dòng")
         self.refresh()
 
     def classify(self, table: DataTable):

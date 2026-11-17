@@ -30,7 +30,11 @@ from .reports_page import ReportsPage
 from .dup_review_page import DupReviewPage
 from .splash import AboutDialog
 from .sync_page import SyncPage
-from .widgets import confirm, info
+from .widgets import confirm, error, info, local_time
+from ..core import sync_folder as sfm
+from ..core.gemini import GeminiService
+from ..core.sync_folder import SyncFolder
+from .invoice_files import FolderSettingsDialog, InvoiceFolderDialog, Scanner
 
 PAGE_ROLE = Qt.UserRole          # chỉ số trang trong stack; None = dòng tiêu đề nhóm
 BADGE_ROLE = Qt.UserRole + 1     # số hiện trên huy hiệu đỏ
@@ -179,6 +183,7 @@ class MainWindow(QMainWindow):
         self.home.open_contract.connect(self.show_contract)
         self.home.open_review.connect(lambda: self.show_review())
         self.home.add_contract.connect(self._add_contract)
+        self.home.open_action.connect(self._alert_action)
         self.nav.currentRowChanged.connect(self._go)
         self.nav.setCurrentItem(self.items["Tổng quan"])
 
@@ -198,6 +203,16 @@ class MainWindow(QMainWindow):
         self.tg_timer = QTimer(self)               # bản tin Telegram hằng ngày đúng giờ đã đặt
         self.tg_timer.timeout.connect(lambda: self._telegram_tick(False))
         self.tg_timer.start(60_000)
+        # đồng bộ tự động qua thư mục chung, quét thư mục hóa đơn
+        self.auto_sync = SyncFolder(ctx.db, ctx.sync)
+        self.scanner = Scanner(ctx, self)
+        self.scanner.finished.connect(self._scanned)
+        self.send_timer = QTimer(self)
+        self.send_timer.timeout.connect(self._auto_send)
+        self.recv_timer = QTimer(self)
+        self.recv_timer.timeout.connect(lambda: self._auto_receive(False))
+        self.restart_auto_sync()
+        self._paint_status_buttons()
 
     # ---------------------------------------------------------------- dựng khung
     def _sidebar(self) -> QWidget:
@@ -264,6 +279,20 @@ class MainWindow(QMainWindow):
         self.font_btn.setPopupMode(QToolButton.InstantPopup)
         self.font_btn.setMenu(self._font_menu())
         lay.addWidget(self.font_btn)
+        self.sync_btn = QToolButton()
+        self.sync_btn.setObjectName("IconButton")
+        self.sync_btn.setFixedHeight(38)
+        self.sync_btn.setIconSize(QSize(18, 18))
+        self.sync_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.sync_btn.clicked.connect(self.sync_now)
+        lay.addWidget(self.sync_btn)
+        self.gem_btn = QToolButton()
+        self.gem_btn.setObjectName("IconButton")
+        self.gem_btn.setFixedHeight(38)
+        self.gem_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.gem_btn.setText("Gemini")
+        self.gem_btn.clicked.connect(self.folder_settings)
+        lay.addWidget(self.gem_btn)
         self.bell = QToolButton()
         self.bell.setObjectName("IconButton")
         self.bell.setFixedSize(38, 38)
@@ -293,6 +322,9 @@ class MainWindow(QMainWindow):
                    ("Giới thiệu / Nhà phát triển", "info", self._about), None,
                    ("Chuyển giao diện sáng / tối", "moon", self.toggle_theme), "font",
                    ("Thông báo…", "bell", self._bell_menu),
+                   ("Thư mục hóa đơn và Gemini…", "folder", self.folder_settings),
+                   ("Thư mục hóa đơn (vừa tự thêm, cần xem)…", "invoice_in", lambda: self.invoice_folder(1)),
+                   ("Đồng bộ ngay", "sync", self.sync_now), None,
                    ("Sao lưu ngay", "save", self._backup), ("Khôi phục từ bản sao lưu…", "import", self._restore),
                    ("Mở thư mục dữ liệu", "folder",
                     lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.ctx.data_dir))))]
@@ -425,6 +457,7 @@ class MainWindow(QMainWindow):
         self._alerts = al.collect(self.ctx.db, today, self._alert_types())
         n = len([a for a in self._alerts if a.loai != "hddv_xem_lai"]) + \
             (1 if any(a.loai == "hddv_xem_lai" for a in self._alerts) else 0)
+        self._paint_status_buttons()
         self.bell_badge.setText(str(n) if n < 100 else "99")
         self.bell_badge.setVisible(n > 0)
         self.bell.setToolTip(f"{n} thông báo" if n else "Không có thông báo")
@@ -433,6 +466,7 @@ class MainWindow(QMainWindow):
         dlg = NotificationsDialog(self.ctx, self)
         dlg.open_contract.connect(self.show_contract)
         dlg.open_review.connect(self.show_review)
+        dlg.open_action.connect(self._alert_action)
         dlg.exec()
         self.update_badges()
 
@@ -468,6 +502,10 @@ class MainWindow(QMainWindow):
         self._pending_reminder()
         self._upgrade_review()
         self._telegram_tick(True)
+        self._auto_receive(True)
+        from ..core.invoice_folder import K_ON_OPEN, InvoiceFolders
+        if InvoiceFolders(self.ctx.db).flag(K_ON_OPEN):
+            self.scanner.start()
 
     def _upgrade_review(self):
         """Sau khi nâng cấp phiên bản: rà soát các dòng hóa đơn đầu vào phần mềm đã tự phân loại, báo dòng nghi ngờ
@@ -540,6 +578,148 @@ class MainWindow(QMainWindow):
             if self.nav.currentItem() is item:
                 self.top_title.setText(item.text())
 
+    # ---------------------------------------------------------------- đồng bộ tự động, thư mục hóa đơn, Gemini
+    def restart_auto_sync(self) -> None:
+        st = self.auto_sync.settings()
+        self.send_timer.stop()
+        self.recv_timer.stop()
+        if st["thu_muc"]:
+            if st["tu_gui"]:
+                self.send_timer.start(max(1, st["gui_phut"]) * 60_000)
+            if st["tu_nhan"]:
+                self.recv_timer.start(max(5, st["nhan_phut"]) * 60_000)
+        self._paint_status_buttons()
+
+    def _paint_status_buttons(self) -> None:
+        if not hasattr(self, "auto_sync"):
+            return
+        st = self.auto_sync.settings()
+        on = bool(st["thu_muc"]) and self.ctx.can("DongBo")
+        self.sync_btn.setVisible(on)
+        if on:
+            n = self.auto_sync.pending_changes()
+            pend = self.auto_sync.pending_choices()
+            err = self.auto_sync.last_error() or ("Chưa nhập mật khẩu đồng bộ" if not self.auto_sync.ready() else "")
+            color = style.color("danger") if err or pend else style.color("warn") if n else style.color("success")
+            self.sync_btn.setIcon(icons.icon("sync", color, 18))
+            self.sync_btn.setText("Đồng bộ ngay" + (f" ({n})" if n else ""))
+            tip = [f"Đồng bộ tự động qua thư mục chung: {st['thu_muc']}",
+                   f"{n} thay đổi chưa gửi" if n else "Không có thay đổi chưa gửi"]
+            last = local_time(self.ctx.db.setting(sfm.K_LAST_SCAN))
+            if last:
+                tip.append(f"Quét nhận lần cuối {last}")
+            if pend:
+                tip.append(f"{sum(pend.values())} bản ghi cần chọn (mở màn Đồng bộ)")
+            if err:
+                tip.append("Lỗi: " + err)
+            self.sync_btn.setToolTip("\n".join(tip))
+        gem = GeminiService(self.ctx.db)
+        state, text = gem.state()
+        color = {"ok": "success", "loi": "danger"}.get(state, "muted")
+        self.gem_btn.setIcon(icons.dot(style.color(color)))
+        self.gem_btn.setToolTip(text + "\nBấm để cài đặt Thư mục hóa đơn và Gemini.")
+        self.gem_btn.setVisible(self.ctx.can("HoaDonDauRa") or self.ctx.can("HoaDonDauVao") or self.ctx.can("TaiSan"))
+
+    def _busy_ui(self) -> bool:
+        return QApplication.activeModalWidget() is not None
+
+    def _auto_send(self) -> None:
+        try:
+            if self.auto_sync.send_if_changed(self.ctx.user):
+                self.statusBar().showMessage("Đã tự gửi các thay đổi vào thư mục đồng bộ chung.", 8000)
+        except Exception as e:  # noqa: BLE001 - tự động: không làm gián đoạn người dùng
+            self.statusBar().showMessage(f"Chưa gửi được gói đồng bộ: {e}", 15_000)
+        self._paint_status_buttons()
+
+    def _auto_receive(self, opening: bool) -> None:
+        if not self.auto_sync.ready() or (not opening and self.auto_sync.settings()["tu_nhan"] is False):
+            return
+        if self._busy_ui():                   # đang mở hộp thoại nhập liệu: để lát nữa nhận
+            QTimer.singleShot(60_000, lambda: self._auto_receive(False))
+            return
+        self._receive_now(show=False)
+
+    def _receive_now(self, show: bool):
+        try:
+            r = self.auto_sync.receive(self.ctx.user)
+        except Exception as e:  # noqa: BLE001
+            if show:
+                error(self, f"Không nhận được dữ liệu đồng bộ: {e}")
+            return None
+        if r.nhan:
+            msg = f"Đã nhận {r.nhan} gói đồng bộ ({r.ban_ghi} bản ghi)" + (
+                f", {r.cho_chon} bản ghi cần chọn ở màn Đồng bộ" if r.cho_chon else "") + "."
+            self.statusBar().showMessage(msg, 20_000)
+            self.refresh_all()
+        elif r.loi:
+            self.statusBar().showMessage("Đồng bộ tự động: " + r.loi[0], 20_000)
+        self._paint_status_buttons()
+        return r
+
+    def sync_now(self) -> None:
+        if not self.auto_sync.settings()["thu_muc"]:
+            if confirm(self, "Chưa cài thư mục đồng bộ chung. Mở màn Đồng bộ để cài đặt?"):
+                self.go_to("Đồng bộ")
+            return
+        if not self.auto_sync.ready():
+            return error(self, "Chưa nhập mật khẩu đồng bộ trên máy này (màn Đồng bộ › Tự động qua thư mục chung).")
+        sent = None
+        try:
+            sent = self.auto_sync.send_if_changed(self.ctx.user)
+        except Exception as e:  # noqa: BLE001
+            return error(self, f"Không gửi được: {e}")
+        if self.auto_sync.last_error() and sent is None:
+            return error(self, self.auto_sync.last_error())
+        r = self._receive_now(show=True)
+        if r is None:
+            return
+        lines = ["Đã gửi các thay đổi của máy này." if sent else "Máy này không có thay đổi mới để gửi."]
+        lines.append(f"Nhận {r.nhan} gói mới ({r.ban_ghi} bản ghi)." if r.nhan else "Không có gói mới từ máy khác.")
+        if r.cho_chon:
+            lines.append(f"{r.cho_chon} bản ghi cả hai máy cùng có người sửa / nghi trùng: mở màn Đồng bộ › Tự động "
+                         "› \"Mở gói có bản ghi cần chọn\".")
+        if r.loi:
+            lines.append("Lỗi: " + "; ".join(r.loi[:3]))
+        info(self, "\n".join(lines), "Đồng bộ ngay")
+        if self.stack.currentWidget() is self.sync_page:
+            self.sync_page.refresh()
+
+    def folder_settings(self) -> None:
+        dlg = FolderSettingsDialog(self.ctx, self)
+        if dlg.exec() == FolderSettingsDialog.Accepted:
+            self._paint_status_buttons()
+            if getattr(dlg, "changed_dirs", False):
+                self.scanner.start()
+
+    def invoice_folder(self, tab: int = 1) -> None:
+        InvoiceFolderDialog(self.ctx, self, tab=tab, scanner=self.scanner).exec()
+        self.refresh_all()
+
+    def _scanned(self, s: dict) -> None:
+        if s:
+            parts = []
+            if s.get("them"):
+                parts.append(f"tự thêm {s['them']} hóa đơn mới")
+            if s.get("can_xem"):
+                parts.append(f"{s['can_xem']} file cần xem")
+            if s.get("cho_gemini"):
+                parts.append(f"{s['cho_gemini']} file ảnh chờ Gemini (mất kết nối, sẽ thử lại)")
+            if s.get("loi"):
+                parts.append("lỗi: " + s["loi"])
+            if parts:
+                self.statusBar().showMessage("Quét thư mục hóa đơn: " + ", ".join(parts) + ".", 30_000)
+        self.refresh_all()
+        if hasattr(self.home, "refresh"):
+            self.home.refresh()
+
+    def _alert_action(self, code: str) -> None:
+        if code == "dong_bo":
+            self.go_to("Đồng bộ")
+        elif code == "thu_muc_hd":
+            self.invoice_folder(1)
+        elif code == "gemini":
+            self.folder_settings()
+
     # ---------------------------------------------------------------- giao diện sáng / tối
     def toggle_theme(self):
         new = "sang" if style.current() == "toi" else "toi"
@@ -604,6 +784,13 @@ class MainWindow(QMainWindow):
         self.startup_timer.stop()
         self.idle_timer.stop()
         self.tg_timer.stop()
+        self.send_timer.stop()
+        self.recv_timer.stop()
+        if not self.ctx.wiped:
+            try:                                    # đóng phần mềm: gửi nốt thay đổi vào thư mục chung
+                self.auto_sync.send_if_changed(self.ctx.user)
+            except Exception:  # noqa: BLE001 - không chặn việc đóng phần mềm
+                pass
         QApplication.instance().removeEventFilter(self.activity_filter)   # đăng xuất / đăng nhập lại không cộng dồn
         if self.finance_page and not self.ctx.wiped:
             self.finance_page.lock()

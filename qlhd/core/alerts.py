@@ -7,7 +7,7 @@ import json
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from .assets import AssetService
 from . import duplicates as dupl
@@ -34,6 +34,13 @@ ALERT_TYPES = {
     "hddv_xem_lai": ("Hóa đơn đầu vào cần xem lại", "Chưa phân loại, gợi ý chờ xác nhận, nghi sai, nghi trùng…"),
 }
 DEFAULT_TYPES = tuple(ALERT_TYPES)
+# chỉ hiện trên phần mềm (chuông), không gửi Telegram, không vào bản tin hằng ngày
+APP_TYPES = {
+    "dong_bo": ("Đồng bộ tự động", "Lỗi thư mục đồng bộ chung, bản ghi cần chọn, lâu chưa nhận / chưa gửi được"),
+    "gemini": ("Gemini", "Mất kết nối Gemini khi còn việc chờ, hóa đơn Gemini báo có vấn đề"),
+    "thu_muc_hd": ("Thư mục hóa đơn", "File hóa đơn mới cần xem (nghi trùng, chưa nhận ra hợp đồng, chưa đọc được…)"),
+}
+ALL_TYPES = {**ALERT_TYPES, **APP_TYPES}
 # ngữ cảnh đã có khi người dùng lưu lựa chọn ở bản cũ: ngữ cảnh mới thêm sau đó mặc định được bật
 _TYPES_BEFORE_1_0_18 = ("hd_het_han", "cv_qua_han", "cv_sap_han", "hd_chua_thu", "hd_chua_xuat", "tam_ung",
                         "thieu_du_lieu", "hddv_xem_lai")
@@ -71,7 +78,7 @@ def collect(db: Database, today: str | None = None, types=None) -> list[Alert]:
     """Các việc cần nhắc. Dữ liệu chưa đổi (cùng ngày, cùng ngữ cảnh) thì dùng lại kết quả lần trước."""
     today = today or date.today().isoformat()
     types = set(types or DEFAULT_TYPES)
-    key = (db.cache_key(), today, frozenset(types))
+    key = (db.cache_key(), today, frozenset(types), datetime.now().strftime("%H"))
     if _CACHE.get("key") != key:
         _CACHE.update(key=key, items=_collect(db, today, types))
     return list(_CACHE["items"])
@@ -175,8 +182,42 @@ def _collect(db: Database, today: str, types: set) -> list[Alert]:
             out.append(Alert("hddv_xem_lai", tone, f"{n} dòng hóa đơn đầu vào: {label.lower()}",
                              "Mở Tài sản, CCDC → Cần xem lại để kế toán xử lý", f"{n} dòng", None, n,
                              thu_tu=list(FLAGS).index(code)))
-    order = list(ALERT_TYPES)
+    out += _app_alerts(db, types)
+    order = list(ALL_TYPES)
     out.sort(key=lambda a: (order.index(a.loai), TONE_ORDER.get(a.muc, 3), a.thu_tu))
+    return out
+
+
+def _app_alerts(db: Database, types: set) -> list[Alert]:
+    """Cảnh báo chỉ hiện trên phần mềm: đồng bộ tự động, Gemini, thư mục hóa đơn (cài đặt riêng máy này)."""
+    out: list[Alert] = []
+    if "dong_bo" in types:
+        from .sync_folder import SyncFolder
+        for title, detail in SyncFolder(db, None).warnings():
+            tone = "danger" if "lỗi" in title.lower() or "cần chọn" in title else "warn"
+            out.append(Alert("dong_bo", tone, title, detail, "Đồng bộ"))
+    if "gemini" in types:
+        from .gemini import GeminiService
+        g = GeminiService(db)
+        if g.configured():
+            st, text = g.state()
+            n = len(g.unreviewed_lines())
+            if st == "loi" and n:
+                out.append(Alert("gemini", "danger", "Mất kết nối Gemini", text + f" Còn {n} dòng hóa đơn đầu vào "
+                                 "chưa được Gemini rà soát: khi có kết nối lại, bấm \"Rà soát bằng Gemini\" ở Tài sản, "
+                                 "CCDC.", "Mất kết nối"))
+            for kind, inv in g.issue_invoices()[:30]:
+                so = inv.get("SoHoaDonGoc") if kind == "vao" else inv.get("SoHoaDon")
+                who = inv.get("TenNhaCungCap") if kind == "vao" else inv.get("TenNguoiMua")
+                out.append(Alert("gemini", "warn", f"Hóa đơn {'đầu vào' if kind == 'vao' else 'đầu ra'} số {so}: "
+                                 "Gemini báo có vấn đề", f"{who or ''} · mở hóa đơn → Tệp gốc ▾ → Xem kết quả Gemini",
+                                 "Có vấn đề", inv.get("MaHopDong")))
+    if "thu_muc_hd" in types:
+        n = db.one("SELECT COUNT(*) c FROM TepDaQuet WHERE TrangThai = 'can_xem'")["c"]
+        if n:
+            out.append(Alert("thu_muc_hd", "warn", f"{n} file trong thư mục hóa đơn cần xem",
+                             "Nghi trùng, chưa nhận ra hợp đồng, chưa đọc được… phần mềm không tự thêm: mở Thư mục "
+                             "hóa đơn → Cần xem", f"{n} file", None, n))
     return out
 
 
@@ -316,29 +357,29 @@ class AlertSettings:
     def __init__(self, db: Database):
         self.db = db
 
-    def _list(self, key: str, default) -> list[str]:
+    def _list(self, key: str, default, pool=ALERT_TYPES) -> list[str]:
         raw = self.db.setting(key)
         if raw is None:
             return list(default)
         try:
-            chosen = [x for x in json.loads(raw) if x in ALERT_TYPES]
+            chosen = [x for x in json.loads(raw) if x in pool]
         except ValueError:
             return list(default)
         try:
             known = json.loads(self.db.setting(key + "#biet") or "null") or _TYPES_BEFORE_1_0_18
         except ValueError:
             known = _TYPES_BEFORE_1_0_18
-        return chosen + [t for t in ALERT_TYPES if t not in known and t not in chosen]
+        return chosen + [t for t in pool if t not in known and t not in chosen]
 
-    def _save_list(self, key: str, types) -> None:
-        self.db.set_setting(key, json.dumps([t for t in types if t in ALERT_TYPES]))
-        self.db.set_setting(key + "#biet", json.dumps(list(ALERT_TYPES)))
+    def _save_list(self, key: str, types, pool=ALERT_TYPES) -> None:
+        self.db.set_setting(key, json.dumps([t for t in types if t in pool]))
+        self.db.set_setting(key + "#biet", json.dumps(list(pool)))
 
     def app_types(self, user: str) -> list[str]:
-        return self._list(f"thong_bao_loai:{user}", DEFAULT_TYPES)
+        return self._list(f"thong_bao_loai:{user}", tuple(ALL_TYPES), ALL_TYPES)
 
     def set_app_types(self, user: str, types) -> None:
-        self._save_list(f"thong_bao_loai:{user}", types)
+        self._save_list(f"thong_bao_loai:{user}", types, ALL_TYPES)
 
     def telegram(self) -> dict:
         return {"token": self.db.setting("tg_token") or "", "chat": self.db.setting("tg_chat") or "",
@@ -364,5 +405,5 @@ class AlertSettings:
         self.db.set_setting("tg_lan_cuoi", day)
 
 
-__all__ = ["ALERT_TYPES", "Alert", "AlertSettings", "TelegramError", "collect", "counts", "digest_text",
+__all__ = ["ALERT_TYPES", "ALL_TYPES", "APP_TYPES", "Alert", "AlertSettings", "TelegramError", "collect", "counts", "digest_text",
            "missing_fields", "tg_find_chats", "tg_send"]

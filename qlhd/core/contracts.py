@@ -179,7 +179,8 @@ def backfill_vat(db) -> int:
     hoặc thiếu sau thuế): tính bổ sung. Trả về số bản ghi đã cập nhật."""
     if _BACKFILL_SEEN.get("key") == db.cache_key():
         return 0
-    n = _backfill_vat(db)
+    with db.auto():
+        n = _backfill_vat(db)
     _BACKFILL_SEEN["key"] = db.cache_key()
     return n
 

@@ -181,6 +181,7 @@ class HomePage(QWidget):
     open_page = Signal(str)           # tên trang trong thanh điều hướng
     open_review = Signal()            # danh sách hóa đơn đầu vào cần xem lại
     add_contract = Signal()
+    open_action = Signal(str)         # thu_muc_hd / dong_bo / gemini
 
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
@@ -205,6 +206,14 @@ class HomePage(QWidget):
         self.sub = _wrap(tagged(QLabel(), "PageSub"))          # tự xuống dòng, không đẩy rộng trang
         head.addWidget(self.sub)
         lay.addLayout(head)
+        # dòng báo: kết quả quét thư mục hóa đơn, Gemini, đồng bộ tự động (chỉ khi có việc cần biết)
+        self.banner = QLabel()
+        self.banner.setWordWrap(True)
+        self.banner.setTextFormat(Qt.RichText)
+        self.banner.setObjectName("Banner")
+        self.banner.setStyleSheet("QLabel#Banner { border-radius: 6px; padding: 8px 12px; }")
+        self.banner.linkActivated.connect(self.open_action.emit)
+        lay.addWidget(self.banner)
         # kỳ số liệu và các nút: hết chỗ thì xuống dòng (cửa sổ hẹp, chữ to) để không phải kéo ngang
         tools = FlowLayout(spacing=8)
         tools.addWidget(QLabel("Kỳ"))
@@ -526,12 +535,56 @@ class HomePage(QWidget):
             c.addStretch(1)
 
         self._arrange()
+        self._banner()
         partners = self.ctx.sync.partners()
         if partners:
             p = partners[0]
             self.sync_info.setText(f"Lần đồng bộ gần nhất: {p['TenMay']} lúc {fmt_date(p['LanCuoi'][:10])}.")
         else:
             self.sync_info.setText("Chưa đồng bộ với máy nào.")
+
+    def _banner(self):
+        from ..core.gemini import GeminiService
+        from ..core.invoice_folder import K_LAST, InvoiceFolders
+        from ..core.sync_folder import SyncFolder
+        parts, tone = [], "accent"
+        folders = InvoiceFolders(self.ctx.db)
+        if folders.configured() and (self.ctx.can("HoaDonDauRa") or self.ctx.can("HoaDonDauVao")):
+            s = folders.summary()
+            n_rev = folders.review_count()
+            when = self.ctx.db.setting(K_LAST) or ""
+            bits = []
+            if s.get("them"):
+                bits.append(f"tự thêm <b>{s['them']}</b> hóa đơn mới")
+            if n_rev:
+                bits.append(f"<b>{n_rev}</b> file cần xem")
+                tone = "warn"
+            if s.get("cho_gemini"):
+                bits.append(f"{s['cho_gemini']} file ảnh chờ Gemini")
+            if bits:
+                parts.append(f"Thư mục hóa đơn{' (quét ' + _local(when) + ')' if when else ''}: " + ", ".join(bits)
+                             + " · <a href='thu_muc_hd'>Mở Thư mục hóa đơn</a>")
+        g = GeminiService(self.ctx.db)
+        if g.configured():
+            st, text = g.state()
+            issues = g.issue_invoices()
+            if st == "loi":
+                n = len(g.unreviewed_lines())
+                parts.append(text + (f" · {n} dòng hóa đơn đầu vào chưa được Gemini rà soát" if n else "")
+                             + " · <a href='gemini'>Cài đặt Gemini</a>")
+                tone = "danger"
+            if issues:
+                parts.append(f"<b>{len(issues)}</b> hóa đơn Gemini báo có vấn đề (tô đỏ trong danh sách hóa đơn, cột "
+                             "Gemini)")
+                tone = "danger" if tone != "danger" else tone
+        if self.ctx.can("DongBo"):
+            for title, detail in SyncFolder(self.ctx.db, None).warnings():
+                parts.append(f"{title}: {detail} · <a href='dong_bo'>Mở Đồng bộ</a>")
+                tone = "danger" if "lỗi" in title.lower() else ("warn" if tone == "accent" else tone)
+        self.banner.setVisible(bool(parts))
+        self.banner.setText("<br>".join(parts))
+        self.banner.setStyleSheet(f"QLabel#Banner {{ border-radius: 6px; padding: 8px 12px; "
+                                  f"background: {style.color(tone + '_soft')}; color: {style.color('text')}; }}")
 
     def remind_settings(self):
         dlg = RemindSettingsDialog(self.ctx.cs.remind_days(), self)
@@ -540,6 +593,14 @@ class HomePage(QWidget):
             self.ctx.db.log(self.ctx.user["TenDangNhap"], "Cài đặt nhắc hạn", f"{dlg.value()} ngày")
             self.refresh()
             info(self, f"Đã lưu: nhắc trước {dlg.value()} ngày khi hợp đồng sắp hết hạn.")
+
+
+def _local(iso: str) -> str:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M %d/%m")
+    except ValueError:
+        return ""
 
 
 def reminder_text(ctx, today: str) -> str | None:

@@ -3,21 +3,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
                                QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ..core import in_invoice_excel, invoice_match, pdf_invoice, vat, xml_invoice
+from ..core import in_invoice_excel, invoice_match, pdf_invoice, xml_invoice
 from ..core.assets import AssetService
 from ..core.duplicates import CONFIRM_KEY as DUP_OK
-from ..core.contracts import (DuplicateWarning, INSTALLMENTS, INVOICE_KINDS, ValidationError, guess_tax_group, payment_status,
-                              rate_from_amounts)
+from ..core.contracts import (DuplicateWarning, INSTALLMENTS, INVOICE_KINDS, ValidationError, payment_status)
 from ..core.finance_import import FileNeedsPassword
+from ..core.invoice_folder import invoice_values, parse_invoice_file  # noqa: F401 - dùng lại ở nơi khác
 from ..core.reports import fmt_date, fmt_money
 from .contracts_page import edit_payment, payment_dialog
 from . import style
 from .in_invoice_form import InInvoiceDialog
+from .invoice_files import FileActions, display_fields
 from .filter_box import FilterBox
 from .widgets import (VAT_HINT, Combo, DataTable, bulk_edit, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
                       error, hint, info, rate_field, require,
@@ -155,55 +156,12 @@ def invoice_payment(ctx, parent, r: dict) -> bool:
     return bool(v and run_safely(parent, ctx.cs.save_payment, v)) or changed
 
 
-def parse_invoice_file(path: str) -> dict:
-    if path.lower().endswith(".xml"):
-        return xml_invoice.parse_invoice(path)
-    return pdf_invoice.parse_invoice(path)
-
-
 def read_invoice_file(parent, path: str) -> dict | None:
     try:
         return parse_invoice_file(path)
     except (xml_invoice.InvoiceXMLError, pdf_invoice.InvoicePDFError) as e:
         error(parent, f"{Path(path).name}: {e}")
         return None
-
-
-def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[dict, list[str]]:
-    """Dữ liệu đọc từ file → giá trị lưu cho hóa đơn đầu ra / đầu vào, kèm các lưu ý cho người nhập."""
-    notes = []
-    if d.get("ThieuTruong"):
-        notes.append("Chưa đọc được: " + ", ".join(d["ThieuTruong"]) + ". Hãy kiểm tra và nhập bổ sung.")
-    rate = d.get("ThueSuatHD") or rate_from_amounts(d["GiaTriTruocThue"], d["VAT"])
-    try:
-        rate = vat.parse_rate(rate)
-    except ValueError:
-        notes.append(f"Thuế suất \"{rate}\" chưa nhận ra, hãy chọn lại.")
-        rate = ""
-    common = {"KyHieuMauSo": d["KyHieuMauSo"], "KyHieuHD": d["KyHieuHD"], "GiaTriTruocThue": d["GiaTriTruocThue"],
-              "VAT": d["VAT"], "GiaTriSauThue": d["GiaTriSauThue"], "MatHang": d.get("MatHang") or "",
-              "ThueSuat": rate, "DuongDanTep": path, "ChiTietThueSuat": None}
-    lines = vat.load_breakdown(d.get("ChiTietThueSuat"))
-    if len(lines) > 1:            # nhiều mức thuế: giữ chi tiết từng mức nếu cộng lại khớp tổng hóa đơn
-        b, t = sum(x["TruocThue"] for x in lines), sum(x["VAT"] for x in lines)
-        if abs(b - d["GiaTriTruocThue"]) <= len(lines) and abs(t - d["VAT"]) <= len(lines):
-            common.update(ChiTietThueSuat=vat.dump_breakdown(lines), ThueSuat=vat.breakdown_rate(lines))
-            notes.append("Hóa đơn nhiều mức thuế: " + "; ".join(
-                f"{x['ThueSuat']}: tiền hàng {fmt_money(x['TruocThue'])}, VAT {fmt_money(x['VAT'])}" for x in lines) + ".")
-        else:
-            notes.append(f"Hóa đơn nhiều mức thuế ({rate}): chi tiết từng mức không khớp tổng, chỉ lưu tổng tiền.")
-    if kind == "ra":
-        if mst_cty and d["MSTNguoiBan"] and d["MSTNguoiBan"] != mst_cty:
-            notes.append(f"MST người bán {d['MSTNguoiBan']} khác MST công ty {mst_cty}.")
-        return dict(common, SoHoaDon=d["SoHoaDon"], NgayXuatHD=d["NgayLap"] or None, TenNguoiMua=d["TenNguoiMua"],
-                    MSTNguoiMua=d["MSTNguoiMua"], TinhChatHD="Gốc"), notes
-    if mst_cty and d["MSTNguoiMua"] and d["MSTNguoiMua"] != mst_cty:
-        notes.append(f"MST người mua {d['MSTNguoiMua']} khác MST công ty {mst_cty}: hóa đơn có thể không phải của công ty.")
-    if d.get("PhiKhac"):
-        common.update(PhiKhac=d["PhiKhac"], TenPhiKhac=d.get("TenPhiKhac") or "Phí bảo vệ môi trường")
-        notes.append(f"Hóa đơn có {common['TenPhiKhac']} {fmt_money(d['PhiKhac'])} đ ngoài thuế GTGT.")
-    return dict(common, SoHoaDonGoc=d["SoHoaDon"], TenNhaCungCap=d["TenNguoiBan"], MaThueNCC=d["MSTNguoiBan"],
-                NgayNhanHD=d["NgayLap"] or None, NhomThue=guess_tax_group(d["VAT"]), _Dong=d.get("Dong") or None), notes
 
 
 class InvoicesPage(QWidget):
@@ -223,7 +181,8 @@ class InvoicesPage(QWidget):
             self.box = FilterBox(ctx, "hoa_don_ra", "Tìm số hóa đơn, người mua, MST, mặt hàng, số tiền…", [
                 ("Số hóa đơn", "SoHoaDon"), ("Ký hiệu", "KyHieuHD"), ("Người mua", "TenNguoiMua"),
                 ("MST người mua", "MSTNguoiMua"), ("Số HĐ", "SoHopDong"), ("Mặt hàng", "MatHang"),
-                ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue")],
+                ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue"), ("Tên file gốc", "TenFileGoc"),
+                ("Thư mục", "ThuMuc")],
                 money_keys=("GiaTriSauThue", "GiaTriTruocThue", "ConPhaiThu"), date_key="NgayXuatHD",
                 date_label="Ngày lập", filters=[
                     {"key": "tt", "label": "Thanh toán", "options": [
@@ -234,7 +193,8 @@ class InvoicesPage(QWidget):
             self.box = FilterBox(ctx, "hoa_don_vao", "Tìm số hóa đơn, người bán, MST, mặt hàng, số tiền…", [
                 ("Số hóa đơn", "SoHoaDonGoc"), ("Ký hiệu", "KyHieuHD"), ("Người bán", "TenNhaCungCap"),
                 ("MST người bán", "MaThueNCC"), ("Số HĐ", "SoHopDong"), ("Mặt hàng", "MatHang"),
-                ("Người mua hàng", "NguoiMuaHang"), ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue")],
+                ("Người mua hàng", "NguoiMuaHang"), ("Số sao kê", "SoThamChieuSK"), ("Sau thuế", "GiaTriSauThue"),
+                ("Tên file gốc", "TenFileGoc"), ("Thư mục", "ThuMuc")],
                 money_keys=("GiaTriSauThue", "GiaTriTruocThue"), date_key="NgayNhanHD", date_label="Ngày",
                 filters=[
                     {"key": "co_hd", "label": "Hợp đồng", "options": [
@@ -253,11 +213,16 @@ class InvoicesPage(QWidget):
         b_file = button("Nhập từ file XML / PDF (chọn nhiều file)…", self.add_from_files)
         b_edit = button("Sửa", self.edit)
         b_del = button("Xóa", self.delete, "Danger")
-        b_open = button("Mở tệp gốc", self.open_file)
+        b_open = button("Tệp gốc ▾", self.file_menu)
+        b_open.setToolTip("Mở tệp gốc, mở thư mục chứa, sao chép tên file, xuất PDF ra thư mục khác, gắn tệp gốc")
+        b_gem = button("Kiểm tra bằng Gemini", self.check_gemini)
+        b_gem.setToolTip("Gửi tệp gốc các hóa đơn đang chọn cho Gemini đọc lại và soát: OK hoặc Có vấn đề")
+        b_dir = button("Thư mục hóa đơn…", self.open_folder_dialog)
+        b_dir.setToolTip("Hóa đơn phần mềm vừa tự thêm, file Cần xem, tất cả file trong thư mục hóa đơn")
         b_hd = button("Mở hợp đồng", self.go_contract)
         b_hd.setToolTip("Mở hợp đồng của hóa đơn đang chọn để xem, sửa hợp đồng, công việc, thanh toán")
         b_hd.setEnabled(ctx.can("HopDong"))
-        btns = [b_add, b_file, b_edit, b_del, b_open, b_hd]
+        btns = [b_add, b_file, b_edit, b_del, b_open, b_gem, b_dir, b_hd]
         b_add.setEnabled(add_ok)
         b_file.setEnabled(add_ok)
         if kind == "vao":
@@ -297,8 +262,12 @@ class InvoicesPage(QWidget):
                     ("GiaTriSauThue", "Sau thuế", "money"),
                     ("NhomThue", "Nhóm thuế", "text"), ("NguoiMuaHang", "Người mua hàng", "text"),
                     ("SoThamChieuSK", "Số sao kê", "text"), ("SoHopDong", "Số HĐ đầu vào", "text")]
+        cols += [("TenFileGoc", "Tên file gốc", "text"), ("ThuMuc", "Thư mục", "text"), ("GeminiHT", "Gemini", "text")]
         self.table = DataTable(cols, multi=True)      # chọn nhiều dòng (Ctrl / Shift) để sửa cùng lúc
         self.table.activated_row.connect(lambda _: self.edit())
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(lambda pos: self.file_menu(self.table.viewport().mapToGlobal(pos)))
+        self.files = FileActions(ctx, kind, self, self.refresh)
         lay.addWidget(self.table, 1)
         self.total = QLabel()
         lay.addWidget(self.total)
@@ -316,6 +285,7 @@ class InvoicesPage(QWidget):
                     continue
                 r = out_invoice_row(self.ctx, inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "")
+                r.update(display_fields(self.ctx, "ra", inv))
                 pays = r.pop("_pays")
                 if tt == "con" and r["ConPhaiThu"] <= 0 or tt == "du" and r["ConPhaiThu"] > 0:
                     continue
@@ -337,6 +307,7 @@ class InvoicesPage(QWidget):
                     continue
                 r = dict(inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "") if inv["MaHopDong"] else "(Mua trực tiếp)"
+                r.update(display_fields(self.ctx, "vao", inv))
                 paid = bool((inv["SoThamChieuSK"] or "").strip())
                 if co_hd == "co" and not inv["MaHopDong"] or co_hd == "khong" and inv["MaHopDong"] \
                         or thue and inv["NhomThue"] != thue or ncc and inv["TenNhaCungCap"] != ncc \
@@ -668,12 +639,25 @@ class InvoicesPage(QWidget):
             self.refresh()
 
     def open_file(self):
-        r = self.table.current()
-        if not r or not r.get("DuongDanTep"):
-            return info(self, "Hóa đơn này chưa gắn tệp gốc.")
-        if not Path(r["DuongDanTep"]).exists():
-            return error(self, f"Không còn tìm thấy tệp:\n{r['DuongDanTep']}")
-        QDesktopServices.openUrl(QUrl.fromLocalFile(r["DuongDanTep"]))
+        self.files.open(self.table.current())
+
+    def file_menu(self, pos=None):
+        rows = self.table.selected() or ([self.table.current()] if self.table.current() else [])
+        if not rows:
+            return info(self, "Chọn hóa đơn trong danh sách trước.")
+        m = self.files.menu(rows)
+        m.exec(pos if pos is not None else self.cursor().pos())
+
+    def check_gemini(self):
+        rows = self.table.selected()
+        if not rows:
+            return info(self, "Chọn hóa đơn (giữ Ctrl / Shift để chọn nhiều) để Gemini kiểm tra.")
+        self.files.check(rows)
+
+    def open_folder_dialog(self):
+        from .invoice_files import InvoiceFolderDialog
+        InvoiceFolderDialog(self.ctx, self, tab=1).exec()
+        self.refresh()
 
 
 def mark_duplicates(ctx, kind: str, items: list[dict]) -> None:

@@ -164,6 +164,17 @@ def require(cond, message: str) -> None:
         raise ValueError(message)
 
 
+def local_time(iso: str | None) -> str:
+    """Thời điểm lưu (UTC) → giờ máy này, dạng HH:MM dd/mm/yyyy."""
+    from datetime import datetime
+    if not iso:
+        return ""
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%H:%M %d/%m/%Y")
+    except ValueError:
+        return iso[:16].replace("T", " ")
+
+
 def copy_text(text: str) -> None:
     QGuiApplication.clipboard().setText(text)
 

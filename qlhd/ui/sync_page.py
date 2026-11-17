@@ -6,16 +6,18 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QLineEdit, QRadioButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QLineEdit, QRadioButton, QSpinBox, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                                QWidget)
 
 from ..core import finance as fin
 from ..core.finance import FinanceError, FinanceStore
+from ..core import sync_folder as sf
+from ..core.sync_folder import SyncFolder
 from ..core.reports import fmt_date
 from ..core.sync import (A_BOTH, A_KEEP, A_MERGE, A_SKIP, A_TAKE, ACTION_LABELS, PKG_EXT, ST_CONFLICT, ST_DUP,
                          ST_SAME, SyncError, field_label)
 from . import style
-from .widgets import (CheckList, Combo, DataTable, DateEdit, ask_secret, button, confirm, error, hint, info,
+from .widgets import (CheckList, Combo, DataTable, DateEdit, ask_secret, button, confirm, error, hint, info, local_time,
                       page_title, toolbar)
 
 STATUS_COLORS = {ST_CONFLICT: "danger", ST_DUP: "warn", ST_SAME: "muted"}
@@ -35,14 +37,188 @@ class SyncPage(QWidget):
         self.items = []
         lay = QVBoxLayout(self)
         lay.addWidget(page_title("Đồng bộ dữ liệu giữa các máy"))
+        self.auto = SyncFolder(ctx.db, ctx.sync)
+        self.pkg_path = None
         tabs = QTabWidget()
-        tabs.addTab(self._tab_export(), "Xuất gói (máy gửi)")
-        tabs.addTab(self._tab_import(), "Nhận gói (máy nhận)")
+        self.tabs = tabs
+        tabs.addTab(self._tab_auto(), "Tự động qua thư mục chung")
+        tabs.addTab(self._tab_export(), "Xuất gói thủ công (máy gửi)")
+        tabs.addTab(self._tab_import(), "Nhận gói thủ công (máy nhận)")
         tabs.addTab(self._tab_history(), "Lịch sử && hoàn tác")
         lay.addWidget(tabs)
         can_export = ctx.can("DongBo", "Xuat")
         self.b_export.setEnabled(can_export)
         self.b_open.setEnabled(ctx.can("DongBo", "Them"))
+
+    # ------------------------------------------------------------ tự động qua thư mục chung
+    def _tab_auto(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        self.auto_state = QLabel()
+        self.auto_state.setWordWrap(True)
+        self.auto_state.setTextFormat(Qt.RichText)
+        lay.addWidget(self.auto_state)
+        g = QGroupBox("Cài đặt trên máy này")
+        f = QFormLayout(g)
+        self.a_dir = QLineEdit()
+        self.a_dir.setPlaceholderText("VD thư mục Google Drive / OneDrive dùng chung giữa máy kế toán và máy Giám đốc")
+        row = QHBoxLayout()
+        row.addWidget(self.a_dir, 1)
+        row.addWidget(button("Chọn…", self._pick_auto_dir))
+        f.addRow("Thư mục đồng bộ chung", row)
+        self.a_pw1, self.a_pw2 = _pw(), _pw()
+        f.addRow("Mật khẩu đồng bộ (≥ 6 ký tự)", self.a_pw1)
+        f.addRow("Nhập lại", self.a_pw2)
+        self.a_send = QCheckBox("Tự gửi khi máy này có thay đổi, kiểm tra mỗi")
+        self.a_send_min = QSpinBox()
+        self.a_send_min.setRange(1, 240)
+        self.a_send_min.setSuffix(" phút")
+        f.addRow(toolbar(self.a_send, self.a_send_min, "stretch"))
+        self.a_recv = QCheckBox("Tự nhận khi mở phần mềm và định kỳ mỗi")
+        self.a_recv_min = QSpinBox()
+        self.a_recv_min.setRange(5, 1440)
+        self.a_recv_min.setSuffix(" phút")
+        f.addRow(toolbar(self.a_recv, self.a_recv_min, "stretch"))
+        self.a_remind = QSpinBox()
+        self.a_remind.setRange(1, 60)
+        self.a_remind.setSuffix(" ngày")
+        f.addRow("Nhắc khi không nhận được dữ liệu từ máy kia sau", self.a_remind)
+        self.a_clean = QSpinBox()
+        self.a_clean.setRange(0, 365)
+        self.a_clean.setSuffix(" ngày")
+        self.a_clean.setSpecialValueText("Không tự dọn")
+        self.a_clean_hint = hint("")
+        f.addRow("Tự xóa gói cũ hơn", toolbar(self.a_clean, self.a_clean_hint, "stretch"))
+        lay.addWidget(g)
+        self.b_auto_save = button("Lưu cài đặt", self.save_auto, "Primary")
+        self.b_auto_now = button("Đồng bộ ngay", self.sync_now)
+        self.b_auto_now.setToolTip("Gửi ngay các thay đổi của máy này và nhận các gói mới trong thư mục chung")
+        self.b_pending = button("Mở gói có bản ghi cần chọn…", self.open_pending)
+        lay.addLayout(toolbar(self.b_auto_save, self.b_auto_now, self.b_pending, "stretch"))
+        self.auto_list = DataTable([("May", "Máy gửi", "text"), ("Luc", "Thời điểm xuất", "text"),
+                                    ("Ten", "Tệp", "text"), ("TT", "Trạng thái", "text")])
+        lay.addWidget(self.auto_list, 1)
+        lay.addWidget(hint("Mỗi gói chỉ chứa các thay đổi (không phải toàn bộ dữ liệu), không bao giờ chứa thu chi, "
+                           "được mã hóa bằng mật khẩu đồng bộ và ghi tên máy gửi. Gói đã nhận thì bỏ qua. Bản ghi người "
+                           "dùng sửa thắng dữ liệu phần mềm tự cập nhật; hai máy cùng có người sửa thì để người dùng "
+                           "chọn. Chuyển toàn bộ dữ liệu sang máy mới vẫn dùng đồng bộ thủ công (các thẻ bên cạnh)."))
+        return w
+
+    def _pick_auto_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Chọn thư mục đồng bộ chung", self.a_dir.text())
+        if d:
+            self.a_dir.setText(d)
+
+    def refresh_auto(self):
+        st = self.auto.settings()
+        director = self.ctx.user["VaiTro"] == "Giám đốc"
+        if not self.a_dir.hasFocus():
+            self.a_dir.setText(st["thu_muc"])
+        self.a_pw1.setPlaceholderText("Đã cài – để trống là giữ nguyên" if st["co_mat_khau"] else "")
+        self.a_pw2.setPlaceholderText(self.a_pw1.placeholderText())
+        self.a_send.setChecked(st["tu_gui"])
+        self.a_send_min.setValue(st["gui_phut"])
+        self.a_recv.setChecked(st["tu_nhan"])
+        self.a_recv_min.setValue(st["nhan_phut"])
+        self.a_remind.setValue(st["nhac_ngay"])
+        self.a_clean.setValue(st["don_ngay"])
+        self.a_clean.setEnabled(director)
+        self.a_clean_hint.setText("Chỉ xóa gói máy kia đã nhận. Cài đặt này dùng chung mọi máy." if director else
+                                  "Do Giám đốc cài (chỉ xóa gói máy kia đã nhận).")
+        can = self.ctx.can("DongBo", "Xuat")
+        self.b_auto_save.setEnabled(can)
+        self.b_auto_now.setEnabled(can and self.auto.ready())
+        pending = self.auto.pending_choices()
+        self.b_pending.setEnabled(bool(pending))
+        self.b_pending.setText(f"Mở gói có bản ghi cần chọn ({sum(pending.values())})…" if pending
+                               else "Mở gói có bản ghi cần chọn…")
+        rows = []
+        mine = self.ctx.machine_id
+        for p, h in self.auto.packages():
+            if h.get("may_gui") == mine:
+                got = [m for m in self.auto._marks(p)]
+                tt = "Máy này gửi" + (" · máy kia đã nhận" if got else " · chờ máy kia nhận")
+            elif str(p) in pending:
+                tt = f"Đã nhận · {pending[str(p)]} bản ghi cần chọn"
+            elif self.auto._received(h):
+                tt = "Đã nhận"
+            else:
+                tt = "Chưa nhận"
+            rows.append({"May": h.get("ten_may", ""), "Luc": local_time(h.get("thoi_diem")),
+                         "Ten": p.name, "TT": tt, "_mau": "warn" if "cần chọn" in tt or tt == "Chưa nhận" else None})
+        self.auto_list.set_rows(list(reversed(rows)))
+        if not st["thu_muc"]:
+            txt = ("Chưa bật đồng bộ tự động. Chọn thư mục dùng chung (Google Drive / OneDrive…) giống nhau trên máy kế "
+                   "toán và máy Giám đốc, nhập cùng một mật khẩu đồng bộ rồi bấm Lưu cài đặt. Hai máy nên bắt đầu từ "
+                   "cùng dữ liệu (chuyển toàn bộ dữ liệu bằng đồng bộ thủ công trước).")
+        else:
+            last = local_time(self.auto.last_send())
+            scan = local_time(self.ctx.db.setting(sf.K_LAST_SCAN))
+            n = self.auto.pending_changes()
+            txt = (f"<b>Đang đồng bộ tự động</b> qua {st['thu_muc']} · gửi lần cuối {last or '—'} · quét lần "
+                   f"cuối {scan or '—'} · " + (f"<b>{n} thay đổi chưa gửi</b>" if n else "không có thay đổi chưa gửi"))
+            err = self.auto.last_error()
+            if err:
+                txt += f"<br><span style='color:{style.color('danger')}'>Lỗi: {err}</span>"
+            if not self.auto.ready():
+                txt += f"<br><span style='color:{style.color('warn')}'>Chưa nhập mật khẩu đồng bộ trên máy này.</span>"
+        self.auto_state.setText(txt)
+
+    def save_auto(self):
+        if self.a_pw1.text() != self.a_pw2.text():
+            return error(self, "Hai lần nhập mật khẩu đồng bộ không khớp.")
+        if self.a_dir.text().strip() and not self.auto.password() and not self.a_pw1.text():
+            return error(self, "Hãy nhập mật khẩu đồng bộ (giống nhau trên các máy).")
+        old = self.auto.settings()
+        v = {"thu_muc": self.a_dir.text().strip(), "mat_khau": self.a_pw1.text() or None,
+             "tu_gui": self.a_send.isChecked(), "gui_phut": self.a_send_min.value(),
+             "tu_nhan": self.a_recv.isChecked(), "nhan_phut": self.a_recv_min.value(),
+             "nhac_ngay": self.a_remind.value(), "don_ngay": self.a_clean.value(),
+             "nguoi": self.ctx.user["TenDangNhap"]}
+        changes = []
+        for key, label, show in (("thu_muc", "Thư mục đồng bộ chung", str), ("gui_phut", "Kiểm tra gửi mỗi (phút)", str),
+                                 ("nhan_phut", "Nhận định kỳ mỗi (phút)", str), ("don_ngay", "Tự xóa gói cũ hơn (ngày)", str),
+                                 ("nhac_ngay", "Nhắc khi không nhận sau (ngày)", str),
+                                 ("tu_gui", "Tự gửi", lambda x: "Bật" if x else "Tắt"),
+                                 ("tu_nhan", "Tự nhận", lambda x: "Bật" if x else "Tắt")):
+            if old[key] != v[key] and not (key == "don_ngay" and self.ctx.user["VaiTro"] != "Giám đốc"):
+                changes.append((label, show(old[key]) if old[key] != "" else "(chưa đặt)", show(v[key]) or "(bỏ)"))
+        if v["mat_khau"]:
+            changes.append(("Mật khẩu đồng bộ", "••••" if old["co_mat_khau"] else "(chưa đặt)", "(mật khẩu mới)"))
+        if not changes:
+            return info(self, "Không có thay đổi.")
+        from .widgets import confirm_changes
+        if not confirm_changes(self, changes, "Cài đặt đồng bộ tự động"):
+            return
+        try:
+            self.auto.save_settings(v, director=self.ctx.user["VaiTro"] == "Giám đốc")
+        except SyncError as e:
+            return error(self, str(e))
+        self.a_pw1.clear()
+        self.a_pw2.clear()
+        self.refresh_auto()
+        win = self.window()
+        if hasattr(win, "restart_auto_sync"):
+            win.restart_auto_sync()
+
+    def sync_now(self):
+        win = self.window()
+        if hasattr(win, "sync_now"):
+            win.sync_now()
+        else:
+            p = self.auto.send_if_changed(self.ctx.user)
+            r = self.auto.receive(self.ctx.user)
+            info(self, ("Đã gửi các thay đổi. " if p else "") + f"Nhận {r.nhan} gói.")
+        self.refresh_auto()
+
+    def open_pending(self):
+        pending = self.auto.pending_choices()
+        if not pending:
+            return info(self, "Không còn gói nào có bản ghi cần chọn.")
+        path = sorted(pending)[0]
+        if not self._load_package(path, self.auto.password()):
+            return
+        self.tabs.setCurrentIndex(2)
 
     # ------------------------------------------------------------ xuất
     def _tab_export(self) -> QWidget:
@@ -105,6 +281,7 @@ class SyncPage(QWidget):
         self.director_hint.setText("" if ok else "Gói Giám đốc chỉ xuất được khi đăng nhập Giám đốc và đã mở khóa Thu chi.")
         self.history.set_rows(self.ctx.sync.history())
         self.b_undo.setEnabled(self.ctx.sync.can_undo())
+        self.refresh_auto()
 
     def export(self):
         if self.pw1.text() != self.pw2.text():
@@ -175,10 +352,15 @@ class SyncPage(QWidget):
                         f"{fmt_date(h['thoi_diem'][:10])}).\nNhập mật khẩu đồng bộ:")
         if pw is None:
             return
+        self._load_package(path, pw)
+
+    def _load_package(self, path: str, pw: str) -> bool:
         try:
             self.pkg = self.ctx.sync.read_package(path, pw)
         except SyncError as e:
-            return error(self, str(e))
+            error(self, str(e))
+            return False
+        self.pkg_path = str(path)
         order = self.ctx.sync.wipe_order_for_me(self.pkg)
         if order:
             from .auth_dialogs import run_wipe_order
@@ -186,7 +368,7 @@ class SyncPage(QWidget):
             self.pkg = None
             if run_wipe_order(self, self.ctx, order):
                 self.window().close()
-            return
+            return False
         if self.pkg.is_director and self.ctx.user["VaiTro"] not in fin.ALLOWED_ROLES:
             self.pkg.body.pop("finance", None)
         self.items = self.ctx.sync.compare(self.pkg)
@@ -201,9 +383,15 @@ class SyncPage(QWidget):
         if self.pkg.already_imported:
             txt += " <span style='color:" + style.color("warn") + "'>Gói này đã được nhận trước đây.</span>"
         self.pkg_info.setText(txt)
+        if self.pkg_path in self.auto.pending_choices():
+            txt += (" <b>Gói tự động: phần mềm đã nhận các bản ghi tự xử lý được; còn các dòng xung đột / nghi trùng"
+                    " dưới đây cần chọn.</b>")
+            self.pkg_info.setText(txt)
+            self.hide_same.setChecked(True)
         self._fill_tree()
         self.b_all.setEnabled(True)
         self.b_sel.setEnabled(True)
+        return True
 
     def _fill_tree(self):
         self.tree.clear()
@@ -230,7 +418,9 @@ class SyncPage(QWidget):
                 g.setFont(0, f)
                 self.tree.addTopLevelItem(g)
                 groups[key] = g
-            row = QTreeWidgetItem([it.label, it.status, it.note or ", ".join(field_label(k) for k in it.diff[:6])])
+            detail = it.note if it.status == ST_DUP else " · ".join(
+                x for x in (", ".join(field_label(k) for k in it.diff[:6]), it.note) if x)
+            row = QTreeWidgetItem([it.label, it.status, detail])
             if it.note:
                 row.setToolTip(2, it.note.replace(" · ", "\n"))
             if it.status in STATUS_COLORS:
@@ -323,7 +513,10 @@ class SyncPage(QWidget):
         if self.pkg.is_director and self.pkg.body.get("finance"):
             msg += "\n\n" + self._apply_finance()
         info(self, msg, "Kết quả đồng bộ")
+        if self.pkg_path:
+            self.auto.clear_pending(self.pkg_path)
         self.pkg = None
+        self.pkg_path = None
         self.items = []
         self.tree.clear()
         self.pkg_info.setText("Đã đồng bộ xong.")

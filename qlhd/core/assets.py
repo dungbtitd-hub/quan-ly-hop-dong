@@ -276,7 +276,12 @@ class AssetService:
 
     def ensure_lines(self, ma_hd: str, lines: list[dict] | None = None) -> None:
         """Tạo / cập nhật các dòng hàng của một hóa đơn đầu vào rồi tự phân loại.
-        lines: dòng đọc từ XML; không có thì dùng một dòng gộp từ Mặt hàng và giá trị trước thuế."""
+        lines: dòng đọc từ XML; không có thì dùng một dòng gộp từ Mặt hàng và giá trị trước thuế.
+        Phần mềm tự làm nên không đánh dấu người dùng đã sửa."""
+        with self.db.auto():
+            self._ensure_lines(ma_hd, lines)
+
+    def _ensure_lines(self, ma_hd: str, lines: list[dict] | None = None) -> None:
         inv = self.db.get("HoaDonDauVao", ma_hd)
         if inv is None:
             return
@@ -508,6 +513,10 @@ class AssetService:
 
     # ---- tài sản
     def renumber_ccdc(self, commit: bool = True) -> int:
+        with self.db.auto():
+            return self._renumber_ccdc(commit)
+
+    def _renumber_ccdc(self, commit: bool = True) -> int:
         """Đánh lại mã CCDC phần mềm tự cấp (CC001/2026…) cho liên tục, theo thứ tự ngày ghi tăng trong từng năm.
         Giữ nguyên mã của tài sản nhập từ sổ kế toán (có mốc sổ) và mã người dùng tự đặt khác dạng CCnnn/năm;
         mã tự cấp nối tiếp sau số lớn nhất của sổ kế toán trong năm đó. Trả về số tài sản đổi mã."""
@@ -558,6 +567,10 @@ class AssetService:
         return f"TS{n + 1:03d}/{year}", f"GTTS{k + 1:05d}"
 
     def _sync_asset(self, line, inv) -> None:
+        with self.db.auto():                 # tài sản sinh theo dòng hóa đơn: phần mềm tự cập nhật
+            self._sync_asset_auto(line, inv)
+
+    def _sync_asset_auto(self, line, inv) -> None:
         ts = self.db.one("SELECT * FROM TaiSan WHERE MaDongHD = ? AND DaXoa = 0", (line["Ma"],))
         if line["DaXoa"] or line["PhanLoai"] not in dm.TAI_SAN or not line["SoThang"]:
             if ts:

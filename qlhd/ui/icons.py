@@ -4,7 +4,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 PATHS = {
@@ -71,6 +71,23 @@ def icon(name: str, color: str = "#6b7280", size: int = 18) -> QIcon:
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         renderer.render(p, QRectF(0, 0, size * scale, size * scale))
+        p.end()
+        pm.setDevicePixelRatio(scale)
+        out.addPixmap(pm)
+    return out
+
+
+def dot(color: str, size: int = 14) -> QIcon:
+    """Chấm tròn màu (đèn trạng thái kết nối)."""
+    out = QIcon()
+    for scale in (1, 2):
+        pm = QPixmap(size * scale, size * scale)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(QRectF(2 * scale, 2 * scale, (size - 4) * scale, (size - 4) * scale))
         p.end()
         pm.setDevicePixelRatio(scale)
         out.addPixmap(pm)

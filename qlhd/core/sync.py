@@ -60,7 +60,10 @@ FOREIGN_KEYS = {
 # nhắc việc đã hiện hôm nay, đếm đăng nhập sai thu chi.
 LOCAL_SETTINGS = {"ten_may", "dong_bo_hoan_tac", "dong_bo_hoan_tac_tc", "ngay_lon_nhat", "khoa_cong_ty_tam",
                   "lenh_xoa_cho_gui", "lenh_xoa_da_dung", "dang_nhap_cuoi", "ra_soat_phan_loai_phien_ban"}
-LOCAL_SETTING_PREFIXES = ("tg_", "tc_sai:", "bo_loc:", "nhac_hd_ngay:", "nhac_phan_loai_ngay:")
+LOCAL_SETTING_PREFIXES = ("tg_", "tc_sai:", "bo_loc:", "nhac_hd_ngay:", "nhac_phan_loai_ngay:",
+                          "tmhd_",      # thư mục hóa đơn: đường dẫn từng máy khác nhau
+                          "gemini_",    # khóa API Gemini, trạng thái kết nối: riêng từng máy
+                          "dbtm_")      # thư mục đồng bộ chung, mật khẩu, lịch tự gửi / tự nhận, tự dọn
 
 
 def shared_setting(key: str) -> bool:
@@ -214,6 +217,36 @@ def suspect_match(table: str, incoming: dict, local: dict) -> tuple[bool, bool, 
     return suspect, strong, [spec[k][0] for k in spec if k in hit]
 
 
+def manual_mark(table: str, row: dict) -> str | None:
+    """Giờ người dùng sửa bản ghi (trống = phần mềm tự tạo / tự cập nhật). Dòng hóa đơn đầu vào kế toán đã chọn
+    phân loại (TuDong = 0) luôn tính là người sửa, kể cả gói từ máy bản cũ chưa có cột SuaTay."""
+    mark = row.get("SuaTay")
+    if not mark and table == "DongHoaDonDauVao" and row.get("TuDong") == 0:
+        mark = row.get("NgaySua") or "x"
+    return mark or None
+
+
+def manual_rule(table: str, theirs: dict, mine: dict, status: str, their_mark, local_mark,
+                sender: str) -> tuple[str, str]:
+    """Trạng thái sau khi áp quy tắc "người sửa thắng tự động" (kèm lý do để hiện cho người dùng)."""
+    mu, tu = manual_mark(table, mine), manual_mark(table, theirs)
+    if mu == tu:
+        if status == ST_CONFLICT:
+            return (ST_THEIRS if theirs["NgaySua"] >= mine["NgaySua"] else ST_MINE,
+                    "Khác nhau do phần mềm tự cập nhật: lấy bản mới hơn")
+        return status, ""
+    if their_mark is None or local_mark is None:      # chưa từng nhận từ máy này: lần người sửa sau thắng
+        return ((ST_THEIRS, "Bên gửi có người sửa sau") if (tu or "") > (mu or "")
+                else (ST_MINE, "Máy này có người sửa sau"))
+    theirs_new = bool(tu) and tu > their_mark
+    mine_new = bool(mu) and mu > local_mark and mine.get("MaMaySua") != sender
+    if theirs_new and mine_new:
+        return ST_CONFLICT, "Cả hai máy cùng có người sửa"
+    if theirs_new or (not mine_new and (tu or "") > (mu or "")):
+        return ST_THEIRS, "Bên gửi có người sửa, thắng dữ liệu tự động"
+    return ST_MINE, "Máy này có người sửa, thắng dữ liệu tự động"
+
+
 def business_fields(row: dict) -> dict:
     return {k: v for k, v in row.items() if k not in SYNC_FIELDS and k != "Ma"}
 
@@ -260,7 +293,7 @@ class SyncService:
 
     def partners(self) -> list[dict]:
         rows = self.db.query("SELECT MaMayDoiTac, TenMayDoiTac, MAX(ThoiDiem) t FROM LichSuDongBo"
-                             " GROUP BY MaMayDoiTac ORDER BY t DESC")
+                             " WHERE MaMayDoiTac != '__thu_muc_chung__' GROUP BY MaMayDoiTac ORDER BY t DESC")
         return [{"MaMay": r["MaMayDoiTac"], "TenMay": r["TenMayDoiTac"], "LanCuoi": r["t"]} for r in rows]
 
     def history(self) -> list[sqlite3.Row]:
@@ -515,6 +548,13 @@ class SyncService:
                             status = ST_THEIRS
                         else:
                             status = ST_THEIRS if r["NgaySua"] > local["NgaySua"] else ST_MINE
+                        # Người dùng đã sửa (đã rà soát số liệu) thắng dữ liệu phần mềm tự cập nhật, bất kể giờ sửa.
+                        # So lần người sửa gần nhất (SuaTay) hai bên: như nhau thì phần khác nhau là do tự động →
+                        # lấy bản mới hơn; bên nào có người sửa sau lần nhận trước thì bên đó thắng; cả hai cùng có
+                        # người sửa mới thì hỏi.
+                        if not r["DaXoa"] and not local["DaXoa"]:
+                            status, why = manual_rule(table, r, local, status, their_mark, local_mark, sender)
+                            note = why or note
                 if table == "HopDong":
                     group = r["Ma"]
                 elif table in ("LichSuBanGiao", "LichSuNghiemThu"):

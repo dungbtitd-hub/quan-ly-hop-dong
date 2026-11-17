@@ -247,7 +247,9 @@ def test_new_alert_type_is_on_for_old_saved_choices(company):
     db = company["kt"].db
     db.set_setting("thong_bao_loai:kt", '["hd_het_han"]')       # lựa chọn lưu ở bản cũ
     st = al.AlertSettings(db)
-    assert st.app_types("kt") == ["hd_het_han", "hd_cap_nhat_tt", "hd_lech_gia_tri", "thu_thua", "tt_trung"]
+    assert st.app_types("kt") == ["hd_het_han", "hd_cap_nhat_tt", "hd_lech_gia_tri", "thu_thua", "tt_trung",
+                                  "dong_bo", "gemini", "thu_muc_hd"]
+    assert "gemini" not in st.telegram()["loai"]                 # cảnh báo mới chỉ trên phần mềm, không gửi Telegram
     st.set_app_types("kt", ["hd_het_han"])                       # bỏ chọn ở bản mới thì giữ nguyên
     assert st.app_types("kt") == ["hd_het_han"]
 
