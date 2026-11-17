@@ -644,3 +644,34 @@ def test_misread_amounts_not_reported_as_conflict(company):
                                                   "GiaTriSauThue": 3_529_710}) == []
     # file cộng khớp mà khác phần mềm: vẫn báo
     assert f.diff("vao", inv, {"GiaTriTruocThue": 3_000_000, "VAT": 240_000, "GiaTriSauThue": 3_240_000})
+
+
+def test_gemini_reread_of_conflict_pdf_clears_misread(company, tmp_path, monkeypatch):
+    from qlhd.core import pdf_invoice
+    from qlhd.core.contracts import ContractService
+    from qlhd.core.invoice_folder import F_CONFLICT
+    db = company["kt"].db
+    sample_data(db)
+    ma = ContractService(db).save_in_invoice({"SoHoaDonGoc": "487863", "KyHieuHD": "C26MGG", "TenNhaCungCap": "NCC H",
+                                              "MaThueNCC": "0600000006", "NgayNhanHD": "2026-01-10",
+                                              "GiaTriTruocThue": 3_268_250, "VAT": 261_460})
+    root = tmp_path / "vao"
+    root.mkdir()
+    (root / "487863.pdf").write_bytes(b"%PDF-1.4")
+    wrong = {"SoHoaDon": "487863", "KyHieuHD": "C26MGG", "KyHieuMauSo": "1", "MSTNguoiBan": "0600000006",
+             "TenNguoiBan": "NCC H", "NgayLap": "2026-01-10", "GiaTriTruocThue": 3_000_000, "VAT": 240_000,
+             "GiaTriSauThue": 3_240_000, "MSTNguoiMua": "", "TenNguoiMua": "", "ThueSuatHD": "8%", "MatHang": "",
+             "ThieuTruong": []}
+    monkeypatch.setattr(pdf_invoice, "parse_invoice", lambda p: dict(wrong))
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root)})
+    f.process("vao", InvoiceFolders.read("vao", f.new_files("vao"), None))
+    assert f.files("vao")[0]["TrangThai"] == F_CONFLICT
+    gem = FakeGemini(extract={"la_hoa_don": True, "ky_hieu": "C26MGG", "so_hoa_don": "487863", "ngay_lap": "2026-01-10",
+                              "ten_nguoi_ban": "NCC H", "mst_nguoi_ban": "0600000006", "tien_truoc_thue": 3_268_250,
+                              "tien_thue": 261_460, "tong_thanh_toan": 3_529_710, "thue_suat": "8%"})
+    files = [(r["DuongDan"], str(f.full_path("vao", r["DuongDan"]))) for r in f.files("vao")]
+    items = InvoiceFolders.read("vao", files, gem, cache=f.cache("vao", [x for x, _ in files]), force_gemini=True)
+    f.process("vao", items, user_asked=True)
+    assert gem.calls and f.files("vao")[0]["TrangThai"] == F_EXISTS
+    assert db.get("HoaDonDauVao", ma)["GiaTriTruocThue"] == 3_268_250

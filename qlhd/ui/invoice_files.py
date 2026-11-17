@@ -1275,8 +1275,8 @@ class InvoiceFolderDialog(QDialog):
             info(self, f"Đã cập nhật số liệu {done} hóa đơn theo file.")
 
     def gemini(self):
-        """File chưa có trong phần mềm (PDF, ảnh): Gemini đọc số liệu rồi xét như lúc quét. File đã gắn với hóa đơn
-        trong phần mềm: Gemini kiểm tra hóa đơn."""
+        """File chưa có trong phần mềm (PDF, ảnh) hoặc có số liệu khác phần mềm: Gemini đọc lại file rồi xét như lúc
+        quét. File đã gắn với hóa đơn trong phần mềm (số liệu khớp): Gemini kiểm tra hóa đơn."""
         rows = self._sel()
         if not rows:
             return info(self, "Chọn file (giữ Ctrl / Shift để chọn nhiều) để Gemini đọc hoặc kiểm tra.")
@@ -1286,7 +1286,9 @@ class InvoiceFolderDialog(QDialog):
         check: dict[str, list] = {}
         read, xml = [], 0
         for r in rows:
-            if r["_inv"]:
+            if r["TrangThai"] == fo.F_CONFLICT and not r["DuongDan"].lower().endswith(".xml"):
+                read.append(r)            # số liệu file khác phần mềm: Gemini đọc lại file rồi so lại
+            elif r["_inv"]:
                 check.setdefault(r["_kind"], []).append(r["_inv"])
             elif r["DuongDan"].lower().endswith(".xml"):
                 xml += 1
