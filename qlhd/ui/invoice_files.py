@@ -1330,7 +1330,8 @@ class InvoiceFolderDialog(QDialog):
                 for it in items:
                     if it.offline:
                         offline = it.error
-                r = self.folders.process(kind, items, mst_cty=mst or "")
+                r = self.folders.process(kind, items, mst_cty=mst or "", user_asked=True,
+                                         auto_add=None if self.ctx.can(TABLE[kind], "Them") else False)
                 total["them"] += len(r["them"])
                 for k in ("can_xem", "co_san", "lech", "cho_gemini"):
                     total[k] += r[k]

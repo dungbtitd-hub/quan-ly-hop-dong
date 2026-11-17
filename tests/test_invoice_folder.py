@@ -508,3 +508,43 @@ def test_gemini_reads_files_in_parallel_and_retries_quota(company, tmp_path, mon
     assert state["max"] > 1                                 # gửi song song
     assert len(items) == 6 and all(it.data and not it.error for it in items)   # file bị hết hạn mức đã thử lại
     assert sorted(it.data["SoHoaDon"] for it in items) == [f"7{i}" for i in range(6)]
+
+
+def test_user_gemini_read_of_review_files_adds_new_and_links_existing(company, tmp_path, monkeypatch):
+    from qlhd.core import pdf_invoice
+    db = company["kt"].db
+    sample_data(db)
+    root = tmp_path / "vao"
+    root.mkdir()
+    (root / "moi.pdf").write_bytes(b"%PDF-1.4 moi")
+    (root / "da_co.pdf").write_bytes(b"%PDF-1.4 cu")
+    monkeypatch.setattr(pdf_invoice, "parse_invoice",
+                        lambda p: (_ for _ in ()).throw(pdf_invoice.InvoicePDFError("PDF quét")))
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root)})
+    # lần quét đầu, Gemini chưa cài: cả hai file vào Cần xem
+    f.process("vao", InvoiceFolders.read("vao", f.new_files("vao"), None))
+    assert len(f.files("vao", F_REVIEW)) == 2
+    old = db.one("SELECT * FROM HoaDonDauVao WHERE DaXoa = 0 AND MaThueNCC != '' LIMIT 1")
+    reads = {"moi.pdf": {"la_hoa_don": True, "ky_hieu": "C26TMM", "so_hoa_don": "4321", "ngay_lap": "2026-11-12",
+                         "ten_nguoi_ban": "Nhà cung cấp mới", "mst_nguoi_ban": "0500000005", "tien_truoc_thue": 200_000,
+                         "tien_thue": 20_000, "tong_thanh_toan": 220_000, "thue_suat": "10%"},
+             "da_co.pdf": {"la_hoa_don": True, "ky_hieu": old["KyHieuHD"], "so_hoa_don": old["SoHoaDonGoc"],
+                           "ngay_lap": old["NgayNhanHD"], "ten_nguoi_ban": old["TenNhaCungCap"],
+                           "mst_nguoi_ban": old["MaThueNCC"], "tien_truoc_thue": old["GiaTriTruocThue"],
+                           "tien_thue": old["VAT"], "tong_thanh_toan": old["GiaTriSauThue"]}}
+
+    class Gem:
+        def extract_invoice(self, path):
+            return dict(reads[Path(path).name])
+    rows = f.files("vao", F_REVIEW)
+    files = [(r["DuongDan"], str(f.full_path("vao", r["DuongDan"]))) for r in rows]
+    items = InvoiceFolders.read("vao", files, Gem(), cache=f.cache("vao", [x for x, _ in files]), force_gemini=True)
+    r = f.process("vao", items, user_asked=True)
+    assert len(r["them"]) == 1 and r["co_san"] == 1 and r["can_xem"] == 0
+    new = db.get("HoaDonDauVao", r["them"][0])
+    assert new["SoHoaDonGoc"] == "4321" and new["TepTuongDoi"] == "moi.pdf"
+    linked = db.get("HoaDonDauVao", old["Ma"])
+    assert linked["TepTuongDoi"] == "da_co.pdf"                     # hóa đơn cũ chỉ ghi nhận nơi chứa file
+    assert linked["GiaTriSauThue"] == old["GiaTriSauThue"]
+    assert not f.files("vao", F_REVIEW)

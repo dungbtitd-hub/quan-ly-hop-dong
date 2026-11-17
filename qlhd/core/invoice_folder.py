@@ -772,13 +772,16 @@ class InvoiceFolders:
         with self.db.auto():
             return cs.save_out_invoice(v) if kind == "ra" else cs.save_in_invoice(v)
 
-    def process(self, kind: str, items: list[Item], *, mst_cty: str = "", auto_add: bool | None = None) -> dict:
+    def process(self, kind: str, items: list[Item], *, mst_cty: str = "", auto_add: bool | None = None,
+                user_asked: bool = False) -> dict:
         """Ghi kết quả đọc vào CSDL: tự thêm hóa đơn mới rõ ràng; hóa đơn đã có thì chỉ ghi nhận nơi chứa tệp (số
         liệu khác thì để nhân viên xem); còn lại để Cần xem.
+        user_asked: nhân viên chọn file ở Cần xem và bấm "Đọc bằng Gemini" — đọc xong, hóa đơn mới rõ ràng (không
+        trùng / nghi trùng, đủ trường, đầu ra nhận ra hợp đồng) được thêm luôn, kể cả file từ lần quét đầu.
         Trả {them: [mã], can_xem: n, co_san: n, lech: n, cho_gemini: n}."""
         first = self.first_scan(kind)
         if auto_add is None:
-            auto_add = self.flag(K_AUTO_ADD) and not first
+            auto_add = user_asked or (self.flag(K_AUTO_ADD) and not first)
         res = {"them": [], "can_xem": 0, "co_san": 0, "lech": 0, "cho_gemini": 0, "lan_dau": first}
         idx = self._index(kind)
         seen: set[tuple] = set()
@@ -836,7 +839,7 @@ class InvoiceFolders:
                 why = self.review_reason(kind, it, values, mst_cty)
             except Exception as e:  # noqa: BLE001
                 why = f"Lỗi khi đọc số liệu: {e}"
-            if why is None and (old.get("GhiChu") or "").startswith("Lần quét đầu"):
+            if why is None and not user_asked and (old.get("GhiChu") or "").startswith("Lần quét đầu"):
                 why = old["GhiChu"]                  # hóa đơn cũ từ lần quét đầu: vẫn chờ nhân viên chọn
             if why is None and not auto_add:
                 why = "Lần quét đầu: chờ nhân viên chọn thêm" if first else "Chờ nhân viên thêm (đang tắt tự thêm)"
