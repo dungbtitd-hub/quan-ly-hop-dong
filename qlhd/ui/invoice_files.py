@@ -60,7 +60,9 @@ def run_bg(fn, on_done) -> None:
 def open_path(path, parent=None) -> None:
     """Mở tệp: hóa đơn XML xem ngay trong phần mềm; PDF, ảnh mở bằng ứng dụng của máy."""
     if str(path).lower().endswith(".xml"):
-        XmlViewerDialog(path, parent).exec()
+        dlg = XmlViewerDialog(path, parent)
+        dlg.exec()
+        dlg.deleteLater()
         return
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
