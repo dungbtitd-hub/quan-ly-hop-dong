@@ -573,3 +573,39 @@ def test_gemini_discount_amounts_checked_fixed_or_sent_to_review(tmp_path, monke
         {"text": json.dumps(replies.pop(0), ensure_ascii=False)}]}}]})
     r = g.extract_invoice(pdf)
     assert r["tien_truoc_thue"] == 900_000 and r["tien_chiet_khau"] == 100_000 and not replies
+
+
+def test_skipped_and_kept_files_not_reported_again_after_rescan(company, tmp_path):
+    """Nhân viên đã rà soát: bỏ qua file đọc nhầm, giữ số liệu phần mềm với file số liệu khác → quét lại toàn bộ,
+    hay file bị ổ đám mây đổi giờ sửa, cũng không báo lại."""
+    import os
+    from qlhd.core import invoice_folder as fo
+    from qlhd.core.contracts import ContractService
+    db = company["kt"].db
+    sample_data(db)
+    ContractService(db).save_in_invoice({"SoHoaDonGoc": "202", "TenNhaCungCap": "Cửa hàng Tin học A",
+                                         "MaThueNCC": "0400000004", "NgayNhanHD": "2026-11-10",
+                                         "GiaTriTruocThue": 900_000, "VAT": 90_000})
+    vao = tmp_path / "vao"
+    _xml(vao / "202.xml", 202)                                        # số liệu khác hóa đơn đã có
+    _xml(vao / "doc_nham.xml", 555, mst="")                           # thiếu MST người bán → Cần xem
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(vao)})
+    _scan(f, "vao")
+    st = {x["DuongDan"]: x["TrangThai"] for x in f.files("vao")}
+    assert st["202.xml"] == fo.F_CONFLICT and st["doc_nham.xml"] == F_REVIEW
+    f.set_status("vao", ["202.xml"], F_EXISTS, note=fo.NOTE_KEEP)       # như bấm "Bỏ qua" ở giao diện
+    f.set_status("vao", ["doc_nham.xml"], fo.F_SKIP, note=fo.NOTE_SKIP)
+    assert f.review_count() == 0
+    for _ in range(2):
+        again = f.recheck_files("vao", everything=True)
+        changed = f.new_files("vao")
+        items = InvoiceFolders.read("vao", sorted(again + changed),
+                                    cache=f.cache("vao", [x for x, _ in again], fresh=[x for x, _ in changed]))
+        f.process("vao", items)
+        assert f.review_count() == 0
+        # ổ đám mây đổi giờ sửa file: phần mềm đọc lại nhưng vẫn nhớ quyết định
+        for name in ("202.xml", "doc_nham.xml"):
+            os.utime(vao / name, (1_700_000_000, 1_700_000_000))
+    st = {x["DuongDan"]: (x["TrangThai"], x["GhiChu"]) for x in f.files("vao")}
+    assert st["202.xml"] == (F_EXISTS, fo.NOTE_KEEP) and st["doc_nham.xml"] == (fo.F_SKIP, fo.NOTE_SKIP)

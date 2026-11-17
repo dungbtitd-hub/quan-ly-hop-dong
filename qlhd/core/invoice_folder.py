@@ -56,6 +56,8 @@ F_LABELS = {F_ADDED: "Đã tự thêm", F_EXISTS: "Có từ trước", F_REVIEW:
 F_OPEN = (F_REVIEW, F_CONFLICT)         # còn chờ nhân viên (thẻ Cần xem)
 
 SRC_XML, SRC_PDF, SRC_GEMINI, SRC_GEMINI_OK = "XML", "PDF", "Gemini", "Gemini (đã soát)"
+NOTE_SKIP = "Nhân viên bỏ qua"
+NOTE_KEEP = "Giữ số liệu trong phần mềm"     # nhân viên đã rà soát số liệu khác: giữ của phần mềm, không báo lại
 GEMINI_RETRY_WAIT = 30       # giây chờ trước khi thử lại khi Gemini báo vượt hạn mức / quá tải
 GEMINI_PARALLEL = 3          # số file gửi Gemini cùng lúc (gói miễn phí giới hạn số lần gọi mỗi phút)
 REQUIRED = {"vao": (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Tên người bán"), ("MaThueNCC", "MST người bán"),
@@ -457,15 +459,20 @@ class InvoiceFolders:
         self.db.conn.commit()
         return len(gone)
 
-    def cache(self, kind: str, rels) -> dict[str, dict]:
-        """Số liệu đã đọc lần trước của các file (để xét lại không phải đọc / gửi Gemini lần nữa)."""
+    def cache(self, kind: str, rels, fresh=()) -> dict[str, dict]:
+        """Số liệu đã đọc lần trước của các file (để xét lại không phải đọc / gửi Gemini lần nữa).
+        fresh: file đã đổi (chép đè, ổ đám mây đổi giờ sửa…) — phải đọc lại, chỉ giữ quyết định cũ của nhân viên."""
         rows = self._rows(kind)
+        fresh = set(fresh)
         out = {}
-        for rel in rels:
+        for rel in list(rels) + [x for x in fresh if x not in set(rels)]:
             r = rows.get(rel)
             if r is None:
                 continue
             data = json.loads(r["DuLieu"]) if r["DuLieu"] else {}
+            if rel in fresh:
+                out[rel] = {"row": r, "raw": None, "src": "", "not_invoice": False, "prev": data.get("raw")}
+                continue
             out[rel] = {"row": r, "raw": data.get("raw"), "src": data.get("src") or "",
                         "not_invoice": bool(data.get("not_invoice"))}
         return out
@@ -804,6 +811,12 @@ class InvoiceFolders:
             for rel in it.kem:
                 self._mark(kind, rel, str(Path(it.path).parent.joinpath(Path(rel).name)), F_COMPANION,
                            note=f"Cùng hóa đơn với {Path(it.rel).name}")
+            old = it.old or {}
+            if old.get("TrangThai") == F_SKIP and not user_asked:
+                # nhân viên đã bỏ qua: quét lại (kể cả khi ổ đám mây đổi giờ sửa file) không hỏi lại
+                self._mark(kind, it.rel, it.path, F_SKIP, old.get("MaHoaDon"), note=old.get("GhiChu") or NOTE_SKIP,
+                           data={"raw": it.data, "src": it.source} if it.data is not None else None)
+                continue
             if it.data is None:
                 if it.offline:                        # mất kết nối Gemini: chưa ghi nhớ, lần quét sau đọc lại
                     res["cho_gemini"] += 1
@@ -820,7 +833,6 @@ class InvoiceFolders:
                 self._mark(kind, it.rel, it.path, F_REVIEW, note=f"Lỗi khi đọc số liệu: {e}", data=raw)
                 res["can_xem"] += 1
                 continue
-            old = it.old or {}
             if inv is not None:
                 note = self._link(kind, inv, it)
                 if note == "kem":
@@ -828,7 +840,12 @@ class InvoiceFolders:
                                note=f"Cùng hóa đơn với {Path(inv['TepTuongDoi']).name}", data=raw)
                     res["co_san"] += 1
                     continue
-                diff = self.diff(kind, inv, values)
+                kept = old.get("GhiChu") == NOTE_KEEP and old.get("MaHoaDon") == inv["Ma"] and not user_asked
+                diff = [] if kept else self.diff(kind, inv, values)
+                if kept:
+                    self._mark(kind, it.rel, it.path, F_EXISTS, inv["Ma"], note=NOTE_KEEP, data=raw)
+                    res["co_san"] += 1
+                    continue
                 if diff:
                     self._mark(kind, it.rel, it.path, F_CONFLICT, inv["Ma"],
                                note="Đã có trong phần mềm, số liệu trong file khác: "

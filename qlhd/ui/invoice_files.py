@@ -929,9 +929,11 @@ class Scanner(QObject):
             self.folders.prune(kind)
             first = self.folders.first_scan(kind)
             again = self.folders.recheck_files(kind, everything)
-            files = sorted(self.folders.new_files(kind) + again)
+            changed = self.folders.new_files(kind)
+            files = sorted(changed + again)
             if files or first:
-                jobs.append((kind, files, self.folders.cache(kind, [rel for rel, _ in again]),
+                jobs.append((kind, files, self.folders.cache(kind, [rel for rel, _ in again],
+                                                             fresh=[rel for rel, _ in changed]),
                              fo.known_keys(self.ctx.db, kind)))
         if not jobs:
             self.finished.emit({})
@@ -1246,9 +1248,9 @@ class InvoiceFolderDialog(QDialog):
         if not confirm(self, "\n\n".join(text)):
             return
         for r in rows:
-            self.folders.set_status(r["_kind"], [r["DuongDan"]], fo.F_SKIP, note="Nhân viên bỏ qua")
+            self.folders.set_status(r["_kind"], [r["DuongDan"]], fo.F_SKIP, note=fo.NOTE_SKIP)
         for r in keep:
-            self.folders.set_status(r["_kind"], [r["DuongDan"]], fo.F_EXISTS, note="Giữ số liệu trong phần mềm")
+            self.folders.set_status(r["_kind"], [r["DuongDan"]], fo.F_EXISTS, note=fo.NOTE_KEEP)
         self.reload()
 
     def apply_file(self):
