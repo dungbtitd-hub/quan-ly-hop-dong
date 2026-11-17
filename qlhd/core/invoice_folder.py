@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from datetime import date
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,6 +56,8 @@ F_LABELS = {F_ADDED: "Đã tự thêm", F_EXISTS: "Có từ trước", F_REVIEW:
 F_OPEN = (F_REVIEW, F_CONFLICT)         # còn chờ nhân viên (thẻ Cần xem)
 
 SRC_XML, SRC_PDF, SRC_GEMINI, SRC_GEMINI_OK = "XML", "PDF", "Gemini", "Gemini (đã soát)"
+GEMINI_RETRY_WAIT = 30       # giây chờ trước khi thử lại khi Gemini báo vượt hạn mức / quá tải
+GEMINI_PARALLEL = 3          # số file gửi Gemini cùng lúc (gói miễn phí giới hạn số lần gọi mỗi phút)
 REQUIRED = {"vao": (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Tên người bán"), ("MaThueNCC", "MST người bán"),
                     ("NgayNhanHD", "Ngày hóa đơn")),
             "ra": (("SoHoaDon", "Số hóa đơn"), ("NgayXuatHD", "Ngày lập"))}
@@ -103,23 +107,66 @@ def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[di
                 NgayNhanHD=d["NgayLap"] or None, NhomThue=guess_tax_group(d["VAT"]), _Dong=d.get("Dong") or None), notes
 
 
+def _s(x) -> str:
+    return "" if x is None else str(x).strip()
+
+
+def _money(x) -> int:
+    """Số tiền Gemini trả: số, hoặc chuỗi kiểu "1.234.567" / "1,234,567" / "1.234.567,50 đ"."""
+    if isinstance(x, (int, float)):
+        return int(round(x))
+    t = re.sub(r"[^\d,.\-]", "", str(x or ""))
+    if not t:
+        return 0
+    if re.fullmatch(r"-?\d{1,3}([.,]\d{3})+", t):           # chỉ có dấu phân cách nghìn
+        t = re.sub(r"[.,]", "", t)
+    elif "," in t and "." in t:                              # 1.234.567,50 hoặc 1,234,567.50
+        dec = "," if t.rfind(",") > t.rfind(".") else "."
+        t = t.replace("." if dec == "," else ",", "").replace(dec, ".")
+    else:
+        t = t.replace(",", ".")
+    try:
+        return int(round(float(t)))
+    except ValueError:
+        return 0
+
+
+def _date(x) -> str:
+    """Ngày lập Gemini trả (YYYY-MM-DD, DD/MM/YYYY, "Ngày 05 tháng 11 năm 2026"…) → YYYY-MM-DD ("" nếu không rõ)."""
+    t = str(x or "").strip()
+    m = re.search(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", t)
+    if m:
+        y, mo, d = m.groups()
+    else:
+        m = re.search(r"(\d{1,2})\D{1,12}?(\d{1,2})\D{1,12}?(\d{4})", t)
+        if not m:
+            return ""
+        d, mo, y = m.groups()
+    try:
+        return date(int(y), int(mo), int(d)).isoformat()
+    except ValueError:
+        return ""
+
+
+def _mst_text(x) -> str:
+    """MST: bỏ khoảng trắng, chấm; giữ dấu gạch của MST chi nhánh (0101234567-001)."""
+    t = re.sub(r"[^\d\-]", "", str(x or ""))
+    return t.strip("-")
+
+
 def from_gemini(g: dict) -> dict:
     """Kết quả Gemini đọc ảnh / PDF → cùng dạng với xml_invoice.parse_invoice (đủ dòng hàng, nhiều mức thuế,
     chiết khấu, phí khác)."""
-    def money(x):
-        try:
-            return int(round(float(x or 0)))
-        except (TypeError, ValueError):
-            return 0
+    money = _money
 
     def rate(x):
         try:
-            return vat.parse_rate((x or "").strip())
+            return vat.parse_rate(_s(x))
         except ValueError:
-            return (x or "").strip()
+            return _s(x)
     lines, names = [], []
     for ln in g.get("dong") or []:
-        ten = " ".join((ln.get("ten") or "").split())
+        ten = " ".join(_s(ln.get("ten")).split())
         kind = ln.get("tinh_chat") or "hang_hoa"
         if not ten or kind == "ghi_chu":
             continue
@@ -132,7 +179,7 @@ def from_gemini(g: dict) -> dict:
         if ten not in names:
             names.append(ten)
     by_rate = [{"ThueSuat": rate(x.get("thue_suat")), "TruocThue": money(x.get("tien_truoc_thue")),
-                "VAT": money(x.get("tien_thue"))} for x in g.get("thue_theo_muc") or [] if (x.get("thue_suat") or "").strip()]
+                "VAT": money(x.get("tien_thue"))} for x in g.get("thue_theo_muc") or [] if _s(x.get("thue_suat"))]
     rates = list(dict.fromkeys([x["ThueSuat"] for x in by_rate if x["ThueSuat"]]
                                + [x["ThueSuat"] for x in lines if x["ThueSuat"]]))
     if len(by_rate) < 2 and len({x["ThueSuat"] for x in lines if x["ThueSuat"]}) > 1:
@@ -141,7 +188,7 @@ def from_gemini(g: dict) -> dict:
             if x["ThueSuat"]:
                 acc[x["ThueSuat"]] = acc.get(x["ThueSuat"], 0) + x["ThanhTien"]
         by_rate = [{"ThueSuat": r, "TruocThue": t, "VAT": None} for r, t in acc.items()]
-    fees = [(" ".join((f.get("ten") or "").split()), money(f.get("so_tien"))) for f in g.get("phi_khac") or []]
+    fees = [(" ".join(_s(f.get("ten")).split()), money(f.get("so_tien"))) for f in g.get("phi_khac") or []]
     fees = [(n, t) for n, t in fees if t]
     truoc = money(g.get("tien_truoc_thue")) or sum(x["TruocThue"] for x in by_rate) or sum(x["ThanhTien"] for x in lines)
     thue = money(g.get("tien_thue")) or sum(x["VAT"] or 0 for x in by_rate)
@@ -150,14 +197,14 @@ def from_gemini(g: dict) -> dict:
     if not phi and truoc and tong - truoc - thue > 2:
         phi = tong - truoc - thue                     # tổng thanh toán lớn hơn tiền hàng + thuế: phần chênh là phí
     hd_rate = "; ".join(rates) if len(rates) > 1 else rate(g.get("thue_suat")) or (rates[0] if rates else "")
-    d = {"SoHopDong": (g.get("so_hop_dong") or "").strip(), "VanBan": (g.get("so_hop_dong") or ""),
-         "KyHieuMauSo": (g.get("mau_so") or "").strip(),
-         "KyHieuHD": (g.get("ky_hieu") or "").strip(), "SoHoaDon": (g.get("so_hoa_don") or "").strip(),
-         "NgayLap": (g.get("ngay_lap") or "")[:10], "TenNguoiBan": (g.get("ten_nguoi_ban") or "").strip(),
-         "MSTNguoiBan": (g.get("mst_nguoi_ban") or "").replace(" ", ""),
-         "TenNguoiMua": (g.get("ten_nguoi_mua") or "").strip(),
-         "MSTNguoiMua": (g.get("mst_nguoi_mua") or "").replace(" ", ""),
-         "DonViTienTe": (g.get("don_vi_tien_te") or "VND").strip() or "VND", "TyGia": g.get("ty_gia") or "",
+    d = {"SoHopDong": _s(g.get("so_hop_dong")), "VanBan": _s(g.get("so_hop_dong")),
+         "KyHieuMauSo": _s(g.get("mau_so")),
+         "KyHieuHD": _s(g.get("ky_hieu")), "SoHoaDon": _s(g.get("so_hoa_don")),
+         "NgayLap": _date(g.get("ngay_lap")), "TenNguoiBan": _s(g.get("ten_nguoi_ban")),
+         "MSTNguoiBan": _mst_text(g.get("mst_nguoi_ban")),
+         "TenNguoiMua": _s(g.get("ten_nguoi_mua")),
+         "MSTNguoiMua": _mst_text(g.get("mst_nguoi_mua")),
+         "DonViTienTe": _s(g.get("don_vi_tien_te")) or "VND", "TyGia": g.get("ty_gia") or "",
          "GiaTriTruocThue": truoc, "VAT": thue, "GiaTriSauThue": tong, "PhiKhac": phi,
          "TenPhiKhac": "; ".join(n for n, _ in fees if n) or ("Phí khác" if phi else ""),
          "ThueSuat": [{"ThueSuat": x["ThueSuat"], "ThanhTien": x["TruocThue"], "TienThue": x["VAT"] or 0}
@@ -454,7 +501,76 @@ class InvoiceFolders:
 
         need_gem = [(rel, path) for rel, path in other]
         gem_down = None                       # lỗi mất kết nối / hết hạn mức: không gửi tiếp các file sau
-        done_gem = 0
+        texts: dict[str, tuple] = {}          # rel → (số liệu lớp chữ PDF | None, lỗi)
+
+        def text_of(rel, path):
+            if rel not in texts:
+                t, err = None, ""
+                if rel.lower().endswith(".pdf"):
+                    try:
+                        t = pdf_invoice.parse_invoice(path)
+                    except pdf_invoice.InvoicePDFError as e:
+                        err = str(e)
+                    except Exception as e:  # noqa: BLE001 - PDF hỏng
+                        err = f"Không đọc được PDF: {e}"
+                texts[rel] = (t, err)
+            return texts[rel]
+
+        def pairs(d) -> bool:
+            k = invoice_key(kind, d)
+            return any(x.data is not d and key[0] == k[0] and key[2] == k[2] and k[2] and same_symbol(key[1], k[1])
+                       for key, x in by_key.items())
+
+        def wants_gemini(rel, path) -> bool:
+            stem = (str(Path(rel).parent), Path(rel).stem.lower())
+            if stem in by_stem and by_stem[stem].data:
+                return False
+            c = cache.get(rel) or {}
+            if (c.get("raw") or c.get("not_invoice")) and not force_gemini:
+                return False
+            text, _ = text_of(rel, path)
+            if text is not None and pairs(text):
+                return False
+            return force_gemini or not (_complete(text) and loose_key(kind, text) in known)
+
+        # Gửi Gemini song song vài file một lúc (mỗi file Gemini đọc mất vài chục giây): quét nhanh hơn nhiều lần.
+        gem_results: dict[str, object] = {}
+        ask_list = [(r, p) for r, p in need_gem if wants_gemini(r, p)] if gemini is not None and use_gemini else []
+        if ask_list:
+            import concurrent.futures as cf
+            import threading
+            from .gemini import GeminiError
+            stop = threading.Event()
+            n_done = [0]
+            lock = threading.Lock()
+
+            def job(rel, path):
+                if stop.is_set():
+                    return stop.err
+                try:
+                    try:
+                        res = gemini.extract_invoice(path)
+                    except GeminiError as e:
+                        # vượt số lần gọi mỗi phút / máy chủ bận: chờ một chút rồi thử lại một lần
+                        if e.kind != "han_muc" and "quá tải" not in str(e) or stop.wait(GEMINI_RETRY_WAIT):
+                            raise
+                        res = gemini.extract_invoice(path)
+                except GeminiError as e:
+                    if e.offline:
+                        stop.err = e
+                        stop.set()
+                    res = e
+                except Exception as e:  # noqa: BLE001 - lỗi bất ngờ ở một file không làm hỏng cả lần quét
+                    res = GeminiError(f"lỗi khi đọc: {e}")
+                with lock:
+                    n_done[0] += 1
+                    say(f"Gemini đã đọc {n_done[0]}/{len(ask_list)} file…")
+                return res
+            say(f"Gemini đang đọc {len(ask_list)} file…")
+            with cf.ThreadPoolExecutor(max_workers=GEMINI_PARALLEL) as ex:
+                futs = {ex.submit(job, r, p): r for r, p in ask_list}
+                for f in cf.as_completed(futs):
+                    gem_results[futs[f]] = f.result()
         for rel, path in need_gem:
             stem = (str(Path(rel).parent), Path(rel).stem.lower())
             if stem in by_stem and by_stem[stem].data:
@@ -471,26 +587,21 @@ class InvoiceFolders:
                 it.error, it.not_invoice = "Gemini: file này không phải hóa đơn.", True
                 items.append(it)
                 continue
-            text = None
-            if rel.lower().endswith(".pdf"):
-                try:
-                    text = pdf_invoice.parse_invoice(path)
-                except pdf_invoice.InvoicePDFError as e:
-                    it.error = str(e)
-                except Exception as e:  # noqa: BLE001 - PDF hỏng
-                    it.error = f"Không đọc được PDF: {e}"
+            text, terr = text_of(rel, path)
+            if terr:
+                it.error = terr
             if text is not None:
                 it.data, it.source = text, SRC_PDF
                 if pair(it):
                     continue
-            ask = gemini is not None and use_gemini and gem_down is None and (
-                force_gemini or not (_complete(text) and loose_key(kind, text) in known))
-            if ask:
+            if rel in gem_results:
                 from .gemini import GeminiError
-                done_gem += 1
-                say(f"Gemini đang đọc {Path(rel).name} ({done_gem})…")
                 try:
-                    g = gemini.extract_invoice(path)
+                    g = gem_results[rel]
+                    if g is None:
+                        raise GeminiError("Gemini chưa đọc được (đã dừng vì lỗi kết nối).", "mang")
+                    if isinstance(g, GeminiError):
+                        raise g
                     if g.get("la_hoa_don") is False:
                         it.error, it.not_invoice, it.data = "Gemini: file này không phải hóa đơn.", True, None
                     else:

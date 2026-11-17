@@ -319,7 +319,8 @@ class Gemini:
             prompt = EXTRACT_PROMPT.format(n=n) + ("" if schema else "\n\nTrả về đúng một đối tượng JSON với các khóa: "
                                                   + ", ".join(EXTRACT_SCHEMA["properties"]) + ".")
             try:
-                return self.ask_json([part, {"text": prompt}], schema, temperature=temp)
+                g = self.ask_json([part, {"text": prompt}], schema, temperature=temp)
+                return self._fill_header(part, g)
             except GeminiError as e:
                 # bị cắt (thường do mô hình lặp lại dòng khi ép khuôn JSON) hoặc trả lời hỏng: hỏi lại cách khác
                 if e.kind not in ("dai", "khac") or i == len(tries) - 1:
@@ -328,6 +329,23 @@ class Gemini:
                                           "\"Đọc bằng Gemini\" để thử lại hoặc nhập tay.", "dai") from None
                     raise
         raise GeminiError("Gemini chưa đọc được hóa đơn này.")
+
+    def _fill_header(self, part: dict, g: dict) -> dict:
+        """Còn thiếu thông tin chính (số, ngày, người bán, tổng tiền) thì hỏi riêng phần đầu hóa đơn (nhanh, ngắn)."""
+        if not isinstance(g, dict) or g.get("la_hoa_don") is False:
+            return g
+        if not any(_empty(g.get(k)) for k in MAIN_FIELDS):
+            return g
+        try:
+            h = self.ask_json([part, {"text": HEADER_PROMPT}], HEADER_SCHEMA, max_tokens=4096)
+        except GeminiError as e:
+            if e.offline:
+                raise
+            return g
+        for k in HEADER_KEYS:
+            if k != "la_hoa_don" and _empty(g.get(k)) and not _empty(h.get(k)):
+                g[k] = h[k]
+        return g
 
     def classify_lines(self, lines: list[dict]) -> list[dict]:
         """lines: [{id, ten, so_luong, don_gia, thanh_tien, nguoi_ban}] → [{id, ma_nhom, so_thang, do_chac, ly_do}]."""
@@ -377,8 +395,27 @@ EXTRACT_SCHEMA = {"type": "OBJECT", "properties": {
         "thue_suat": _S, "tien_truoc_thue": _I, "tien_thue": _I}}},
     "phi_khac": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {"ten": _S, "so_tien": _I}}},
     "tien_chiet_khau": _I, "tien_truoc_thue": _I, "thue_suat": _S, "tien_thue": _I, "tong_thanh_toan": _I,
-    "tien_bang_chu": _S},
-    "required": ["la_hoa_don"]}
+    "tien_bang_chu": _S}}
+# Trường chung bắt buộc phải trả (để trống nếu không có): chỉ ghi "required" mỗi la_hoa_don thì Gemini hay bỏ qua
+# luôn số hóa đơn, ngày, người bán… → phần mềm báo "Thiếu …". Thứ tự: thông tin chung, tổng tiền trước, dòng hàng
+# (dài nhất) sau cùng — trả lời bị cắt vẫn còn đủ thông tin chính.
+HEADER_KEYS = ["la_hoa_don", "mau_so", "ky_hieu", "so_hoa_don", "ngay_lap", "ten_nguoi_ban", "mst_nguoi_ban",
+               "ten_nguoi_mua", "mst_nguoi_mua", "tien_truoc_thue", "tien_thue", "tong_thanh_toan", "thue_suat"]
+EXTRACT_SCHEMA["required"] = HEADER_KEYS + ["thue_theo_muc", "dong"]
+EXTRACT_SCHEMA["propertyOrdering"] = HEADER_KEYS + [k for k in EXTRACT_SCHEMA["properties"]
+                                                     if k not in HEADER_KEYS and k != "dong"] + ["dong"]
+HEADER_SCHEMA = {"type": "OBJECT", "properties": {k: EXTRACT_SCHEMA["properties"][k] for k in HEADER_KEYS},
+                 "required": HEADER_KEYS, "propertyOrdering": HEADER_KEYS}
+HEADER_PROMPT = """Đây là hóa đơn Việt Nam. Chỉ đọc phần thông tin chung và tổng tiền (KHÔNG cần dòng hàng): mẫu số
+(mau_so), ký hiệu (ky_hieu), số hóa đơn (so_hoa_don), ngày lập (ngay_lap, YYYY-MM-DD), tên và MST người bán, tên và MST
+người mua, tổng tiền chưa thuế (tien_truoc_thue), tiền thuế GTGT (tien_thue), tổng tiền thanh toán (tong_thanh_toan),
+thuế suất (thue_suat, VD '10%'; nhiều mức thì ghi các mức cách nhau bằng '; '). Số tiền là số nguyên (đồng). Trường
+nào thật sự không có trên hóa đơn thì để trống. la_hoa_don = false nếu tệp không phải hóa đơn."""
+MAIN_FIELDS = ("so_hoa_don", "ngay_lap", "ten_nguoi_ban", "mst_nguoi_ban", "tong_thanh_toan")
+
+
+def _empty(v) -> bool:
+    return v in (None, "", 0, [], {})
 CLASSIFY_SCHEMA = {"type": "OBJECT", "properties": {"ket_qua": {"type": "ARRAY", "items": {
     "type": "OBJECT", "properties": {"id": _S, "ma_nhom": _S, "so_thang": _I,
                                      "do_chac": {"type": "STRING", "enum": ["cao", "trung_binh", "thap"]},

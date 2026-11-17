@@ -432,3 +432,79 @@ def test_gemini_extract_retries_when_cut_and_drops_unsupported_thinking(tmp_path
         raise AssertionError("phải báo bị cắt")
     except GeminiError as e:
         assert e.kind == "dai"
+
+
+def test_gemini_missing_header_asked_again_and_formats_normalized(tmp_path, monkeypatch):
+    from qlhd.core.gemini import EXTRACT_SCHEMA, HEADER_SCHEMA, Gemini
+    from qlhd.core.invoice_folder import from_gemini
+    # các trường chính phải "required" (không thì Gemini bỏ qua), dòng hàng xếp cuối
+    for k in ("so_hoa_don", "ngay_lap", "ten_nguoi_ban", "mst_nguoi_ban", "tong_thanh_toan"):
+        assert k in EXTRACT_SCHEMA["required"]
+    assert EXTRACT_SCHEMA["propertyOrdering"][-1] == "dong"
+    pdf = tmp_path / "hd.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    g = Gemini("AIza-thu", "gemini-thu-flash")
+    bodies = []
+    first = {"la_hoa_don": True, "so_hoa_don": 1234, "ngay_lap": "", "ten_nguoi_ban": "",
+             "dong": [{"ten": "Dịch vụ", "thanh_tien": "1.000.000"}], "tong_thanh_toan": "1.080.000"}
+    head = {"la_hoa_don": True, "so_hoa_don": "1234", "ngay_lap": "Ngày 05 tháng 11 năm 2026",
+            "ten_nguoi_ban": "Công ty Dịch vụ E", "mst_nguoi_ban": "0900 000 009", "tong_thanh_toan": 1_080_000}
+
+    def post(body):
+        bodies.append(body)
+        reply = first if len(bodies) == 1 else head
+        return {"candidates": [{"content": {"parts": [{"text": json.dumps(reply, ensure_ascii=False)}]}}]}
+    monkeypatch.setattr(g, "_post", post)
+    r = g.extract_invoice(pdf)
+    assert len(bodies) == 2
+    assert bodies[1]["generationConfig"]["responseSchema"] == HEADER_SCHEMA
+    d = from_gemini(r)
+    assert d["SoHoaDon"] == "1234" and d["NgayLap"] == "2026-11-05"
+    assert d["TenNguoiBan"] == "Công ty Dịch vụ E" and d["MSTNguoiBan"] == "0900000009"
+    assert d["GiaTriSauThue"] == 1_080_000 and d["Dong"][0]["ThanhTien"] == 1_000_000
+    assert from_gemini({"ngay_lap": "17/11/2026"})["NgayLap"] == "2026-11-17"
+    assert from_gemini({"tong_thanh_toan": "1,234,567.50"})["GiaTriSauThue"] == 1_234_568
+
+
+def test_gemini_reads_files_in_parallel_and_retries_quota(company, tmp_path, monkeypatch):
+    import threading
+    import time as _t
+    from qlhd.core import invoice_folder as fo
+    from qlhd.core import pdf_invoice
+    db = company["kt"].db
+    sample_data(db)
+    root = tmp_path / "vao"
+    root.mkdir()
+    for i in range(6):
+        (root / f"anh{i}.pdf").write_bytes(b"%PDF-1.4 quet")
+    monkeypatch.setattr(pdf_invoice, "parse_invoice",
+                        lambda p: (_ for _ in ()).throw(pdf_invoice.InvoicePDFError("PDF quét")))
+    monkeypatch.setattr(fo, "GEMINI_RETRY_WAIT", 0)
+    state = {"now": 0, "max": 0, "quota": 1}
+    lock = threading.Lock()
+
+    class Gem:
+        def extract_invoice(self, path):
+            with lock:
+                state["now"] += 1
+                state["max"] = max(state["max"], state["now"])
+                hit = state["quota"] > 0 and path.endswith("anh3.pdf")
+                if hit:
+                    state["quota"] -= 1
+            try:
+                _t.sleep(0.05)
+                if hit:
+                    raise GeminiError("Gemini báo hết hạn mức sử dụng, thử lại sau.", "han_muc")
+                n = Path(path).stem[-1]
+                return {"la_hoa_don": True, "ky_hieu": "C26T", "so_hoa_don": f"7{n}", "ngay_lap": "2026-11-01",
+                        "ten_nguoi_ban": "NCC", "mst_nguoi_ban": "0700000007", "tien_truoc_thue": 100_000,
+                        "tien_thue": 10_000, "tong_thanh_toan": 110_000, "thue_suat": "10%"}
+            finally:
+                with lock:
+                    state["now"] -= 1
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root)})
+    items = InvoiceFolders.read("vao", f.new_files("vao"), Gem(), force_gemini=True)
+    assert state["max"] > 1                                 # gửi song song
+    assert len(items) == 6 and all(it.data and not it.error for it in items)   # file bị hết hạn mức đã thử lại
+    assert sorted(it.data["SoHoaDon"] for it in items) == [f"7{i}" for i in range(6)]
