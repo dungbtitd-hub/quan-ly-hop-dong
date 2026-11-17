@@ -89,7 +89,7 @@ class GeminiError(Exception):
 
 
 class Gemini:
-    def __init__(self, key: str, model: str = DEFAULT_MODEL, timeout: float = 120):
+    def __init__(self, key: str, model: str = DEFAULT_MODEL, timeout: float = 180):
         if not key:
             raise GeminiError("Chưa nhập khóa API Gemini (Cài đặt › Thư mục hóa đơn và Gemini).", "chua_cai")
         model = model or DEFAULT_MODEL
@@ -224,10 +224,10 @@ class Gemini:
         except (ConnectionError, OSError) as e:
             raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {e}", "mang") from None
 
-    def ask_json(self, parts: list[dict], schema: dict) -> dict:
+    def ask_json(self, parts: list[dict], schema: dict, max_tokens: int = 32768) -> dict:
         body = {"contents": [{"role": "user", "parts": parts}],
                 "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema,
-                                     "temperature": 0}}
+                                     "temperature": 0, "maxOutputTokens": max_tokens}}
         data = self._post(body)
         try:
             text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
@@ -235,7 +235,12 @@ class Gemini:
         except (KeyError, IndexError, ValueError):
             reason = (data.get("promptFeedback") or {}).get("blockReason") or \
                 ((data.get("candidates") or [{}])[0].get("finishReason"))
-            raise GeminiError(f"Gemini không trả về kết quả đọc được ({reason or 'không rõ lý do'}).") from None
+            if reason == "MAX_TOKENS":
+                raise GeminiError("Hóa đơn quá dài, Gemini trả lời bị cắt giữa chừng.", "dai") from None
+            names = {"SAFETY": "bị chặn vì lý do an toàn", "RECITATION": "bị chặn do trích dẫn",
+                     "OTHER": "lỗi khác của Gemini"}
+            raise GeminiError("Gemini không trả về kết quả đọc được ("
+                              + (names.get(reason) or reason or "không rõ lý do") + ").") from None
 
     def ping(self) -> None:
         self.ask_json([{"text": "Trả lời {\"ok\": true}"}],
@@ -272,11 +277,15 @@ class Gemini:
         return self.ask_json([self.file_part(path), {"text": prompt}], CHECK_SCHEMA)
 
     def extract_invoice(self, path: str | Path) -> dict:
-        prompt = ("Đây là hóa đơn GTGT Việt Nam (ảnh chụp hoặc PDF quét). Hãy đọc chính xác các trường và trả về "
-                  "JSON. Số tiền là số nguyên (đồng), bỏ dấu chấm phân cách. Ngày dạng YYYY-MM-DD. Thuế suất dạng "
-                  "'10%', '8%', '5%', '0%' hoặc 'KCT'. Trường nào không đọc được chắc chắn thì để trống (không "
-                  "đoán). la_hoa_don = false nếu đây không phải hóa đơn. Liệt kê từng dòng hàng hóa, dịch vụ.")
-        return self.ask_json([self.file_part(path), {"text": prompt}], EXTRACT_SCHEMA)
+        """Đọc đủ các trường như hóa đơn XML: nhiều dòng hàng, nhiều mức thuế, chiết khấu, phí / lệ phí khác.
+        Hóa đơn rất dài (trả lời bị cắt) thì hỏi lại, gộp bớt dòng hàng."""
+        part = self.file_part(path)
+        try:
+            return self.ask_json([part, {"text": EXTRACT_PROMPT.format(n=MAX_LINES)}], EXTRACT_SCHEMA)
+        except GeminiError as e:
+            if e.kind != "dai":
+                raise
+        return self.ask_json([part, {"text": EXTRACT_PROMPT.format(n=15)}], EXTRACT_SCHEMA)
 
     def classify_lines(self, lines: list[dict]) -> list[dict]:
         """lines: [{id, ten, so_luong, don_gia, thanh_tien, nguoi_ban}] → [{id, ma_nhom, so_thang, do_chac, ly_do}]."""
@@ -293,12 +302,40 @@ CHECK_SCHEMA = {"type": "OBJECT", "properties": {
     "so_hoa_don": _S, "ngay_lap": _S, "tien_truoc_thue": _I, "tien_thue": _I, "tong_thanh_toan": _I,
     "ma_cqt": _S, "hop_le": {"type": "BOOLEAN"}, "luu_y": {"type": "ARRAY", "items": _S}},
     "required": ["hop_le", "luu_y"]}
+MAX_LINES = 80
+EXTRACT_PROMPT = """Đây là hóa đơn Việt Nam (hóa đơn GTGT, hóa đơn bán hàng, hóa đơn điện / nước / viễn thông, vé,
+biên lai… dạng ảnh chụp hoặc PDF). Đọc chính xác và trả về JSON đủ các trường như hóa đơn điện tử XML:
+- Thông tin chung: mẫu số (mau_so), ký hiệu (ky_hieu), số (so_hoa_don), ngày lập (ngay_lap, YYYY-MM-DD), mã của
+  cơ quan thuế (ma_cqt), đơn vị tiền tệ (don_vi_tien_te, mặc định VND), tỷ giá, hình thức thanh toán, số hợp đồng
+  nếu có ghi trên hóa đơn (so_hop_dong).
+- Người bán / người mua: tên, MST, địa chỉ.
+- dong: từng dòng hàng hóa, dịch vụ theo đúng thứ tự trên hóa đơn: tên, đơn vị tính, số lượng, đơn giá, thành tiền
+  CHƯA thuế, thuế suất của dòng, tính chất ("hang_hoa", "khuyen_mai", "chiet_khau", "ghi_chu"). Dòng chiết khấu
+  thương mại ghi thành tiền là số dương và tính chất "chiet_khau". Hóa đơn có nhiều hơn {n} dòng thì ghi {n} dòng
+  đầu, phần còn lại gộp thành MỘT dòng "Các hàng hóa, dịch vụ khác" với tổng thành tiền của các dòng đó.
+- thue_theo_muc: bảng tổng hợp theo từng mức thuế suất (thuế suất, tiền chưa thuế, tiền thuế) — ghi đủ mọi mức
+  có trên hóa đơn (VD 10% và 8%, KCT, KKKNT).
+- phi_khac: các khoản phí, lệ phí, thuế khác ngoài thuế GTGT (VD phí bảo vệ môi trường, phí dịch vụ, lệ phí trước
+  bạ, thuế tiêu thụ đặc biệt ghi riêng): tên và số tiền.
+- Tổng: tiền chiết khấu (tien_chiet_khau), tổng tiền chưa thuế (tien_truoc_thue), tổng tiền thuế GTGT (tien_thue),
+  tổng tiền thanh toán (tong_thanh_toan), số tiền bằng chữ.
+Quy ước: số tiền là số nguyên (đồng), bỏ dấu chấm / phẩy phân cách nghìn. Thuế suất dạng '10%', '8%', '5%', '0%',
+'KCT' hoặc 'KKKNT'. Trường nào không có hoặc không đọc chắc chắn thì để trống (không đoán). la_hoa_don = false nếu
+tệp không phải hóa đơn."""
+_DONG = {"type": "OBJECT", "properties": {
+    "ten": _S, "dvt": _S, "so_luong": {"type": "NUMBER"}, "don_gia": {"type": "NUMBER"}, "thanh_tien": _I,
+    "thue_suat": _S, "tinh_chat": {"type": "STRING", "enum": ["hang_hoa", "khuyen_mai", "chiet_khau", "ghi_chu"]}}}
 EXTRACT_SCHEMA = {"type": "OBJECT", "properties": {
     "la_hoa_don": {"type": "BOOLEAN"}, "mau_so": _S, "ky_hieu": _S, "so_hoa_don": _S, "ngay_lap": _S,
-    "ten_nguoi_ban": _S, "mst_nguoi_ban": _S, "ten_nguoi_mua": _S, "mst_nguoi_mua": _S,
-    "tien_truoc_thue": _I, "thue_suat": _S, "tien_thue": _I, "tong_thanh_toan": _I, "ma_cqt": _S,
-    "dong": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-        "ten": _S, "dvt": _S, "so_luong": {"type": "NUMBER"}, "don_gia": _I, "thanh_tien": _I, "thue_suat": _S}}}},
+    "ma_cqt": _S, "don_vi_tien_te": _S, "ty_gia": {"type": "NUMBER"}, "hinh_thuc_thanh_toan": _S, "so_hop_dong": _S,
+    "ten_nguoi_ban": _S, "mst_nguoi_ban": _S, "dia_chi_nguoi_ban": _S,
+    "ten_nguoi_mua": _S, "mst_nguoi_mua": _S, "dia_chi_nguoi_mua": _S,
+    "dong": {"type": "ARRAY", "items": _DONG},
+    "thue_theo_muc": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+        "thue_suat": _S, "tien_truoc_thue": _I, "tien_thue": _I}}},
+    "phi_khac": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {"ten": _S, "so_tien": _I}}},
+    "tien_chiet_khau": _I, "tien_truoc_thue": _I, "thue_suat": _S, "tien_thue": _I, "tong_thanh_toan": _I,
+    "tien_bang_chu": _S},
     "required": ["la_hoa_don"]}
 CLASSIFY_SCHEMA = {"type": "OBJECT", "properties": {"ket_qua": {"type": "ARRAY", "items": {
     "type": "OBJECT", "properties": {"id": _S, "ma_nhom": _S, "so_thang": _I,

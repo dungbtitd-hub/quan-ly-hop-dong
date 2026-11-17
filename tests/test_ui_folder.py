@@ -224,3 +224,30 @@ def test_scan_button_on_invoice_page_and_gemini_read_in_folder_dialog(qtbot, ctx
     qtbot.waitUntil(lambda: d.b_read.isEnabled(), timeout=10_000)
     assert [c[0] for c in gem.calls][:1] == ["doc"] and any("Gemini đã đọc xong" in x for x in shown)
     assert ctx.db.one("SELECT * FROM HoaDonDauVao WHERE SoHoaDonGoc = '55'") is not None
+
+
+def test_xml_viewer_inside_app_exports_pdf(qtbot, ctx, tmp_path, monkeypatch):
+    from pypdf import PdfReader
+
+    from qlhd.ui import invoice_files as ifl
+    from qlhd.ui.invoice_files import FileActions, XmlViewerDialog
+
+    p = tmp_path / "hd.xml"
+    _xml(p, 777, hang="Máy in &lt;Canon&gt;", tien=2_000_000)
+    dlg = XmlViewerDialog(p)
+    qtbot.addWidget(dlg)
+    text = dlg.view.toPlainText()
+    assert "Máy in <Canon>" in text and "777" in text and "2.200.000" in text
+    dlg.toggle_raw()
+    assert "<SHDon>777</SHDon>" in dlg.view.toPlainText()
+    dlg.toggle_raw()
+    out = dlg.save_pdf(str(tmp_path / "hd_xuat"))
+    assert out.name == "hd_xuat.pdf" and len(PdfReader(str(out)).pages) >= 1
+    # Mở tệp gốc của hóa đơn XML: mở trình xem trong phần mềm, không gọi ứng dụng ngoài
+    seen, ext = [], []
+    monkeypatch.setattr(XmlViewerDialog, "exec", lambda self: seen.append(self.path.name))
+    monkeypatch.setattr(ifl.QDesktopServices, "openUrl", lambda url: ext.append(url))
+    inv = ctx.db.one("SELECT * FROM HoaDonDauVao WHERE SoHoaDonGoc = '88'")
+    ctx.db.update("HoaDonDauVao", inv["Ma"], {"DuongDanTep": str(p)})
+    FileActions(ctx, "vao", None).open(dict(ctx.db.get("HoaDonDauVao", inv["Ma"])))
+    assert seen == ["hd.xml"] and not ext

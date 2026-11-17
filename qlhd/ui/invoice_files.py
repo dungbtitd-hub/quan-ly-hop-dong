@@ -2,6 +2,7 @@
 hóa đơn bằng Gemini và xem kết quả."""
 from __future__ import annotations
 
+import html
 import json
 import platform
 import shutil
@@ -12,7 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QPageSize, QPainter, QPdfWriter, QTextDocument
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QMenu, QTabWidget, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QMenu, QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 from ..core import gemini as gm
 from ..core import invoice_folder as fo
@@ -56,7 +57,11 @@ def run_bg(fn, on_done) -> None:
 
 
 # ------------------------------------------------------------------ mở tệp / thư mục
-def open_path(path) -> None:
+def open_path(path, parent=None) -> None:
+    """Mở tệp: hóa đơn XML xem ngay trong phần mềm; PDF, ảnh mở bằng ứng dụng của máy."""
+    if str(path).lower().endswith(".xml"):
+        XmlViewerDialog(path, parent).exec()
+        return
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
@@ -72,7 +77,7 @@ def reveal(path) -> None:
             return
     except OSError:
         pass
-    open_path(p.parent)
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.parent)))
 
 
 def inv_kind(table_or_kind: str) -> str:
@@ -115,7 +120,9 @@ class FileActions:
     def menu(self, rows: list[dict], gemini: bool = True) -> QMenu:
         m = QMenu(self.parent)
         one = rows[0] if len(rows) == 1 else None
-        m.addAction("Mở tệp gốc", lambda: self.open(one)).setEnabled(one is not None)
+        m.addAction("Mở tệp gốc (XML xem ngay trong phần mềm)", lambda: self.open(one)).setEnabled(one is not None)
+        if one is not None and self.folders.companion(self.kind, one) is not None:
+            m.addAction("Mở tệp PDF / ảnh đi kèm", lambda: self.open_companion(one))
         m.addAction("Mở thư mục chứa", lambda: self.open_folder(one)).setEnabled(one is not None)
         m.addAction("Sao chép tên file", lambda: self.copy(rows, False)).setEnabled(bool(rows))
         m.addAction("Sao chép đường dẫn", lambda: self.copy(rows, True)).setEnabled(bool(rows))
@@ -147,9 +154,17 @@ class FileActions:
         return p
 
     def open(self, inv) -> None:
-        p = self._file(inv)
+        """Hóa đơn XML: xem ngay trong phần mềm (xuất PDF, in được); PDF / ảnh: mở bằng ứng dụng của máy."""
+        main = self.folders.resolve(self.kind, inv) if inv is not None else None
+        p = main if main is not None and main.suffix.lower() == ".xml" else self._file(inv)
         if p:
-            open_path(p)
+            open_path(p, self.parent)
+
+    def open_companion(self, inv) -> None:
+        p = self.folders.companion(self.kind, inv) if inv is not None else None
+        if p is None:
+            return info(self.parent, "Hóa đơn này không có tệp PDF / ảnh đi kèm trên máy này.")
+        open_path(p, self.parent)
 
     def open_folder(self, inv) -> None:
         p = self._file(inv, view=False)
@@ -412,27 +427,89 @@ def _show(v) -> str:
 
 
 # ------------------------------------------------------------------ xuất PDF
-def _invoice_html(d: dict, note: str) -> str:
-    rows = "".join(f"<tr><td>{i}</td><td>{ln.get('TenHang') or ''}</td><td>{ln.get('DVT') or ''}</td>"
-                   f"<td align=right>{ln.get('SoLuong') or ''}</td><td align=right>{fmt_money(ln.get('DonGia'))}</td>"
-                   f"<td align=right>{fmt_money(ln.get('ThanhTien'))}</td></tr>"
-                   for i, ln in enumerate(d.get("Dong") or [], start=1))
+def _esc(v) -> str:
+    return html.escape(str(v if v is not None else ""))
+
+
+def _qty(v) -> str:
+    if v in (None, ""):
+        return ""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return _esc(v)
+    return f"{f:,.3f}".rstrip("0").rstrip(".").replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _invoice_html(d: dict, note: str, extra: dict | None = None) -> str:
+    """Bản thể hiện hóa đơn (dùng để xem trong phần mềm và xuất PDF)."""
+    x = extra or {}
+    rows = "".join(f"<tr><td align=center>{i}</td><td>{_esc(ln.get('TenHang'))}</td><td>{_esc(ln.get('DVT'))}</td>"
+                   f"<td align=right>{_qty(ln.get('SoLuong'))}</td><td align=right>{fmt_money(ln.get('DonGia'))}</td>"
+                   f"<td align=right>{fmt_money(ln.get('ThanhTien'))}</td><td align=center>{_esc(ln.get('ThueSuat'))}"
+                   "</td></tr>" for i, ln in enumerate(d.get("Dong") or [], start=1))
+    rates = [r for r in d.get("ThueSuat") or [] if isinstance(r, dict) and r.get("ThueSuat")]
+    rate_tbl = ""
+    if rates:
+        rate_tbl = ("<p><b>Tổng hợp theo thuế suất</b></p><table border=1 cellspacing=0 cellpadding=4>"
+                    "<tr><th>Thuế suất</th><th>Tiền chưa thuế</th><th>Tiền thuế</th></tr>"
+                    + "".join(f"<tr><td align=center>{_esc(r['ThueSuat'])}</td><td align=right>"
+                              f"{fmt_money(r.get('ThanhTien'))}</td><td align=right>{fmt_money(r.get('TienThue'))}"
+                              "</td></tr>" for r in rates) + "</table>")
+    fees = x.get("phi") or ([(d.get("TenPhiKhac") or "Phí khác", d.get("PhiKhac"))] if d.get("PhiKhac") else [])
+    fee_txt = "".join(f"<br>{_esc(n)}: <b>{fmt_money(t)}</b>" for n, t in fees)
+    def who(label, name, mst, addr, person=""):
+        return (f"<p><b>{label}:</b> {_esc(name)}<br>MST: {_esc(mst)}"
+                + (f"<br>Địa chỉ: {_esc(addr)}" if addr else "") + (f"<br>Người mua hàng: {_esc(person)}" if person else "")
+                + "</p>")
+    head = []
+    if x.get("mccqt"):
+        head.append(f"Mã CQT: {_esc(x['mccqt'])}")
+    if d.get("DonViTienTe") and d.get("DonViTienTe") != "VND":
+        head.append(f"Tiền tệ: {_esc(d['DonViTienTe'])} – tỷ giá {_esc(d.get('TyGia'))}")
+    if x.get("httt"):
+        head.append(f"Hình thức thanh toán: {_esc(x['httt'])}")
+    if d.get("SoHopDong"):
+        head.append(f"Hợp đồng: {_esc(d['SoHopDong'])}")
     return f"""<h2 align=center>HÓA ĐƠN GIÁ TRỊ GIA TĂNG</h2>
-<p align=center>Ký hiệu {d.get('KyHieuMauSo') or ''}{d.get('KyHieuHD') or ''} – Số {d.get('SoHoaDon') or ''} – Ngày
-{fmt_date(d.get('NgayLap'))}</p>
-<p><b>Đơn vị bán:</b> {d.get('TenNguoiBan') or ''}<br>MST: {d.get('MSTNguoiBan') or ''}</p>
-<p><b>Người mua:</b> {d.get('TenNguoiMua') or ''}<br>MST: {d.get('MSTNguoiMua') or ''}</p>
+<p align=center>Ký hiệu {_esc(d.get('KyHieuMauSo'))}{_esc(d.get('KyHieuHD'))} – Số {_esc(d.get('SoHoaDon'))} – Ngày
+{fmt_date(d.get('NgayLap'))}{'<br>' + ' · '.join(head) if head else ''}</p>
+{who('Đơn vị bán', d.get('TenNguoiBan'), d.get('MSTNguoiBan'), x.get('dc_ban'))}
+{who('Người mua', d.get('TenNguoiMua'), d.get('MSTNguoiMua'), x.get('dc_mua'), x.get('nguoi_mua'))}
 <table border=1 cellspacing=0 cellpadding=4 width=100%>
-<tr><th>STT</th><th>Tên hàng hóa, dịch vụ</th><th>ĐVT</th><th>Số lượng</th><th>Đơn giá</th><th>Thành tiền</th></tr>
+<tr><th>STT</th><th>Tên hàng hóa, dịch vụ</th><th>ĐVT</th><th>Số lượng</th><th>Đơn giá</th><th>Thành tiền</th>
+<th>Thuế suất</th></tr>
 {rows}</table>
-<p align=right>Cộng tiền hàng: <b>{fmt_money(d.get('GiaTriTruocThue'))}</b><br>Thuế suất: {d.get('ThueSuatHD') or ''} –
-Tiền thuế GTGT: <b>{fmt_money(d.get('VAT'))}</b><br>Tổng cộng thanh toán: <b>{fmt_money(d.get('GiaTriSauThue'))}</b></p>
+{rate_tbl}
+<p align=right>Cộng tiền hàng: <b>{fmt_money(d.get('GiaTriTruocThue'))}</b><br>Thuế suất: {_esc(d.get('ThueSuatHD'))} –
+Tiền thuế GTGT: <b>{fmt_money(d.get('VAT'))}</b>{fee_txt}<br>Tổng cộng thanh toán: <b>{fmt_money(d.get('GiaTriSauThue'))}</b>
+{'<br><i>Bằng chữ: ' + _esc(x['chu']) + '</i>' if x.get('chu') else ''}</p>
 <p style='color:#666'>{note}</p>"""
+
+
+def xml_extra(path: str) -> dict:
+    """Các trường hiển thị thêm của hóa đơn XML (địa chỉ, mã CQT, phí, số tiền bằng chữ…)."""
+    import xml.etree.ElementTree as ET
+    from ..core.xml_invoice import _find, _local, _money, _text
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return {}
+    phi = []
+    ds = _find(root, "TToan", "DSLPhi")
+    if ds is not None:
+        for lp in ds:
+            if _local(lp.tag) == "LPhi" and _money(_text(lp, "TPhi")):
+                phi.append((_text(lp, "TLPhi") or "Phí khác", _money(_text(lp, "TPhi"))))
+    return {"dc_ban": _text(root, "NBan", "DChi"), "dc_mua": _text(root, "NMua", "DChi"),
+            "nguoi_mua": _text(root, "NMua", "HVTNMHang"), "httt": _text(root, "TTChung", "HTTToan"),
+            "mccqt": _text(root, "MCCQT"), "chu": _text(root, "TToan", "TgTTTBChu"), "phi": phi}
 
 
 def xml_html(path: str) -> str:
     return _invoice_html(xml_invoice.parse_invoice(path),
-                         f"Bản thể hiện do phần mềm tạo từ tệp XML {Path(path).name} (không thay thế hóa đơn gốc).")
+                         f"Bản thể hiện do phần mềm tạo từ tệp XML {_esc(Path(path).name)} (không thay thế hóa đơn "
+                         "gốc).", xml_extra(path))
 
 
 def db_html(ctx, kind: str, inv) -> str:
@@ -496,6 +573,60 @@ def merge_pdfs(files: list[Path], target: Path) -> None:
         out.append(str(f))
     with open(target, "wb") as fh:
         out.write(fh)
+
+
+class XmlViewerDialog(QDialog):
+    """Xem hóa đơn XML ngay trong phần mềm (không cần phần mềm khác), xuất PDF, in, xem nội dung XML gốc."""
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = Path(path)
+        self.setWindowTitle(f"Hóa đơn XML – {self.path.name}")
+        self.resize(900, 760)
+        lay = QVBoxLayout(self)
+        self.view = QTextBrowser()
+        self.view.setOpenExternalLinks(False)
+        try:
+            self.html = xml_html(str(self.path))
+        except Exception as e:  # noqa: BLE001 - XML không phải hóa đơn / hỏng: vẫn cho xem nội dung gốc
+            self.html = f"<p style='color:#b00'>Không dựng được bản thể hiện: {_esc(e)}</p>"
+        self.view.setHtml(self.html)
+        lay.addWidget(self.view, 1)
+        self.b_raw = button("Xem nội dung XML gốc", self.toggle_raw)
+        lay.addLayout(toolbar(button("Xuất PDF…", self.save_pdf, "Primary"), button("In…", self.print_),
+                              button("Mở thư mục chứa", lambda: reveal(self.path)), self.b_raw, "stretch",
+                              button("Đóng", self.reject)))
+        self.raw = False
+
+    def toggle_raw(self):
+        self.raw = not self.raw
+        if self.raw:
+            try:
+                text = self.path.read_text(encoding="utf-8-sig")
+            except (UnicodeDecodeError, OSError):
+                text = self.path.read_bytes().decode("latin-1", "replace")
+            self.view.setPlainText(text)
+            self.b_raw.setText("Xem bản thể hiện")
+        else:
+            self.view.setHtml(self.html)
+            self.b_raw.setText("Xem nội dung XML gốc")
+
+    def save_pdf(self, target: str | None = None) -> Path | None:
+        if not target:
+            target, _ = QFileDialog.getSaveFileName(self, "Lưu PDF", str(self.path.with_suffix(".pdf")), "PDF (*.pdf)")
+            if not target:
+                return None
+        dest = Path(target if target.lower().endswith(".pdf") else target + ".pdf")
+        _html_pdf(self.html, dest)
+        return dest
+
+    def print_(self):
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+        printer = QPrinter(QPrinter.HighResolution)
+        if QPrintDialog(printer, self).exec() == QDialog.Accepted:
+            doc = QTextDocument()
+            doc.setHtml(self.html)
+            doc.print_(printer)
 
 
 class ExportPdfDialog(QDialog):
@@ -1035,7 +1166,7 @@ class InvoiceFolderDialog(QDialog):
         p = self.folders.full_path(r["_kind"], r["DuongDan"])
         if p is None or not p.exists():
             return error(self, "Không còn tìm thấy tệp này trong thư mục hóa đơn.")
-        open_path(p)
+        open_path(p, self)
 
     def open_folder(self):
         r = self._table().current()
@@ -1264,5 +1395,5 @@ class InvoiceFolderDialog(QDialog):
             win.refresh_all()
 
 
-__all__ = ["scan_text", "ExportPdfDialog", "FileActions", "FolderSettingsDialog", "GeminiResultDialog", "InvoiceFolderDialog",
+__all__ = ["scan_text", "XmlViewerDialog", "ExportPdfDialog", "FileActions", "FolderSettingsDialog", "GeminiResultDialog", "InvoiceFolderDialog",
            "Scanner", "check_invoices", "classify_async", "display_fields", "reveal", "run_bg"]

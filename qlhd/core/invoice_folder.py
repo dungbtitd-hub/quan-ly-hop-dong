@@ -104,32 +104,66 @@ def invoice_values(kind: str, d: dict, path: str, mst_cty: str = "") -> tuple[di
 
 
 def from_gemini(g: dict) -> dict:
-    """Kết quả Gemini đọc ảnh / PDF quét → cùng dạng với xml_invoice.parse_invoice."""
+    """Kết quả Gemini đọc ảnh / PDF → cùng dạng với xml_invoice.parse_invoice (đủ dòng hàng, nhiều mức thuế,
+    chiết khấu, phí khác)."""
     def money(x):
         try:
-            return int(x or 0)
+            return int(round(float(x or 0)))
         except (TypeError, ValueError):
             return 0
-    lines = []
+
+    def rate(x):
+        try:
+            return vat.parse_rate((x or "").strip())
+        except ValueError:
+            return (x or "").strip()
+    lines, names = [], []
     for ln in g.get("dong") or []:
-        if not (ln.get("ten") or "").strip():
+        ten = " ".join((ln.get("ten") or "").split())
+        kind = ln.get("tinh_chat") or "hang_hoa"
+        if not ten or kind == "ghi_chu":
             continue
-        lines.append({"TenHang": ln["ten"].strip(), "DVT": ln.get("dvt") or "", "SoLuong": ln.get("so_luong"),
-                      "DonGia": money(ln.get("don_gia")), "ThanhTien": money(ln.get("thanh_tien")),
-                      "ThueSuat": ln.get("thue_suat") or ""})
-    names = [x["TenHang"] for x in lines]
-    d = {"SoHopDong": "", "VanBan": "", "KyHieuMauSo": (g.get("mau_so") or "").strip(),
+        tien = money(ln.get("thanh_tien"))
+        if kind == "khuyen_mai" and not tien:
+            continue
+        lines.append({"TenHang": ten, "DVT": ln.get("dvt") or "", "SoLuong": ln.get("so_luong"),
+                      "DonGia": money(ln.get("don_gia")), "ThanhTien": -abs(tien) if kind == "chiet_khau" else tien,
+                      "ThueSuat": rate(ln.get("thue_suat"))})
+        if ten not in names:
+            names.append(ten)
+    by_rate = [{"ThueSuat": rate(x.get("thue_suat")), "TruocThue": money(x.get("tien_truoc_thue")),
+                "VAT": money(x.get("tien_thue"))} for x in g.get("thue_theo_muc") or [] if (x.get("thue_suat") or "").strip()]
+    rates = list(dict.fromkeys([x["ThueSuat"] for x in by_rate if x["ThueSuat"]]
+                               + [x["ThueSuat"] for x in lines if x["ThueSuat"]]))
+    if len(by_rate) < 2 and len({x["ThueSuat"] for x in lines if x["ThueSuat"]}) > 1:
+        acc: dict[str, int] = {}
+        for x in lines:
+            if x["ThueSuat"]:
+                acc[x["ThueSuat"]] = acc.get(x["ThueSuat"], 0) + x["ThanhTien"]
+        by_rate = [{"ThueSuat": r, "TruocThue": t, "VAT": None} for r, t in acc.items()]
+    fees = [(" ".join((f.get("ten") or "").split()), money(f.get("so_tien"))) for f in g.get("phi_khac") or []]
+    fees = [(n, t) for n, t in fees if t]
+    truoc = money(g.get("tien_truoc_thue")) or sum(x["TruocThue"] for x in by_rate) or sum(x["ThanhTien"] for x in lines)
+    thue = money(g.get("tien_thue")) or sum(x["VAT"] or 0 for x in by_rate)
+    phi = sum(t for _, t in fees)
+    tong = money(g.get("tong_thanh_toan")) or (truoc + thue + phi if truoc else 0)
+    if not phi and truoc and tong - truoc - thue > 2:
+        phi = tong - truoc - thue                     # tổng thanh toán lớn hơn tiền hàng + thuế: phần chênh là phí
+    hd_rate = "; ".join(rates) if len(rates) > 1 else rate(g.get("thue_suat")) or (rates[0] if rates else "")
+    d = {"SoHopDong": (g.get("so_hop_dong") or "").strip(), "VanBan": (g.get("so_hop_dong") or ""),
+         "KyHieuMauSo": (g.get("mau_so") or "").strip(),
          "KyHieuHD": (g.get("ky_hieu") or "").strip(), "SoHoaDon": (g.get("so_hoa_don") or "").strip(),
          "NgayLap": (g.get("ngay_lap") or "")[:10], "TenNguoiBan": (g.get("ten_nguoi_ban") or "").strip(),
          "MSTNguoiBan": (g.get("mst_nguoi_ban") or "").replace(" ", ""),
          "TenNguoiMua": (g.get("ten_nguoi_mua") or "").strip(),
          "MSTNguoiMua": (g.get("mst_nguoi_mua") or "").replace(" ", ""),
-         "GiaTriTruocThue": money(g.get("tien_truoc_thue")), "VAT": money(g.get("tien_thue")),
-         "GiaTriSauThue": money(g.get("tong_thanh_toan")), "PhiKhac": 0, "TenPhiKhac": "",
-         "ThueSuat": g.get("thue_suat") or "", "ThueSuatHD": g.get("thue_suat") or "",
-         "MatHang": xml_invoice.join_items(names), "ChiTietThueSuat": [], "Dong": lines}
-    if d["GiaTriSauThue"] and not d["GiaTriTruocThue"]:
-        d["GiaTriTruocThue"] = d["GiaTriSauThue"] - d["VAT"]
+         "DonViTienTe": (g.get("don_vi_tien_te") or "VND").strip() or "VND", "TyGia": g.get("ty_gia") or "",
+         "GiaTriTruocThue": truoc, "VAT": thue, "GiaTriSauThue": tong, "PhiKhac": phi,
+         "TenPhiKhac": "; ".join(n for n, _ in fees if n) or ("Phí khác" if phi else ""),
+         "ThueSuat": [{"ThueSuat": x["ThueSuat"], "ThanhTien": x["TruocThue"], "TienThue": x["VAT"] or 0}
+                      for x in by_rate],
+         "ThueSuatHD": hd_rate, "MatHang": xml_invoice.join_items(names),
+         "ChiTietThueSuat": by_rate if len(by_rate) > 1 else [], "Dong": lines}
     return d
 
 

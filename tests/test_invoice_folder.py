@@ -222,7 +222,7 @@ def test_gemini_check_compare_and_api_errors(company, monkeypatch):
         g.ping()
         raise AssertionError("phải báo lỗi")
     except GeminiError as e:
-        assert "SAFETY" in str(e) and not e.offline
+        assert "an toàn" in str(e) and not e.offline
     assert gm.apply_suggestion({"ma_nhom": "XX99", "do_chac": "cao"}, 1) is None
     assert gm.apply_suggestion({"ma_nhom": "TB02", "do_chac": "cao", "so_thang": 36}, 35_000_000)["PhanLoai"] == "TSCĐ"
 
@@ -341,3 +341,29 @@ def test_pdf_without_xml_goes_to_gemini_even_first_scan(company, tmp_path, monke
     again = f.recheck_files("vao")
     InvoiceFolders.read("vao", again, gem, cache=f.cache("vao", [x for x, _ in again]))
     assert len(gem.calls) == 1
+
+
+def test_gemini_full_fields_multi_rate_fees_discount():
+    from qlhd.core.invoice_folder import from_gemini, invoice_values
+    g = {"la_hoa_don": True, "mau_so": "1", "ky_hieu": "C26TXD", "so_hoa_don": "00001234", "ngay_lap": "2026-11-05",
+         "ten_nguoi_ban": "Cây xăng D", "mst_nguoi_ban": "0800000008", "ten_nguoi_mua": "Công ty ABC",
+         "mst_nguoi_mua": "0101234567",
+         "dong": [{"ten": "Xăng RON95", "dvt": "lít", "so_luong": 50.5, "don_gia": 20000, "thanh_tien": 1_010_000,
+                   "thue_suat": "10%", "tinh_chat": "hang_hoa"},
+                  {"ten": "Dịch vụ rửa xe", "thanh_tien": 100_000, "thue_suat": "8%", "tinh_chat": "hang_hoa"},
+                  {"ten": "Chiết khấu thương mại", "thanh_tien": 10_000, "thue_suat": "10%", "tinh_chat": "chiet_khau"},
+                  {"ten": "Hàng khuyến mại", "thanh_tien": 0, "tinh_chat": "khuyen_mai"},
+                  {"ten": "Ghi chú: giao tại kho", "tinh_chat": "ghi_chu"}],
+         "thue_theo_muc": [{"thue_suat": "10%", "tien_truoc_thue": 1_000_000, "tien_thue": 100_000},
+                           {"thue_suat": "8%", "tien_truoc_thue": 100_000, "tien_thue": 8_000}],
+         "phi_khac": [{"ten": "Thuế bảo vệ môi trường", "so_tien": 200_000}],
+         "tien_truoc_thue": 1_100_000, "tien_thue": 108_000, "tong_thanh_toan": 1_408_000}
+    d = from_gemini(g)
+    assert [x["TenHang"] for x in d["Dong"]] == ["Xăng RON95", "Dịch vụ rửa xe", "Chiết khấu thương mại"]
+    assert d["Dong"][2]["ThanhTien"] == -10_000 and d["Dong"][0]["SoLuong"] == 50.5
+    assert d["PhiKhac"] == 200_000 and d["TenPhiKhac"] == "Thuế bảo vệ môi trường"
+    assert d["ThueSuatHD"] == "10%; 8%" and len(d["ChiTietThueSuat"]) == 2
+    v, notes = invoice_values("vao", d, "x.pdf", "0101234567")
+    assert v["ThueSuat"] == "10%; 8%" and v["ChiTietThueSuat"] and v["PhiKhac"] == 200_000
+    assert v["GiaTriSauThue"] == 1_408_000 and len(v["_Dong"]) == 3
+    assert any("nhiều mức thuế" in n for n in notes)
