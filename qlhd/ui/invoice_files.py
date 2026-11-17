@@ -660,15 +660,13 @@ class FolderSettingsDialog(QDialog):
         self.state.setText("Đang kiểm tra…")
 
         def work():
-            g.ping()                   # mô hình đã ngừng cấp thì tự chuyển sang mô hình còn dùng được
-            try:
-                return g.list_models()
-            except GeminiError:
-                return []
+            names = g.choose_model()   # chọn mô hình còn được cấp, đang trả lời nhanh nhất
+            g.ping()
+            return names
 
         def done(names, err):
             if err is None:
-                moved = g.model != g.requested
+                moved = g.model != g.requested and g.requested not in gm.MODELS
                 self._set_models(names or [], g.model)
                 self.gem.save_settings({"khoa": self.key.text().strip() or None, "mo_hinh": g.model})
                 if self.key.text().strip():

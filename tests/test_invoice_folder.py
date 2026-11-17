@@ -246,9 +246,10 @@ def test_gemini_retired_model_switches_to_available_one(company, monkeypatch):
     monkeypatch.setattr(gm.Gemini, "list_models",
                         lambda self: ["gemini-3.8-flash", "gemini-3.8-pro", "gemini-flash-latest", "gemini-3.9-flash-preview"])
     monkeypatch.setattr(gm, "_RESOLVED", {})
+    monkeypatch.setattr(gm, "_RETIRED", {})
     g = svc.client()
     g.ping()
-    assert calls == ["gemini-2.5-flash", "gemini-3.8-flash"] and g.model == "gemini-3.8-flash"
+    assert calls[0] == "gemini-2.5-flash" and calls[-1] == "gemini-3.8-flash" and g.model == "gemini-3.8-flash"
     svc.record_ok()
     assert db.setting(gm.K_MODEL) == "gemini-3.8-flash" and svc.client().model == "gemini-3.8-flash"
     assert gm.best_model(["gemini-3.8-flash", "gemini-4.1-flash", "gemini-4.1-flash-lite"], "x-flash") == "gemini-4.1-flash"

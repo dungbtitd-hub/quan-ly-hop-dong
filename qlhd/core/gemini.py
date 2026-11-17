@@ -27,23 +27,30 @@ LIST_API = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100
 # tên gọi tắt luôn trỏ tới bản mới nhất; Google ngừng cấp mô hình cũ thì phần mềm tự tìm mô hình còn dùng được
 MODELS = ["gemini-flash-latest", "gemini-pro-latest", "gemini-flash-lite-latest"]
 DEFAULT_MODEL = MODELS[0]
-_RESOLVED: dict[str, str] = {}           # mô hình đã chọn → mô hình thay thế còn dùng được (trong phiên chạy)
+_RESOLVED: dict[str, str] = {}           # mô hình đã chọn → mô hình thay thế đang chạy được (trong phiên chạy)
+_RETIRED: dict[str, str] = {}            # mô hình đã ngừng cấp → mô hình thay thế (lưu lại vào cài đặt)
+
+
+def ranked_models(names: list[str], wanted: str = "") -> list[str]:
+    """Mô hình thay thế từ danh sách Google trả về, tốt trước: cùng loại (flash / pro / flash-lite), bản chính thức
+    số cao trước, rồi tên gọi tắt -latest; bỏ bản thử nghiệm, ảnh, giọng nói."""
+    kind = "flash-lite" if "lite" in wanted else "pro" if "pro" in wanted else "flash"
+    pat = re.compile(rf"^gemini-(\d+(?:\.\d+)?)-{kind}$")
+    found = []
+    for n in names:
+        m = pat.match(n)
+        if m:
+            found.append((float(m.group(1)), n))
+    out = [n for _, n in sorted(found, reverse=True)]
+    alias = f"gemini-{kind}-latest"
+    if alias in names:
+        out.append(alias)
+    return out
 
 
 def best_model(names: list[str], wanted: str = "") -> str | None:
-    """Chọn mô hình thay thế từ danh sách Google trả về: cùng loại (flash / pro / flash-lite), bản số cao nhất,
-    không phải bản thử nghiệm."""
-    kind = "flash-lite" if "lite" in wanted else "pro" if "pro" in wanted else "flash"
-    pat = re.compile(rf"^gemini-(\d+(?:\.\d+)?)-{kind}$")
-    stable = sorted(((float(m.group(1)), n) for n in names if (m := pat.match(n))), reverse=True)
-    if stable:
-        return stable[0][1]
-    alias = f"gemini-{kind}-latest"
-    if alias in names:
-        return alias
-    loose = [n for n in names if kind in n and "preview" not in n and "exp" not in n and "image" not in n
-             and "tts" not in n and "audio" not in n and "live" not in n]
-    return sorted(loose)[-1] if loose else None
+    r = ranked_models(names, wanted)
+    return r[0] if r else None
 MAX_FILE = 18 * 1024 * 1024
 IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
@@ -78,7 +85,7 @@ class GeminiError(Exception):
 
     @property
     def offline(self) -> bool:
-        return self.kind in ("mang", "khoa", "han_muc", "chua_cai")
+        return self.kind in ("mang", "khoa", "han_muc", "chua_cai", "qua_tai")
 
 
 class Gemini:
@@ -106,22 +113,84 @@ class Gemini:
                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
 
     def _post(self, body: dict) -> dict:
+        """Gửi yêu cầu. Mô hình đã ngừng cấp (404) hoặc đang quá tải / không trả lời: thử các mô hình cùng loại còn
+        dùng được (tối đa 6 mô hình), nhớ mô hình chạy được."""
         try:
             return self._post_once(body)
         except GeminiError as e:
-            if e.kind != "mo_hinh":
+            if e.kind not in ("mo_hinh", "qua_tai", "han_muc"):
                 raise
-            # mô hình đã ngừng cấp / không có: tìm mô hình thay thế còn dùng được rồi gửi lại một lần
-            names = self.list_models()
-            hints = [h.rstrip(".") for h in re.findall(r"models/(gemini-[\w.\-]+)", str(e.detail or ""))]
-            new = next((h for h in hints if h != self.model and h in names), None)
-            new = new or best_model(names, self.requested)
-            if not new or new == self.model:
+            first = e
+        names = self.list_models()
+        hints = [h.rstrip(".") for h in re.findall(r"models/(gemini-[\w.\-]+)", str(first.detail or ""))]
+        tried = {self.model}
+        cands = [h for h in hints if h in names] + ranked_models(names, self.requested)
+        cands = [c for c in dict.fromkeys(cands) if c not in tried][:6]
+        if not cands:
+            if first.kind == "mo_hinh":
                 raise GeminiError(f"Mô hình {self.model} không còn dùng được và không tìm thấy mô hình thay thế. "
                                   "Chọn mô hình khác ở Cài đặt › Thư mục hóa đơn và Gemini.") from None
-            self.model = new
-            _RESOLVED[self.requested] = new
-            return self._post_once(body)
+            raise first
+        # hỏi thử song song (câu rất ngắn), lấy mô hình trả lời nhanh nhất, rồi mới gửi yêu cầu thật
+        good = self._fastest(cands)
+        last = first
+        for c in good + [c for c in cands if c not in good][:1]:
+            self.model = c
+            try:
+                res = self._post_once(body)
+            except GeminiError as e:
+                if e.kind not in ("mo_hinh", "qua_tai", "han_muc"):
+                    raise
+                last = e
+                continue
+            _RESOLVED[self.requested] = c
+            if first.kind == "mo_hinh":
+                _RETIRED[self.requested] = c
+            return res
+        raise GeminiError(f"Gemini đang quá tải, đã thử {', '.join([*tried, *cands])}: {last}", "qua_tai")
+
+    def _fastest(self, cands: list[str], wait: float = 20) -> list[str]:
+        """Các mô hình trả lời được câu hỏi thử, nhanh trước."""
+        import concurrent.futures as cf
+        import time
+
+        probe = {"contents": [{"role": "user", "parts": [{"text": "ok"}]}],
+                 "generationConfig": {"maxOutputTokens": 8}}
+
+        def one(c):
+            g = Gemini(self.key, c, timeout=wait)
+            g.model = c
+            t = time.monotonic()
+            g._post_once(probe)
+            return time.monotonic() - t
+        ok = []
+        ex = cf.ThreadPoolExecutor(max_workers=len(cands))
+        futs = {ex.submit(one, c): c for c in cands}
+        try:
+            for f in cf.as_completed(futs, timeout=wait + 5):
+                try:
+                    f.result()
+                except Exception:  # noqa: BLE001 - mô hình quá tải / lỗi: bỏ qua
+                    continue
+                ok.append(futs[f])
+                break                      # mô hình trả lời đầu tiên là đủ, không chờ mô hình đang treo
+        except cf.TimeoutError:
+            pass
+        ex.shutdown(wait=False, cancel_futures=True)
+        return ok
+
+    def choose_model(self) -> list[str]:
+        """Dùng khi Kiểm tra kết nối: hỏi thử song song các mô hình cùng loại còn được cấp, chọn mô hình trả lời
+        nhanh nhất (bỏ mô hình đang quá tải). Trả danh sách mô hình khóa API dùng được."""
+        names = self.list_models()
+        cands = ranked_models(names, self.requested)[:6]
+        if self.requested in names and self.requested not in cands:
+            cands.insert(0, self.requested)
+        good = self._fastest(cands) if cands else []
+        if good:
+            self.model = good[0]
+            _RESOLVED[self.requested] = good[0]
+        return names
 
     def _post_once(self, body: dict) -> dict:
         req = urllib.request.Request(API.format(model=self.model), data=json.dumps(body).encode(),
@@ -139,14 +208,21 @@ class Gemini:
             if e.code == 429:
                 raise GeminiError("Gemini báo hết hạn mức sử dụng, thử lại sau.", "han_muc") from None
             if e.code >= 500:
-                raise GeminiError(f"Máy chủ Gemini đang lỗi ({e.code}), thử lại sau.", "mang") from None
+                raise GeminiError(f"Mô hình {self.model} của Gemini đang quá tải / lỗi ({e.code}), thử lại sau.",
+                                  "qua_tai") from None
             if e.code == 404 or "no longer available" in msg or "is not found" in msg:
                 err = GeminiError(f"Mô hình {self.model} không còn dùng được: {msg[:200]}", "mo_hinh")
                 err.detail = msg
                 raise err from None
             raise GeminiError(f"Gemini từ chối yêu cầu ({e.code}): {msg[:200]}") from None
-        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as e:
-            raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {getattr(e, 'reason', e)}", "mang") from None
+        except (socket.timeout, TimeoutError) as e:
+            raise GeminiError(f"Mô hình {self.model} của Gemini không trả lời kịp ({e}).", "qua_tai") from None
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, (socket.timeout, TimeoutError)):
+                raise GeminiError(f"Mô hình {self.model} của Gemini không trả lời kịp.", "qua_tai") from None
+            raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {e.reason}", "mang") from None
+        except (ConnectionError, OSError) as e:
+            raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {e}", "mang") from None
 
     def ask_json(self, parts: list[dict], schema: dict) -> dict:
         body = {"contents": [{"role": "user", "parts": parts}],
@@ -317,8 +393,8 @@ class GeminiService:
 
     def record_ok(self) -> None:
         m = self.db.setting(K_MODEL)
-        if m and _RESOLVED.get(m) and _RESOLVED[m] != m:        # đã tự chuyển sang mô hình còn dùng được: lưu lại
-            self.db.set_setting(K_MODEL, _RESOLVED[m])
+        if m and _RETIRED.get(m) and _RETIRED[m] != m:          # mô hình cũ đã ngừng cấp: lưu mô hình thay thế
+            self.db.set_setting(K_MODEL, _RETIRED[m])
         if self.db.setting(K_STATE) != "ok":
             self.db.set_setting(K_STATE, "ok")
             self.db.set_setting(K_ERROR, None)
