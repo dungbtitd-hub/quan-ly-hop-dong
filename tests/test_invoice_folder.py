@@ -404,3 +404,31 @@ def test_pdf_and_xml_same_invoice_added_at_different_times_are_merged(company, t
     r = _scan(f, "vao")
     inv = db.get("HoaDonDauVao", ma2)
     assert r["them"] == [] and inv["TepTuongDoi"] == "402.xml" and json.loads(inv["TepKem"]) == ["scan402.pdf"]
+
+
+def test_gemini_extract_retries_when_cut_and_drops_unsupported_thinking(tmp_path, monkeypatch):
+    from qlhd.core.gemini import Gemini, parse_json_reply
+    img = tmp_path / "hd.jpg"
+    img.write_bytes(b"\xff\xd8\xff")
+    g = Gemini("AIza-thu", "gemini-thu-flash")
+    bodies = []
+    cut = {"candidates": [{"content": {"parts": [{"text": '{"la_hoa_don": true, "dong": [{"ten": "A"}, {"ten": "A"'}]},
+                           "finishReason": "MAX_TOKENS"}]}
+    ok = {"candidates": [{"content": {"parts": [{"thought": True, "text": "suy nghĩ…"},
+                                                {"text": '```json\n{"la_hoa_don": true, "so_hoa_don": "9"}\n```'}]}}]}
+
+    def post(body):
+        bodies.append(json.loads(json.dumps(body)))
+        if len(bodies) == 1:
+            raise GeminiError('Gemini từ chối yêu cầu (400): Unknown name "thinkingConfig"')
+        return cut if len(bodies) == 2 else ok
+    monkeypatch.setattr(g, "_post", post)
+    assert g.extract_invoice(img)["so_hoa_don"] == "9"
+    assert "thinkingConfig" in bodies[0]["generationConfig"]
+    assert all("thinkingConfig" not in b["generationConfig"] for b in bodies[1:])
+    assert "15 dòng" in bodies[2]["contents"][0]["parts"][1]["text"]
+    try:
+        parse_json_reply(cut)
+        raise AssertionError("phải báo bị cắt")
+    except GeminiError as e:
+        assert e.kind == "dai"

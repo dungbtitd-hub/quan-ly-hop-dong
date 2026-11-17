@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 
 from .assets import AssetService
 from . import duplicates as dupl
+from . import net
 from .contracts import OPEN_STATUSES, VALUE_FLAGS, ContractService
 from .db import Database
 from .reports import fmt_date, fmt_money
@@ -304,7 +305,7 @@ def _tg_call(token: str, method: str, data: dict | None = None, timeout: float =
     url = f"{TG_API}/bot{token.strip()}/{method}"
     body = urllib.parse.urlencode(data).encode() if data else None
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=timeout) as resp:
+        with net.urlopen(urllib.request.Request(url, data=body), timeout=timeout) as resp:
             res = json.loads(resp.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001
         raise TelegramError(f"Không gửi được qua Telegram: {e}") from e

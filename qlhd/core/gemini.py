@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import asset_catalog as dm
+from . import net
 from . import local_secret
 from .db import now_iso
 
@@ -88,6 +89,33 @@ class GeminiError(Exception):
         return self.kind in ("mang", "khoa", "han_muc", "chua_cai", "qua_tai")
 
 
+_NO_THINK_CFG: set[str] = set()          # mô hình không nhận thinkingConfig
+
+
+def parse_json_reply(data: dict) -> dict:
+    """Phần trả lời của Gemini → JSON (bỏ phần suy nghĩ, bỏ ```json bao ngoài nếu có)."""
+    try:
+        cand = data["candidates"][0]
+        text = "".join(p.get("text", "") for p in cand["content"]["parts"] if not p.get("thought"))
+    except (KeyError, IndexError, TypeError):
+        cand, text = (data.get("candidates") or [{}])[0], ""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1].rsplit("```", 1)[0]
+    for cand_text in (t, t[t.find("{"):t.rfind("}") + 1] if "{" in t else ""):
+        if cand_text:
+            try:
+                return json.loads(cand_text)
+            except ValueError:
+                pass
+    reason = (data.get("promptFeedback") or {}).get("blockReason") or cand.get("finishReason")
+    if reason == "MAX_TOKENS":
+        raise GeminiError("Hóa đơn dài, Gemini trả lời bị cắt giữa chừng.", "dai")
+    names = {"SAFETY": "bị chặn vì lý do an toàn", "RECITATION": "bị chặn do trích dẫn", "OTHER": "lỗi khác của Gemini"}
+    raise GeminiError("Gemini không trả về kết quả đọc được (" + (names.get(reason) or reason or "không rõ lý do")
+                      + ").")
+
+
 class Gemini:
     def __init__(self, key: str, model: str = DEFAULT_MODEL, timeout: float = 180):
         if not key:
@@ -101,13 +129,15 @@ class Gemini:
         """Các mô hình khóa API này dùng được để tạo nội dung."""
         req = urllib.request.Request(LIST_API, headers={"x-goog-api-key": self.key})
         try:
-            with urllib.request.urlopen(req, timeout=min(self.timeout, 30)) as r:
+            with net.urlopen(req, timeout=min(self.timeout, 30)) as r:
                 data = json.loads(r.read())
         except urllib.error.HTTPError as e:
             if e.code in (400, 401, 403):
                 raise GeminiError("Khóa API Gemini không hợp lệ hoặc chưa được cấp quyền.", "khoa") from None
             raise GeminiError(f"Không lấy được danh sách mô hình Gemini ({e.code}).", "mang") from None
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as e:
+            if net.is_ssl_error(e):
+                raise GeminiError(f"Lỗi chứng chỉ bảo mật khi kết nối Gemini: {getattr(e, 'reason', e)}", "mang") from None
             raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {getattr(e, 'reason', e)}", "mang") from None
         return [m["name"].split("/", 1)[-1] for m in data.get("models", [])
                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
@@ -196,7 +226,7 @@ class Gemini:
         req = urllib.request.Request(API.format(model=self.model), data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json", "x-goog-api-key": self.key})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with net.urlopen(req, timeout=self.timeout) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
             try:
@@ -220,27 +250,31 @@ class Gemini:
         except urllib.error.URLError as e:
             if isinstance(e.reason, (socket.timeout, TimeoutError)):
                 raise GeminiError(f"Mô hình {self.model} của Gemini không trả lời kịp.", "qua_tai") from None
+            if net.is_ssl_error(e):
+                raise GeminiError(f"Lỗi chứng chỉ bảo mật khi kết nối Gemini: {e.reason}", "mang") from None
             raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {e.reason}", "mang") from None
         except (ConnectionError, OSError) as e:
             raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {e}", "mang") from None
 
-    def ask_json(self, parts: list[dict], schema: dict, max_tokens: int = 32768) -> dict:
-        body = {"contents": [{"role": "user", "parts": parts}],
-                "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema,
-                                     "temperature": 0, "maxOutputTokens": max_tokens}}
-        data = self._post(body)
+    def ask_json(self, parts: list[dict], schema: dict | None, max_tokens: int = 32768,
+                 temperature: float = 0) -> dict:
+        """Hỏi, nhận JSON. Giới hạn phần "suy nghĩ" của mô hình (tốn chỗ trả lời, dễ bị cắt với hóa đơn dài);
+        mô hình không nhận tham số này thì gửi lại không kèm. schema None: không ép khuôn JSON."""
+        cfg = {"responseMimeType": "application/json", "temperature": temperature, "maxOutputTokens": max_tokens}
+        if schema is not None:
+            cfg["responseSchema"] = schema
+        if self.model not in _NO_THINK_CFG:
+            cfg["thinkingConfig"] = {"thinkingBudget": 1024}
+        body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": cfg}
         try:
-            text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
-            return json.loads(text)
-        except (KeyError, IndexError, ValueError):
-            reason = (data.get("promptFeedback") or {}).get("blockReason") or \
-                ((data.get("candidates") or [{}])[0].get("finishReason"))
-            if reason == "MAX_TOKENS":
-                raise GeminiError("Hóa đơn quá dài, Gemini trả lời bị cắt giữa chừng.", "dai") from None
-            names = {"SAFETY": "bị chặn vì lý do an toàn", "RECITATION": "bị chặn do trích dẫn",
-                     "OTHER": "lỗi khác của Gemini"}
-            raise GeminiError("Gemini không trả về kết quả đọc được ("
-                              + (names.get(reason) or reason or "không rõ lý do") + ").") from None
+            data = self._post(body)
+        except GeminiError as e:
+            if "thinkingConfig" not in cfg or "think" not in str(e).lower():
+                raise
+            _NO_THINK_CFG.add(self.model)
+            del cfg["thinkingConfig"]
+            data = self._post(body)
+        return parse_json_reply(data)
 
     def ping(self) -> None:
         self.ask_json([{"text": "Trả lời {\"ok\": true}"}],
@@ -280,12 +314,20 @@ class Gemini:
         """Đọc đủ các trường như hóa đơn XML: nhiều dòng hàng, nhiều mức thuế, chiết khấu, phí / lệ phí khác.
         Hóa đơn rất dài (trả lời bị cắt) thì hỏi lại, gộp bớt dòng hàng."""
         part = self.file_part(path)
-        try:
-            return self.ask_json([part, {"text": EXTRACT_PROMPT.format(n=MAX_LINES)}], EXTRACT_SCHEMA)
-        except GeminiError as e:
-            if e.kind != "dai":
-                raise
-        return self.ask_json([part, {"text": EXTRACT_PROMPT.format(n=15)}], EXTRACT_SCHEMA)
+        tries = ((MAX_LINES, EXTRACT_SCHEMA, 0), (15, EXTRACT_SCHEMA, 0.2), (15, None, 0.2))
+        for i, (n, schema, temp) in enumerate(tries):
+            prompt = EXTRACT_PROMPT.format(n=n) + ("" if schema else "\n\nTrả về đúng một đối tượng JSON với các khóa: "
+                                                  + ", ".join(EXTRACT_SCHEMA["properties"]) + ".")
+            try:
+                return self.ask_json([part, {"text": prompt}], schema, temperature=temp)
+            except GeminiError as e:
+                # bị cắt (thường do mô hình lặp lại dòng khi ép khuôn JSON) hoặc trả lời hỏng: hỏi lại cách khác
+                if e.kind not in ("dai", "khac") or i == len(tries) - 1:
+                    if e.kind == "dai":
+                        raise GeminiError("Gemini chưa đọc hết được hóa đơn này (trả lời bị cắt giữa chừng). Bấm "
+                                          "\"Đọc bằng Gemini\" để thử lại hoặc nhập tay.", "dai") from None
+                    raise
+        raise GeminiError("Gemini chưa đọc được hóa đơn này.")
 
     def classify_lines(self, lines: list[dict]) -> list[dict]:
         """lines: [{id, ten, so_luong, don_gia, thanh_tien, nguoi_ban}] → [{id, ma_nhom, so_thang, do_chac, ly_do}]."""

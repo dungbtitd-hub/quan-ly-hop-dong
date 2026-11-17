@@ -42,8 +42,12 @@ def self_test() -> int:
     import msoffcrypto  # noqa: F401
     import openpyxl  # noqa: F401
     import pypdf  # noqa: F401
+    import certifi
 
-    from .core import licensing
+    from .core import licensing, net
+    if not os.path.exists(certifi.where()) or net.ssl_context().cert_store_stats()["x509_ca"] == 0:
+        print("Thiếu bộ chứng chỉ gốc (certifi): HTTPS (Gemini, Telegram) sẽ không kết nối được")
+        return 3
     from .ui import (accounts_page, assets_page, contracts_page, finance_page, invoices_page,  # noqa: F401
                      profit_page, reports_page, sync_page)
 
