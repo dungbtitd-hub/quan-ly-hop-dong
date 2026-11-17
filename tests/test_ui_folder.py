@@ -90,9 +90,10 @@ def test_scan_folder_list_columns_and_export_pdf(qtbot, ctx, tmp_path, monkeypat
     out.mkdir()
     dlg = ExportPdfDialog(ctx, "vao", [row, dict(ctx.db.one("SELECT * FROM HoaDonDauVao WHERE SoHoaDonGoc = '7'"))])
     qtbot.addWidget(dlg)
-    assert len(dlg.files) == 1                       # hóa đơn chưa gắn tệp gốc thì bỏ qua
-    assert dlg.export(out, False, ask=False) == 1
+    assert len(dlg.files) == 2 and dlg.files[1][1] is None   # chưa gắn tệp gốc: dựng từ số liệu đã lưu
+    assert dlg.export(out, False, ask=False) == 2
     assert len(PdfReader(str(out / "hd_moi.pdf")).pages) == 1          # ảnh đi kèm → PDF
+    assert len(PdfReader(str(out / "HoaDon__7.pdf")).pages) >= 1
     dlg.files.append((row, root / "2026" / "Quy 4" / "hd_moi.xml"))    # XML → bản thể hiện, gộp một tệp
     assert dlg.export(out, True, "gop.pdf", ask=False) == 1
     assert len(PdfReader(str(out / "gop.pdf")).pages) >= 2
@@ -181,3 +182,45 @@ def test_auto_sync_tab_and_sync_now(qtbot, ctx, tmp_path, monkeypatch):
     sp.refresh()
     assert sp.auto_list.rows and sp.auto_list.rows[0]["TT"].startswith("Máy này gửi")
     win.close()
+
+
+def test_scan_button_on_invoice_page_and_gemini_read_in_folder_dialog(qtbot, ctx, tmp_path, monkeypatch):
+    from qlhd.core import gemini as gm
+    from qlhd.core.invoice_folder import InvoiceFolders
+    from qlhd.ui import invoice_files as ifl
+    from qlhd.ui import invoices_page as ip
+    from qlhd.ui.invoice_files import InvoiceFolderDialog
+    from qlhd.ui.invoices_page import InvoicesPage
+    from tests.test_invoice_folder import FakeGemini
+
+    shown = _quiet(monkeypatch, ifl, ip)
+    root = tmp_path / "vao"
+    root.mkdir()
+    f = InvoiceFolders(ctx.db)
+    f.save_settings({"vao": str(root)})
+    page = InvoicesPage(ctx, "vao")
+    qtbot.addWidget(page)
+    opened = []
+    monkeypatch.setattr(page, "open_folder_dialog", lambda: opened.append(1))
+    assert page.b_scan.isEnabled()
+    _xml(root / "hd88.xml", 88, mst="0200000002", ban="Công ty Vật tư X", kh="K26T")   # đã có trong phần mềm
+    page.scan_now()
+    qtbot.waitUntil(lambda: page.b_scan.isEnabled(), timeout=10_000)
+    assert f.files("vao")[0]["TrangThai"] == "lech" and opened      # đã có, số tiền khác → hỏi mở Cần xem
+    # ảnh chưa đọc được (chưa cài Gemini lúc quét) → bấm Đọc bằng Gemini
+    (root / "anh.jpg").write_bytes(b"\xff\xd8\xff")
+    page.scan_now()
+    qtbot.waitUntil(lambda: page.b_scan.isEnabled(), timeout=10_000)
+    gem = FakeGemini(extract={"la_hoa_don": True, "ky_hieu": "C26TQQ", "so_hoa_don": "55", "ngay_lap": "2026-11-12",
+                              "ten_nguoi_ban": "Quán C", "mst_nguoi_ban": "0700000007", "tien_truoc_thue": 100_000,
+                              "tien_thue": 8_000, "tong_thanh_toan": 108_000, "thue_suat": "8%"})
+    monkeypatch.setattr(gm.GeminiService, "configured", lambda self: True)
+    monkeypatch.setattr(gm.GeminiService, "client", lambda self: gem)
+    d = InvoiceFolderDialog(ctx, None, tab=1)
+    qtbot.addWidget(d)
+    names = [r["Ten"] for r in d.tables[1].rows]
+    d.tables[1].selectRow(names.index("anh.jpg"))
+    d.gemini()
+    qtbot.waitUntil(lambda: d.b_read.isEnabled(), timeout=10_000)
+    assert [c[0] for c in gem.calls][:1] == ["doc"] and any("Gemini đã đọc xong" in x for x in shown)
+    assert ctx.db.one("SELECT * FROM HoaDonDauVao WHERE SoHoaDonGoc = '55'") is not None

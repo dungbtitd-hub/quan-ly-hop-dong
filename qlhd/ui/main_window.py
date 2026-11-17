@@ -34,7 +34,7 @@ from .widgets import confirm, error, info, local_time
 from ..core import sync_folder as sfm
 from ..core.gemini import GeminiService
 from ..core.sync_folder import SyncFolder
-from .invoice_files import FolderSettingsDialog, InvoiceFolderDialog, Scanner
+from .invoice_files import FolderSettingsDialog, InvoiceFolderDialog, Scanner, scan_text
 
 PAGE_ROLE = Qt.UserRole          # chỉ số trang trong stack; None = dòng tiêu đề nhóm
 BADGE_ROLE = Qt.UserRole + 1     # số hiện trên huy hiệu đỏ
@@ -207,6 +207,7 @@ class MainWindow(QMainWindow):
         self.auto_sync = SyncFolder(ctx.db, ctx.sync)
         self.scanner = Scanner(ctx, self)
         self.scanner.finished.connect(self._scanned)
+        self.scanner.progress.connect(lambda t: self.statusBar().showMessage(t, 60_000))
         self.send_timer = QTimer(self)
         self.send_timer.timeout.connect(self._auto_send)
         self.recv_timer = QTimer(self)
@@ -697,17 +698,7 @@ class MainWindow(QMainWindow):
 
     def _scanned(self, s: dict) -> None:
         if s:
-            parts = []
-            if s.get("them"):
-                parts.append(f"tự thêm {s['them']} hóa đơn mới")
-            if s.get("can_xem"):
-                parts.append(f"{s['can_xem']} file cần xem")
-            if s.get("cho_gemini"):
-                parts.append(f"{s['cho_gemini']} file ảnh chờ Gemini (mất kết nối, sẽ thử lại)")
-            if s.get("loi"):
-                parts.append("lỗi: " + s["loi"])
-            if parts:
-                self.statusBar().showMessage("Quét thư mục hóa đơn: " + ", ".join(parts) + ".", 30_000)
+            self.statusBar().showMessage("Quét thư mục hóa đơn: " + scan_text(s), 30_000)
         self.refresh_all()
         if hasattr(self.home, "refresh"):
             self.home.refresh()

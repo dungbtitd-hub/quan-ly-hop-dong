@@ -217,12 +217,16 @@ class InvoicesPage(QWidget):
         b_open.setToolTip("Mở tệp gốc, mở thư mục chứa, sao chép tên file, xuất PDF ra thư mục khác, gắn tệp gốc")
         b_gem = button("Kiểm tra bằng Gemini", self.check_gemini)
         b_gem.setToolTip("Gửi tệp gốc các hóa đơn đang chọn cho Gemini đọc lại và soát: OK hoặc Có vấn đề")
+        self.b_scan = button("Quét ngay thư mục hóa đơn", self.scan_now)
+        self.b_scan.setToolTip("Tìm file mới trong thư mục hóa đơn (cả thư mục con): hóa đơn mới thì thêm, hóa đơn đã "
+                               "có thì ghi nhận nơi chứa tệp; PDF / ảnh gửi Gemini đọc")
+        self.b_scan.setEnabled(add_ok)
         b_dir = button("Thư mục hóa đơn…", self.open_folder_dialog)
         b_dir.setToolTip("Hóa đơn phần mềm vừa tự thêm, file Cần xem, tất cả file trong thư mục hóa đơn")
         b_hd = button("Mở hợp đồng", self.go_contract)
         b_hd.setToolTip("Mở hợp đồng của hóa đơn đang chọn để xem, sửa hợp đồng, công việc, thanh toán")
         b_hd.setEnabled(ctx.can("HopDong"))
-        btns = [b_add, b_file, b_edit, b_del, b_open, b_gem, b_dir, b_hd]
+        btns = [b_add, b_file, b_edit, b_del, b_open, b_gem, self.b_scan, b_dir, b_hd]
         b_add.setEnabled(add_ok)
         b_file.setEnabled(add_ok)
         if kind == "vao":
@@ -656,8 +660,48 @@ class InvoicesPage(QWidget):
 
     def open_folder_dialog(self):
         from .invoice_files import InvoiceFolderDialog
-        InvoiceFolderDialog(self.ctx, self, tab=1).exec()
+        InvoiceFolderDialog(self.ctx, self, tab=1, scanner=getattr(self.window(), "scanner", None)).exec()
         self.refresh()
+
+    def scan_now(self):
+        from ..core.invoice_folder import InvoiceFolders
+        from .invoice_files import Scanner
+        if not InvoiceFolders(self.ctx.db).configured():
+            return info(self, "Chưa đặt thư mục hóa đơn. Bấm \"Thư mục hóa đơn…\" › Cài đặt… để chọn thư mục.")
+        sc = getattr(self.window(), "scanner", None) or getattr(self, "_scanner", None) or Scanner(self.ctx, self)
+        self._scanner = sc
+        if sc.busy:
+            return info(self, "Phần mềm đang quét thư mục hóa đơn, chờ xong rồi bấm lại.")
+        if getattr(self, "_hooked", None) is not sc:
+            sc.finished.connect(self._scan_done)
+            sc.progress.connect(self._scan_progress)
+            self._hooked = sc
+        self._waiting = True
+        if sc.start():
+            self.b_scan.setEnabled(False)
+            self.b_scan.setText("Đang quét…")
+        else:
+            self._waiting = False
+            info(self, "Không có file mới trong thư mục hóa đơn.")
+
+    def _scan_progress(self, text: str):
+        if getattr(self, "_waiting", False):
+            self.b_scan.setText(text if len(text) < 50 else text[:47] + "…")
+
+    def _scan_done(self, s: dict):
+        from ..core.invoice_folder import InvoiceFolders
+        from .invoice_files import scan_text
+        if not getattr(self, "_waiting", False) or not s:
+            return
+        self._waiting = False
+        self.b_scan.setEnabled(True)
+        self.b_scan.setText("Quét ngay thư mục hóa đơn")
+        self.refresh()
+        if InvoiceFolders(self.ctx.db).review_count() and confirm(
+                self, "Quét xong: " + scan_text(s) + "\n\nMở danh sách Cần xem?"):
+            self.open_folder_dialog()
+        elif not s.get("can_xem"):
+            info(self, "Quét xong: " + scan_text(s))
 
 
 def mark_duplicates(ctx, kind: str, items: list[dict]) -> None:

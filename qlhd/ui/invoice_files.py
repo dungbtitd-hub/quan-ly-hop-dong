@@ -412,22 +412,60 @@ def _show(v) -> str:
 
 
 # ------------------------------------------------------------------ xuất PDF
-def xml_html(path: str) -> str:
-    d = xml_invoice.parse_invoice(path)
-    rows = "".join(f"<tr><td>{i}</td><td>{ln['TenHang']}</td><td>{ln.get('DVT') or ''}</td>"
+def _invoice_html(d: dict, note: str) -> str:
+    rows = "".join(f"<tr><td>{i}</td><td>{ln.get('TenHang') or ''}</td><td>{ln.get('DVT') or ''}</td>"
                    f"<td align=right>{ln.get('SoLuong') or ''}</td><td align=right>{fmt_money(ln.get('DonGia'))}</td>"
                    f"<td align=right>{fmt_money(ln.get('ThanhTien'))}</td></tr>"
                    for i, ln in enumerate(d.get("Dong") or [], start=1))
     return f"""<h2 align=center>HÓA ĐƠN GIÁ TRỊ GIA TĂNG</h2>
-<p align=center>Ký hiệu {d['KyHieuMauSo']}{d['KyHieuHD']} – Số {d['SoHoaDon']} – Ngày {fmt_date(d['NgayLap'])}</p>
-<p><b>Đơn vị bán:</b> {d['TenNguoiBan']}<br>MST: {d['MSTNguoiBan']}</p>
-<p><b>Người mua:</b> {d['TenNguoiMua']}<br>MST: {d['MSTNguoiMua']}</p>
+<p align=center>Ký hiệu {d.get('KyHieuMauSo') or ''}{d.get('KyHieuHD') or ''} – Số {d.get('SoHoaDon') or ''} – Ngày
+{fmt_date(d.get('NgayLap'))}</p>
+<p><b>Đơn vị bán:</b> {d.get('TenNguoiBan') or ''}<br>MST: {d.get('MSTNguoiBan') or ''}</p>
+<p><b>Người mua:</b> {d.get('TenNguoiMua') or ''}<br>MST: {d.get('MSTNguoiMua') or ''}</p>
 <table border=1 cellspacing=0 cellpadding=4 width=100%>
 <tr><th>STT</th><th>Tên hàng hóa, dịch vụ</th><th>ĐVT</th><th>Số lượng</th><th>Đơn giá</th><th>Thành tiền</th></tr>
 {rows}</table>
-<p align=right>Cộng tiền hàng: <b>{fmt_money(d['GiaTriTruocThue'])}</b><br>Thuế suất: {d.get('ThueSuatHD') or ''} –
-Tiền thuế GTGT: <b>{fmt_money(d['VAT'])}</b><br>Tổng cộng thanh toán: <b>{fmt_money(d['GiaTriSauThue'])}</b></p>
-<p style='color:#666'>Bản thể hiện do phần mềm tạo từ tệp XML {Path(path).name} (không thay thế hóa đơn gốc).</p>"""
+<p align=right>Cộng tiền hàng: <b>{fmt_money(d.get('GiaTriTruocThue'))}</b><br>Thuế suất: {d.get('ThueSuatHD') or ''} –
+Tiền thuế GTGT: <b>{fmt_money(d.get('VAT'))}</b><br>Tổng cộng thanh toán: <b>{fmt_money(d.get('GiaTriSauThue'))}</b></p>
+<p style='color:#666'>{note}</p>"""
+
+
+def xml_html(path: str) -> str:
+    return _invoice_html(xml_invoice.parse_invoice(path),
+                         f"Bản thể hiện do phần mềm tạo từ tệp XML {Path(path).name} (không thay thế hóa đơn gốc).")
+
+
+def db_html(ctx, kind: str, inv) -> str:
+    """Bản thể hiện dựng từ số liệu hóa đơn đã lưu trong phần mềm (khi không còn tệp gốc trên máy này)."""
+    inv = dict(inv)
+    lic = ctx.db.one("SELECT MaCongTy, TenCongTy FROM BanQuyen WHERE Id = 1")
+    cty, mst = (lic["TenCongTy"], lic["MaCongTy"]) if lic else ("", "")
+    if kind == "vao":
+        lines = [dict(r) for r in ctx.db.query("SELECT * FROM DongHoaDonDauVao WHERE MaHoaDon = ? ORDER BY STT",
+                                                (inv["Ma"],))]
+        d = {"SoHoaDon": inv.get("SoHoaDonGoc"), "NgayLap": inv.get("NgayNhanHD"),
+             "TenNguoiBan": inv.get("TenNhaCungCap"), "MSTNguoiBan": inv.get("MaThueNCC"),
+             "TenNguoiMua": cty, "MSTNguoiMua": mst}
+    else:
+        lines = []
+        d = {"SoHoaDon": inv.get("SoHoaDon"), "NgayLap": inv.get("NgayXuatHD"), "TenNguoiBan": cty,
+             "MSTNguoiBan": mst, "TenNguoiMua": inv.get("TenNguoiMua"), "MSTNguoiMua": inv.get("MSTNguoiMua")}
+    if not lines and inv.get("MatHang"):
+        lines = [{"TenHang": inv["MatHang"], "ThanhTien": inv.get("GiaTriTruocThue")}]
+    d.update(KyHieuMauSo=inv.get("KyHieuMauSo"), KyHieuHD=inv.get("KyHieuHD"), Dong=lines,
+             GiaTriTruocThue=inv.get("GiaTriTruocThue"), VAT=inv.get("VAT"), GiaTriSauThue=inv.get("GiaTriSauThue"),
+             ThueSuatHD=inv.get("ThueSuat"))
+    return _invoice_html(d, "Bản thể hiện do phần mềm tạo từ số liệu hóa đơn đã lưu (không tìm thấy tệp gốc trên "
+                            "máy này; không thay thế hóa đơn gốc).")
+
+
+def _html_pdf(html: str, target: Path) -> None:
+    w = QPdfWriter(str(target))
+    w.setPageSize(QPageSize(QPageSize.A4))
+    w.setResolution(150)
+    doc = QTextDocument()
+    doc.setHtml(html)
+    doc.print_(w)
 
 
 def to_pdf(src: Path, target: Path) -> None:
@@ -436,14 +474,11 @@ def to_pdf(src: Path, target: Path) -> None:
     if ext == ".pdf":
         shutil.copyfile(src, target)
         return
+    if ext == ".xml":
+        return _html_pdf(xml_html(str(src)), target)
     w = QPdfWriter(str(target))
     w.setPageSize(QPageSize(QPageSize.A4))
     w.setResolution(150)
-    if ext == ".xml":
-        doc = QTextDocument()
-        doc.setHtml(xml_html(str(src)))
-        doc.print_(w)
-        return
     img = QImage(str(src))
     if img.isNull():
         raise ValueError(f"Không đọc được ảnh {src.name}")
@@ -470,16 +505,18 @@ class ExportPdfDialog(QDialog):
         super().__init__(parent)
         self.ctx, self.kind = ctx, kind
         folders = InvoiceFolders(ctx.db)
-        self.files = []
+        self.files = []                 # (hóa đơn, tệp gốc hoặc None = dựng từ số liệu đã lưu)
         for r in rows:
-            p = folders.view_file(kind, r)
-            if p is not None:
-                self.files.append((r, p))
+            self.files.append((r, folders.view_file(kind, r)))
         self.setWindowTitle("Xuất PDF ra thư mục khác")
         self.resize(560, 260)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"{len(self.files)} / {len(rows)} hóa đơn có tệp gốc trên máy này sẽ được xuất PDF "
-                             "(XML được dựng thành bản thể hiện, ảnh đặt vào trang A4)."))
+        no_file = sum(1 for _, p in self.files if p is None)
+        lab = QLabel(f"{len(self.files)} hóa đơn sẽ được xuất PDF (XML được dựng thành bản thể hiện, ảnh đặt vào "
+                     "trang A4)." + (f" {no_file} hóa đơn không tìm thấy tệp gốc trên máy này: dựng bản thể hiện từ "
+                                     "số liệu đã lưu trong phần mềm." if no_file else ""))
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
         form = QFormLayout()
         self.target = QLineEdit(ctx.db.setting("tmhd_xuat_pdf") or str(Path.home()))
         pick = button("Chọn…", self._pick)
@@ -520,8 +557,22 @@ class ExportPdfDialog(QDialog):
         reveal(target)
         self.accept()
 
+    def _name(self, r, p) -> str:
+        if p is not None:
+            return p.with_suffix(".pdf").name
+        r = dict(r)
+        so = r.get("SoHoaDon") if self.kind == "ra" else r.get("SoHoaDonGoc")
+        raw = f"HoaDon_{r.get('KyHieuHD') or ''}_{so or r['Ma']}"
+        return "".join(c if c.isalnum() or c in "_-" else "_" for c in raw) + ".pdf"
+
+    def _one(self, r, p, dest: Path) -> None:
+        if p is None:
+            _html_pdf(db_html(self.ctx, self.kind, r), dest)
+        else:
+            to_pdf(p, dest)
+
     def export(self, target: Path, merge: bool, merge_name: str = "", ask=True) -> int:
-        names = [p.with_suffix(".pdf").name for _, p in self.files]
+        names = [self._name(r, p) for r, p in self.files]
         if merge:
             name = merge_name or "HoaDon.pdf"
             dest = target / (name if name.lower().endswith(".pdf") else name + ".pdf")
@@ -531,9 +582,9 @@ class ExportPdfDialog(QDialog):
             tmpdir.mkdir(exist_ok=True)
             try:
                 parts = []
-                for i, (_, p) in enumerate(self.files):
+                for i, (r, p) in enumerate(self.files):
                     t = tmpdir / f"{i:04d}.pdf"
-                    to_pdf(p, t)
+                    self._one(r, p, t)
                     parts.append(t)
                 merge_pdfs(parts, dest)
             finally:
@@ -542,8 +593,8 @@ class ExportPdfDialog(QDialog):
         exist = [n for n in names if (target / n).exists()]
         if exist and ask and not confirm(self, f"{len(exist)} tệp đã có trong thư mục đích (VD {exist[0]}). Ghi đè?"):
             return 0
-        for (_, p), n in zip(self.files, names):
-            to_pdf(p, target / n)
+        for (r, p), n in zip(self.files, names):
+            self._one(r, p, target / n)
         return len(self.files)
 
 
@@ -700,11 +751,32 @@ class FolderSettingsDialog(QDialog):
         self.accept()
 
 
+def scan_text(s: dict) -> str:
+    """Tóm tắt một lượt quét / đọc cho thanh trạng thái."""
+    parts = []
+    if s.get("them"):
+        parts.append(f"tự thêm {s['them']} hóa đơn mới")
+    if s.get("co_san"):
+        parts.append(f"{s['co_san']} hóa đơn đã có (đã ghi nhận nơi chứa tệp)")
+    if s.get("lech"):
+        parts.append(f"{s['lech']} hóa đơn đã có nhưng số liệu khác")
+    rest = (s.get("can_xem") or 0) - (s.get("lech") or 0)
+    if rest > 0:
+        parts.append(f"{rest} file cần xem")
+    if s.get("cho_gemini"):
+        parts.append(f"{s['cho_gemini']} file chờ Gemini (mất kết nối / hết hạn mức, lần quét sau đọc tiếp)")
+    if s.get("loi"):
+        parts.append("lỗi: " + s["loi"])
+    return ", ".join(parts) + "." if parts else "không có gì mới."
+
+
 # ------------------------------------------------------------------ quét thư mục (khi mở phần mềm / bấm Quét ngay)
 class Scanner(QObject):
-    """Quét các thư mục hóa đơn: tìm file mới (luồng giao diện), đọc / nhờ Gemini đọc (luồng nền), ghi vào CSDL
-    (luồng giao diện), rồi tự nhờ Gemini kiểm tra hóa đơn mới và phân loại dòng hóa đơn đầu vào mới."""
+    """Quét các thư mục hóa đơn: tìm file mới và xét lại file còn chờ (luồng giao diện), đọc / nhờ Gemini đọc
+    (luồng nền), ghi vào CSDL (luồng giao diện), rồi tự nhờ Gemini kiểm tra hóa đơn mới và phân loại dòng hóa đơn
+    đầu vào mới."""
     finished = Signal(dict)
+    progress = Signal(str)
 
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
@@ -713,17 +785,21 @@ class Scanner(QObject):
         self.gem = GeminiService(ctx.db)
         self.busy = False
 
-    def start(self) -> bool:
+    def start(self, everything: bool = False) -> bool:
+        """everything: quét lại toàn bộ file trong thư mục (hóa đơn đã có chỉ ghi nhận lại nơi chứa tệp)."""
         if self.busy or not self.folders.configured() or self.ctx.user is None:
             return False
         jobs = []
         for kind in fo.KINDS:
             if not self.ctx.can(TABLE[kind], "Them") or not self.folders.root(kind):
                 continue
+            self.folders.prune(kind)
             first = self.folders.first_scan(kind)
-            files = self.folders.new_files(kind)
+            again = self.folders.recheck_files(kind, everything)
+            files = sorted(self.folders.new_files(kind) + again)
             if files or first:
-                jobs.append((kind, files, first))
+                jobs.append((kind, files, self.folders.cache(kind, [rel for rel, _ in again]),
+                             fo.known_keys(self.ctx.db, kind)))
         if not jobs:
             self.finished.emit({})
             return False
@@ -731,29 +807,31 @@ class Scanner(QObject):
         client = None
         if self.gem.configured() and self.gem.flag(gm.K_AUTO_READ):
             client = self.gem.client()
+        say = self.progress.emit
+        say("Đang quét thư mục hóa đơn…")
 
         def work():
-            return [(kind, InvoiceFolders.read(kind, files, client, use_gemini=not first), first)
-                    for kind, files, first in jobs]
+            return [(kind, InvoiceFolders.read(kind, files, client, cache=cache, known=known, progress=say))
+                    for kind, files, cache, known in jobs]
         run_bg(work, self._done)
         return True
 
     def _done(self, res, err):
         self.busy = False
-        summary = {"them": 0, "can_xem": 0, "co_san": 0, "cho_gemini": 0, "loi": str(err) if err else "",
+        summary = {"them": 0, "can_xem": 0, "co_san": 0, "lech": 0, "cho_gemini": 0, "loi": str(err) if err else "",
                    "lan_dau": False, "moi": {}}
         if err is None:
             mst = self.ctx.acc.license()["MaCongTy"] if self.ctx.acc.license() else ""
-            for kind, items, first in res:
+            for kind, items in res:
                 if any(it.offline for it in items):
-                    self.gem.record_error(GeminiError("Mất kết nối Gemini khi đọc ảnh hóa đơn", "mang"))
+                    msg = next(it.error for it in items if it.offline)
+                    self.gem.record_error(GeminiError(msg.replace("Gemini chưa đọc được: ", ""), "mang"))
                 elif any(it.source == fo.SRC_GEMINI for it in items):
                     self.gem.record_ok()
                 r = self.folders.process(kind, items, mst_cty=mst or "")
+                for k in ("can_xem", "co_san", "lech", "cho_gemini"):
+                    summary[k] += r[k]
                 summary["them"] += len(r["them"])
-                summary["can_xem"] += r["can_xem"]
-                summary["co_san"] += r["co_san"]
-                summary["cho_gemini"] += r["cho_gemini"]
                 summary["lan_dau"] |= r["lan_dau"]
                 summary["moi"][kind] = r["them"]
         summary["cho_xem_tong"] = self.folders.review_count()
@@ -836,7 +914,7 @@ def _unit(ln: dict) -> int:
 # ------------------------------------------------------------------ cửa sổ Thư mục hóa đơn
 class InvoiceFolderDialog(QDialog):
     """Vừa tự thêm / Cần xem / Tất cả file trong thư mục hóa đơn."""
-    TABS = (("Vừa tự thêm", fo.F_ADDED), ("Cần xem", fo.F_REVIEW), ("Tất cả file trong thư mục", None))
+    TABS = (("Vừa tự thêm", (fo.F_ADDED,)), ("Cần xem", fo.F_OPEN), ("Tất cả file trong thư mục", None))
 
     def __init__(self, ctx, parent=None, tab: int = 1, scanner: Scanner | None = None):
         super().__init__(parent)
@@ -863,15 +941,23 @@ class InvoiceFolderDialog(QDialog):
         lay.addWidget(self.tabs, 1)
         self.b_add = button("Thêm vào phần mềm…", self.add, "Primary")
         self.b_skip = button("Bỏ qua (không nhập)", self.skip)
-        self.b_read = button("Đọc bằng Gemini", self.read_gemini)
-        self.b_check = button("Kiểm tra bằng Gemini", self.check)
+        self.b_apply = button("Cập nhật theo file…", self.apply_file)
+        self.b_apply.setToolTip("Hóa đơn đã có nhưng số liệu trong file khác: xem cũ → mới rồi cập nhật theo file")
+        self.b_read = button("Đọc bằng Gemini", self.gemini)
+        self.b_read.setToolTip("File chưa có trong phần mềm (PDF, ảnh): Gemini đọc số liệu. File đã có hóa đơn: "
+                               "Gemini kiểm tra lại.")
+        self.b_check = button("Kiểm tra bằng Gemini", self.gemini)
+        self.b_check.setToolTip(self.b_read.toolTip())
         self.b_scan = button("Quét ngay", self.scan)
+        self.b_rescan = button("Quét lại toàn bộ", self.rescan)
+        self.b_rescan.setToolTip("Xét lại mọi file trong thư mục: hóa đơn đã có chỉ ghi nhận lại nơi chứa tệp, "
+                                 "không đổi số liệu; file đã bỏ qua giữ nguyên")
         b_open = button("Mở tệp", lambda: self.open_file(self._table().current()))
         b_folder = button("Mở thư mục chứa", self.open_folder)
         b_copy = button("Sao chép tên file", self.copy_names)
         b_set = button("Cài đặt…", self.settings)
-        lay.addLayout(toolbar(self.b_add, self.b_skip, self.b_read, self.b_check, b_open, b_folder, b_copy, "stretch",
-                              self.b_scan, b_set))
+        lay.addLayout(toolbar(self.b_add, self.b_skip, self.b_apply, self.b_read, self.b_check, b_open, b_folder,
+                              b_copy, "stretch", self.b_scan, self.b_rescan, b_set))
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         bb.button(QDialogButtonBox.Close).setText("Đóng")
         bb.rejected.connect(self.reject)
@@ -889,7 +975,7 @@ class InvoiceFolderDialog(QDialog):
         for (title, status), t in zip(self.TABS, self.tables):
             rows = []
             for r in all_rows:
-                if status and r["TrangThai"] != status:
+                if status and r["TrangThai"] not in status:
                     continue
                 inv = r["HoaDon"]
                 d = (r["Data"] or {}).get("values") or {}
@@ -902,7 +988,7 @@ class InvoiceFolderDialog(QDialog):
                                                                                                      r["TrangThai"]),
                              "HoaDon": so, "SauThue": (inv or d).get("GiaTriSauThue") if (inv or d) else None,
                              "Gemini": display_fields(self.ctx, r["Chieu"], inv)["GeminiHT"] if inv else "",
-                             "_inv": inv, "_mau": "warn" if r["TrangThai"] == fo.F_REVIEW else None})
+                             "_inv": inv, "_mau": "warn" if r["TrangThai"] in fo.F_OPEN else None})
             t.set_rows(rows)
             self.tabs.setTabText(self.tables.index(t), f"{title} ({len(rows)})")
         s = self.folders.summary()
@@ -916,11 +1002,11 @@ class InvoiceFolderDialog(QDialog):
         self._buttons()
 
     def _buttons(self):
-        review = self.TABS[self.tabs.currentIndex()][1] == fo.F_REVIEW
+        review = self.TABS[self.tabs.currentIndex()][1] == fo.F_OPEN
         add_ok = self.ctx.can("HoaDonDauRa", "Them") or self.ctx.can("HoaDonDauVao", "Them")
         self.b_add.setEnabled(review and add_ok)
         self.b_skip.setEnabled(review and add_ok)
-        self.b_read.setEnabled(review)
+        self.b_apply.setEnabled(review and (self.ctx.can("HoaDonDauRa", "Sua") or self.ctx.can("HoaDonDauVao", "Sua")))
 
     def _sel(self) -> list[dict]:
         return self._table().selected()
@@ -939,8 +1025,8 @@ class InvoiceFolderDialog(QDialog):
         if self.b_add.isEnabled():
             m.addAction("Thêm vào phần mềm…", self.add)
             m.addAction("Bỏ qua (không nhập)", self.skip)
-            m.addAction("Đọc bằng Gemini", self.read_gemini)
-        m.addAction("Kiểm tra bằng Gemini", self.check)
+            m.addAction("Cập nhật theo file…", self.apply_file)
+        m.addAction("Đọc / kiểm tra bằng Gemini", self.gemini)
         m.exec(self.cursor().pos())
 
     def open_file(self, r):
@@ -970,78 +1056,161 @@ class InvoiceFolderDialog(QDialog):
             if getattr(dlg, "changed_dirs", False):
                 self.scan()
 
-    def scan(self):
+    def scan(self, everything: bool = False):
         sc = self.scanner or Scanner(self.ctx, self)
         self.scanner = sc
-        try:
-            sc.finished.disconnect(self._scanned)
-        except (RuntimeError, TypeError):
-            pass
-        sc.finished.connect(self._scanned)
-        if sc.start():
+        if getattr(self, "_hooked", None) is not sc:
+            sc.finished.connect(self._scanned)
+            sc.progress.connect(self._progress)
+            self._hooked = sc
+        self._waiting = True
+        if sc.start(everything):
             self.b_scan.setEnabled(False)
+            self.b_rescan.setEnabled(False)
             self.b_scan.setText("Đang quét…")
         else:
+            self._waiting = False
             self.reload()
+            if sc.busy:
+                info(self, "Phần mềm đang quét thư mục hóa đơn, chờ xong rồi bấm lại.")
+            elif not self.folders.configured():
+                info(self, "Chưa đặt thư mục hóa đơn. Bấm Cài đặt… để chọn thư mục.")
+            else:
+                self.head.setText(self.head.text() + " · Không có file mới.")
+
+    def rescan(self):
+        if confirm(self, "Quét lại toàn bộ file trong thư mục hóa đơn?\n\n- Hóa đơn đã có trong phần mềm: chỉ ghi nhận "
+                         "lại nơi chứa tệp, không đổi số liệu (số liệu khác thì đưa vào Cần xem).\n- File PDF / ảnh "
+                         "chưa có trong phần mềm sẽ gửi Gemini đọc (nếu đã cài khóa).\n- File đã bỏ qua giữ nguyên."):
+            self.scan(True)
+
+    def _progress(self, text: str):
+        if getattr(self, "_waiting", False):
+            self.b_scan.setText(text if len(text) < 60 else text[:57] + "…")
 
     def _scanned(self, s: dict):
+        if not getattr(self, "_waiting", False):
+            return
+        self._waiting = False
         self.b_scan.setEnabled(True)
+        self.b_rescan.setEnabled(True)
         self.b_scan.setText("Quét ngay")
         self.reload()
+        if s:
+            self.head.setText(self.head.text() + " · " + scan_text(s))
 
     def skip(self):
         rows = [r for r in self._sel() if r["TrangThai"] == fo.F_REVIEW]
-        if not rows or not confirm(self, f"Bỏ qua {len(rows)} file (không nhập vào phần mềm)? Lần quét sau phần mềm "
-                                         "không hỏi lại các file này; vẫn xem được ở thẻ Tất cả file."):
+        keep = [r for r in self._sel() if r["TrangThai"] == fo.F_CONFLICT]
+        if not rows and not keep:
+            return info(self, "Chọn file ở thẻ Cần xem.")
+        text = []
+        if rows:
+            text.append(f"Bỏ qua {len(rows)} file (không nhập vào phần mềm)? Lần quét sau phần mềm không hỏi lại các "
+                        "file này; vẫn xem được ở thẻ Tất cả file.")
+        if keep:
+            text.append(f"{len(keep)} file có số liệu khác hóa đơn đã có: giữ nguyên số liệu trong phần mềm.")
+        if not confirm(self, "\n\n".join(text)):
             return
         for r in rows:
             self.folders.set_status(r["_kind"], [r["DuongDan"]], fo.F_SKIP, note="Nhân viên bỏ qua")
+        for r in keep:
+            self.folders.set_status(r["_kind"], [r["DuongDan"]], fo.F_EXISTS, note="Giữ số liệu trong phần mềm")
         self.reload()
 
-    def read_gemini(self):
-        """File chưa đọc được (ảnh, PDF quét): nhờ Gemini đọc lại; file được quét lại ở lượt sau."""
-        rows = [r for r in self._sel() if r["TrangThai"] == fo.F_REVIEW and not r["Data"]]
+    def apply_file(self):
+        rows = [r for r in self._sel() if r["TrangThai"] == fo.F_CONFLICT and r["_inv"]]
         if not rows:
-            return info(self, "Chọn file chưa đọc được số liệu (ảnh, PDF quét) ở thẻ Cần xem.")
+            return info(self, "Chọn file trạng thái \"Đã có, số liệu khác\" ở thẻ Cần xem.")
+        done = 0
+        for r in rows:
+            kind = r["_kind"]
+            if not self.ctx.can(TABLE[kind], "Sua"):
+                continue
+            diff = self.folders.diff(kind, r["_inv"], fo.load_values(r["Data"]))
+            if not diff:
+                self.folders.set_status(kind, [r["DuongDan"]], fo.F_EXISTS, note="Số liệu đã khớp")
+                continue
+            if confirm_changes(self, [(label, a, b) for _c, label, a, b in diff],
+                               f"Cập nhật hóa đơn {invoice_no(kind, r['_inv'])} theo file {r['Ten']}"):
+                self.folders.apply_file_values(kind, r["DuongDan"])
+                done += 1
+        self.reload()
+        if done:
+            info(self, f"Đã cập nhật số liệu {done} hóa đơn theo file.")
+
+    def gemini(self):
+        """File chưa có trong phần mềm (PDF, ảnh): Gemini đọc số liệu rồi xét như lúc quét. File đã gắn với hóa đơn
+        trong phần mềm: Gemini kiểm tra hóa đơn."""
+        rows = self._sel()
+        if not rows:
+            return info(self, "Chọn file (giữ Ctrl / Shift để chọn nhiều) để Gemini đọc hoặc kiểm tra.")
         svc = GeminiService(self.ctx.db)
         if not svc.configured():
             return info(self, "Chưa cài khóa API Gemini. Bấm Cài đặt… để nhập khóa.")
+        check: dict[str, list] = {}
+        read, xml = [], 0
+        for r in rows:
+            if r["_inv"]:
+                check.setdefault(r["_kind"], []).append(r["_inv"])
+            elif r["DuongDan"].lower().endswith(".xml"):
+                xml += 1
+            elif r["TrangThai"] != fo.F_COMPANION:
+                read.append(r)
+        if not check and not read:
+            return info(self, "File XML đã đọc đủ số liệu (không cần Gemini đọc). Thêm vào phần mềm rồi bấm Kiểm tra "
+                              "bằng Gemini nếu muốn Gemini soát.")
+        for kind, invs in check.items():
+            check_invoices(self.ctx, kind, invs, self, self.reload, show=len(rows) == 1)
+        if read:
+            self._read(svc, read)
+
+    def _read(self, svc, rows):
         gem = svc.client()
-        jobs = [(r["_kind"], r["DuongDan"], str(self.folders.full_path(r["_kind"], r["DuongDan"]))) for r in rows]
+        jobs: dict[str, list] = {}
+        for r in rows:
+            p = self.folders.full_path(r["_kind"], r["DuongDan"])
+            if p is not None and p.exists():
+                jobs.setdefault(r["_kind"], []).append((r["DuongDan"], str(p)))
+        if not jobs:
+            return error(self, "Không còn tìm thấy các file này trong thư mục hóa đơn.")
+        caches = {k: self.folders.cache(k, [rel for rel, _ in v]) for k, v in jobs.items()}
+        n = sum(len(v) for v in jobs.values())
         self.b_read.setEnabled(False)
+        self.b_check.setEnabled(False)
+        self.b_read.setText(f"Gemini đang đọc {n} file…")
 
         def work():
-            out = {}
-            for kind, rel, path in jobs:
-                out.setdefault(kind, []).extend(InvoiceFolders.read(kind, [(rel, path)], gem))
-            return out
+            return {kind: InvoiceFolders.read(kind, files, gem, cache=caches[kind], force_gemini=True)
+                    for kind, files in jobs.items()}
 
         def done(res, err):
             self.b_read.setEnabled(True)
+            self.b_check.setEnabled(True)
+            self.b_read.setText("Đọc bằng Gemini")
             if err is not None:
-                return error(self, str(err))
+                return error(self, f"Gemini chưa đọc được: {err}")
             mst = self.ctx.acc.license()["MaCongTy"] if self.ctx.acc.license() else ""
-            added = 0
+            total = {"them": 0, "can_xem": 0, "co_san": 0, "lech": 0, "cho_gemini": 0}
+            offline = ""
             for kind, items in res.items():
-                if any(it.offline for it in items):
-                    svc.record_error(GeminiError(next(it.error for it in items if it.offline), "mang"))
-                    return error(self, next(it.error for it in items if it.offline))
+                for it in items:
+                    if it.offline:
+                        offline = it.error
+                r = self.folders.process(kind, items, mst_cty=mst or "")
+                total["them"] += len(r["them"])
+                for k in ("can_xem", "co_san", "lech", "cho_gemini"):
+                    total[k] += r[k]
+                if r["them"] and svc.flag(gm.K_AUTO_CLASS) and kind == "vao":
+                    classify_async(self.ctx, self, r["them"])
+            if offline:
+                svc.record_error(GeminiError(offline.replace("Gemini chưa đọc được: ", ""), "mang"))
+            else:
                 svc.record_ok()
-                self.folders.forget(kind, [it.rel for it in items])
-                added += len(self.folders.process(kind, items, mst_cty=mst or "", auto_add=False)["them"])
             self.reload()
-            info(self, "Gemini đã đọc xong. Kiểm tra số liệu ở cột Hóa đơn rồi bấm \"Thêm vào phần mềm…\".")
+            msg = "Gemini đã đọc xong: " + scan_text(total)
+            (error if offline else info)(self, msg + (f"\n\n{offline}" if offline else ""))
         run_bg(work, done)
-
-    def check(self):
-        rows = [r for r in self._sel() if r["_inv"]]
-        by: dict[str, list] = {}
-        for r in rows:
-            by.setdefault(r["_kind"], []).append(r["_inv"])
-        if not by:
-            return info(self, "Chọn file đã có hóa đơn trong phần mềm để kiểm tra (file Cần xem hãy thêm trước).")
-        for kind, invs in by.items():
-            check_invoices(self.ctx, kind, invs, self, self.reload, show=len(rows) == 1)
 
     def add(self):
         from .invoices_page import CHOOSE, BatchInvoiceDialog, InvoicesPage, mark_duplicates
@@ -1085,7 +1254,7 @@ class InvoiceFolderDialog(QDialog):
             inv = self.folders._existing(kind, it["values"])
             if inv is not None:
                 self.folders.set_status(kind, [it["_rel"]], fo.F_ADDED, inv["Ma"], note="Nhân viên thêm")
-                if not inv["TepTuongDoi"]:
+                if not inv.get("TepTuongDoi"):
                     with self.ctx.db.auto():
                         self.ctx.db.update(TABLE[kind], inv["Ma"], {"TepTuongDoi": it["_rel"]})
         page.deleteLater()
@@ -1095,5 +1264,5 @@ class InvoiceFolderDialog(QDialog):
             win.refresh_all()
 
 
-__all__ = ["ExportPdfDialog", "FileActions", "FolderSettingsDialog", "GeminiResultDialog", "InvoiceFolderDialog",
+__all__ = ["scan_text", "ExportPdfDialog", "FileActions", "FolderSettingsDialog", "GeminiResultDialog", "InvoiceFolderDialog",
            "Scanner", "check_invoices", "classify_async", "display_fields", "reveal", "run_bg"]

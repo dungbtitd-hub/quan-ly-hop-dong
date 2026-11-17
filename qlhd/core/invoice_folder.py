@@ -48,8 +48,10 @@ F_EXISTS = "co_san"
 F_REVIEW = "can_xem"
 F_SKIP = "bo_qua"
 F_COMPANION = "tep_kem"
+F_CONFLICT = "lech"                     # đã có trong phần mềm nhưng số liệu trong file khác
 F_LABELS = {F_ADDED: "Đã tự thêm", F_EXISTS: "Có từ trước", F_REVIEW: "Cần xem", F_SKIP: "Đã bỏ qua",
-            F_COMPANION: "Tệp kèm (cùng hóa đơn)"}
+            F_COMPANION: "Tệp kèm (cùng hóa đơn)", F_CONFLICT: "Đã có, số liệu khác"}
+F_OPEN = (F_REVIEW, F_CONFLICT)         # còn chờ nhân viên (thẻ Cần xem)
 
 SRC_XML, SRC_PDF, SRC_GEMINI, SRC_GEMINI_OK = "XML", "PDF", "Gemini", "Gemini (đã soát)"
 REQUIRED = {"vao": (("SoHoaDonGoc", "Số hóa đơn"), ("TenNhaCungCap", "Tên người bán"), ("MaThueNCC", "MST người bán"),
@@ -131,10 +133,62 @@ def from_gemini(g: dict) -> dict:
     return d
 
 
+def _num(x) -> str:
+    """Số hóa đơn so sánh được: chỉ chữ số, bỏ số 0 đầu ("0000123" = "123")."""
+    return "".join(ch for ch in str(x or "") if ch.isdigit()).lstrip("0")
+
+
+def _mst(x) -> str:
+    return "".join(ch for ch in str(x or "") if ch.isdigit())
+
+
+def _sym(x) -> str:
+    return "".join(ch for ch in str(x or "").upper() if ch.isalnum())
+
+
+def same_symbol(a: str, b: str) -> bool:
+    """Ký hiệu hóa đơn coi là một: giống nhau, một bên để trống, hoặc một bên có thêm mẫu số ở đầu (1C26TAA)."""
+    a, b = _sym(a), _sym(b)
+    return not a or not b or a == b or a.endswith(b) or b.endswith(a)
+
+
+def _merge(gd: dict, text: dict | None, it: "Item") -> dict:
+    """Số liệu Gemini đọc, bổ sung trường trống từ lớp chữ PDF; hai bên khác nhau thì ghi lưu ý để nhân viên xem."""
+    if not text:
+        return gd
+    for k, v in text.items():
+        if k not in gd or gd[k] in (None, "", 0, []):
+            gd[k] = v
+    if _complete(text):
+        diff = []
+        if _num(text.get("SoHoaDon")) != _num(gd.get("SoHoaDon")):
+            diff.append(f"số hóa đơn {text.get('SoHoaDon')} / {gd.get('SoHoaDon')}")
+        if abs(int(text.get("GiaTriSauThue") or 0) - int(gd.get("GiaTriSauThue") or 0)) > 2:
+            diff.append(f"tổng tiền {fmt_money(text.get('GiaTriSauThue'))} / {fmt_money(gd.get('GiaTriSauThue'))}")
+        if diff:
+            it.warn = "Lớp chữ PDF và Gemini đọc khác nhau: " + "; ".join(diff)
+    return gd
+
+
 def invoice_key(kind: str, d: dict) -> tuple:
-    so = "".join(ch for ch in str(d.get("SoHoaDon") or "") if ch.isdigit()).lstrip("0")
-    mst = "".join(ch for ch in str(d.get("MSTNguoiBan") or "") if ch.isdigit())
-    return (mst if kind == "vao" else "", (d.get("KyHieuHD") or "").strip().upper(), so)
+    return (_mst(d.get("MSTNguoiBan")) if kind == "vao" else "", _sym(d.get("KyHieuHD")), _num(d.get("SoHoaDon")))
+
+
+def loose_key(kind: str, d: dict) -> tuple:
+    """Khóa để biết hóa đơn đã có trong phần mềm (đầu vào: MST người bán + số; đầu ra: số)."""
+    return (_mst(d.get("MSTNguoiBan")) if kind == "vao" else "", _num(d.get("SoHoaDon")))
+
+
+def known_keys(db, kind: str) -> set[tuple]:
+    """Khóa các hóa đơn đã có (đọc CSDL ở luồng giao diện, dùng khi đọc file ở luồng nền để khỏi gửi Gemini)."""
+    if kind == "vao":
+        return {(_mst(r["MaThueNCC"]), _num(r["SoHoaDonGoc"]))
+                for r in db.query("SELECT MaThueNCC, SoHoaDonGoc FROM HoaDonDauVao WHERE DaXoa = 0")}
+    return {("", _num(r["SoHoaDon"])) for r in db.query("SELECT SoHoaDon FROM HoaDonDauRa WHERE DaXoa = 0")}
+
+
+def _complete(d: dict | None) -> bool:
+    return bool(d) and not d.get("ThieuTruong") and bool(_num(d.get("SoHoaDon"))) and bool(d.get("GiaTriSauThue"))
 
 
 @dataclass
@@ -148,6 +202,10 @@ class Item:
     source: str = ""
     error: str = ""
     offline: bool = False                       # lỗi do mất kết nối Gemini: lần quét sau thử lại
+    warn: str = ""                              # PDF và Gemini đọc ra khác nhau: để nhân viên xem
+    not_invoice: bool = False                   # Gemini trả lời file không phải hóa đơn (không gửi lại)
+    again: bool = False                         # file đã quét trước đây, nay xét lại
+    old: dict | None = None                     # dòng TepDaQuet cũ (khi xét lại)
 
 
 # ------------------------------------------------------------------------ quét thư mục
@@ -235,12 +293,10 @@ class InvoiceFolders:
         root = self.db.setting(K_DIR[kind]) or ""
         return bool(root) and self.db.setting(K_SCANNED[kind]) != root
 
-    def new_files(self, kind: str) -> list[tuple[str, str]]:
-        """(đường dẫn tương đối, đường dẫn đầy đủ) các file chưa xử lý trong thư mục và mọi thư mục con."""
+    def _walk(self, kind: str) -> list[tuple[str, str]] | None:
         root = self.root(kind)
         if not root or not root.is_dir():
-            return []
-        seen = {r["DuongDan"] for r in self.db.query("SELECT DuongDan FROM TepDaQuet WHERE Chieu = ?", (kind,))}
+            return None
         ext = self.extensions()
         out = []
         for dirpath, dirs, files in os.walk(root):
@@ -249,25 +305,103 @@ class InvoiceFolders:
                 if f.startswith((".", "~$")) or Path(f).suffix.lower() not in ext:
                     continue
                 full = Path(dirpath) / f
-                rel = full.relative_to(root).as_posix()
-                if rel not in seen:
-                    out.append((rel, str(full)))
+                out.append((full.relative_to(root).as_posix(), str(full)))
         out.sort()
+        return out
+
+    def _rows(self, kind: str) -> dict[str, dict]:
+        return {r["DuongDan"]: dict(r) for r in self.db.query("SELECT * FROM TepDaQuet WHERE Chieu = ?", (kind,))}
+
+    def new_files(self, kind: str) -> list[tuple[str, str]]:
+        """(đường dẫn tương đối, đường dẫn đầy đủ) các file chưa xử lý (hoặc đã bị thay bằng file khác cùng tên) trong
+        thư mục và mọi thư mục con."""
+        files = self._walk(kind)
+        if not files:
+            return []
+        seen = self._rows(kind)
+        out = []
+        for rel, full in files:
+            r = seen.get(rel)
+            if r is None:
+                out.append((rel, full))
+                continue
+            try:
+                st = Path(full).stat()
+            except OSError:
+                continue
+            if r["KichThuoc"] is not None and (r["KichThuoc"] != st.st_size
+                                               or abs((r["NgaySuaTep"] or 0) - st.st_mtime) > 2):
+                out.append((rel, full))                 # file đã bị chép đè: đọc lại
+        return out
+
+    def recheck_files(self, kind: str, everything: bool = False) -> list[tuple[str, str]]:
+        """File đã quét nhưng còn chờ nhân viên (Cần xem, số liệu khác) — xét lại mỗi lần quét vì hóa đơn có thể đã
+        được nhập tay, đã thêm hợp đồng, đã xóa bản trùng… everything: quét lại toàn bộ (trừ file đã bỏ qua)."""
+        files = self._walk(kind)
+        if not files:
+            return []
+        seen = self._rows(kind)
+        new = {rel for rel, _ in self.new_files(kind)}
+        out = []
+        for rel, full in files:
+            r = seen.get(rel)
+            if r is None or rel in new:
+                continue
+            if r["TrangThai"] in F_OPEN or (everything and r["TrangThai"] != F_SKIP):
+                out.append((rel, full))
+        return out
+
+    def prune(self, kind: str) -> int:
+        """Quên các file không còn trong thư mục (đã xóa, đã chuyển đi) để không còn báo trùng / cần xem."""
+        files = self._walk(kind)
+        if not files:                       # thư mục chưa sẵn sàng (ổ mạng, Drive chưa đồng bộ): không xóa gì
+            return 0
+        have = {rel for rel, _ in files}
+        gone = [rel for rel in self._rows(kind) if rel not in have]
+        for rel in gone:
+            self.db.conn.execute("DELETE FROM TepDaQuet WHERE Chieu = ? AND DuongDan = ?", (kind, rel))
+        self.db.conn.commit()
+        return len(gone)
+
+    def cache(self, kind: str, rels) -> dict[str, dict]:
+        """Số liệu đã đọc lần trước của các file (để xét lại không phải đọc / gửi Gemini lần nữa)."""
+        rows = self._rows(kind)
+        out = {}
+        for rel in rels:
+            r = rows.get(rel)
+            if r is None:
+                continue
+            data = json.loads(r["DuLieu"]) if r["DuLieu"] else {}
+            out[rel] = {"row": r, "raw": data.get("raw"), "src": data.get("src") or "",
+                        "not_invoice": bool(data.get("not_invoice"))}
         return out
 
     # ---- đọc (chạy được ở luồng nền: không dùng CSDL)
     @staticmethod
-    def read(kind: str, files: list[tuple[str, str]], gemini=None, *, use_gemini: bool = True) -> list[Item]:
-        """Đọc các file mới, ghép XML với PDF / ảnh cùng hóa đơn. File không có lớp chữ (ảnh, PDF quét) thì nhờ
-        Gemini đọc nếu có; không có Gemini (hoặc mất kết nối) thì để nhân viên xem."""
+    def read(kind: str, files: list[tuple[str, str]], gemini=None, *, use_gemini: bool = True,
+             cache: dict | None = None, known: set | None = None, force_gemini: bool = False,
+             progress=None) -> list[Item]:
+        """Đọc các file, ghép XML với PDF / ảnh cùng hóa đơn.
+        - XML: số liệu lấy từ XML (chính xác nhất), không gửi Gemini để đọc.
+        - PDF / ảnh không đi kèm XML: gửi Gemini đọc (trừ hóa đơn đã có trong phần mềm — known), lấy thêm lớp chữ
+          của PDF để đối chiếu; mất kết nối Gemini thì dùng lớp chữ nếu đọc đủ, không thì để lần quét sau.
+        cache: số liệu đã đọc lần trước (xét lại file cũ), known: khóa hóa đơn đã có, force_gemini: luôn gửi Gemini."""
+        cache = cache or {}
+        known = known or set()
+        say = progress or (lambda _t: None)
         xml, other = [], []
         for rel, path in files:
             (xml if rel.lower().endswith(".xml") else other).append((rel, path))
         items: list[Item] = []
         by_stem: dict[tuple[str, str], Item] = {}
         by_key: dict[tuple, Item] = {}
+
+        def new_item(rel, path, **kw):
+            c = cache.get(rel)
+            return Item(kind, rel, path, again=c is not None, old=(c or {}).get("row"), **kw)
+
         for rel, path in xml:
-            it = Item(kind, rel, path, source=SRC_XML)
+            it = new_item(rel, path, source=SRC_XML)
             try:
                 it.data = xml_invoice.parse_invoice(path)
                 by_key[invoice_key(kind, it.data)] = it
@@ -275,35 +409,76 @@ class InvoiceFolders:
                 it.error = f"Không đọc được XML: {e}"
             items.append(it)
             by_stem[(str(Path(rel).parent), Path(rel).stem.lower())] = it
-        for rel, path in other:
+
+        def pair(it: Item) -> bool:
+            k = invoice_key(kind, it.data)
+            for key, x in by_key.items():
+                if x is not it and key[0] == k[0] and key[2] == k[2] and k[2] and same_symbol(key[1], k[1]):
+                    x.kem.append(it.rel)
+                    return True
+            return False
+
+        need_gem = [(rel, path) for rel, path in other]
+        gem_down = None                       # lỗi mất kết nối / hết hạn mức: không gửi tiếp các file sau
+        done_gem = 0
+        for rel, path in need_gem:
             stem = (str(Path(rel).parent), Path(rel).stem.lower())
             if stem in by_stem and by_stem[stem].data:
                 by_stem[stem].kem.append(rel)
                 continue
-            it = Item(kind, rel, path)
+            it = new_item(rel, path)
+            c = cache.get(rel) or {}
+            if c.get("raw") and not force_gemini:
+                it.data, it.source = c["raw"], c.get("src") or SRC_PDF
+                if not pair(it):
+                    items.append(it)
+                continue
+            if c.get("not_invoice") and not force_gemini:
+                it.error, it.not_invoice = "Gemini: file này không phải hóa đơn.", True
+                items.append(it)
+                continue
+            text = None
             if rel.lower().endswith(".pdf"):
                 try:
-                    it.data, it.source = pdf_invoice.parse_invoice(path), SRC_PDF
+                    text = pdf_invoice.parse_invoice(path)
                 except pdf_invoice.InvoicePDFError as e:
                     it.error = str(e)
-                if it.data and invoice_key(kind, it.data) in by_key:
-                    by_key[invoice_key(kind, it.data)].kem.append(rel)
+                except Exception as e:  # noqa: BLE001 - PDF hỏng
+                    it.error = f"Không đọc được PDF: {e}"
+            if text is not None:
+                it.data, it.source = text, SRC_PDF
+                if pair(it):
                     continue
-            if it.data is None:
-                if gemini is not None and use_gemini:
-                    from .gemini import GeminiError
-                    try:
-                        g = gemini.extract_invoice(path)
-                        if g.get("la_hoa_don") is False:
-                            it.error = "Gemini: file này không phải hóa đơn."
-                        else:
-                            it.data, it.source, it.error = from_gemini(g), SRC_GEMINI, ""
-                    except GeminiError as e:
+            ask = gemini is not None and use_gemini and gem_down is None and (
+                force_gemini or not (_complete(text) and loose_key(kind, text) in known))
+            if ask:
+                from .gemini import GeminiError
+                done_gem += 1
+                say(f"Gemini đang đọc {Path(rel).name} ({done_gem})…")
+                try:
+                    g = gemini.extract_invoice(path)
+                    if g.get("la_hoa_don") is False:
+                        it.error, it.not_invoice, it.data = "Gemini: file này không phải hóa đơn.", True, None
+                    else:
+                        gd = from_gemini(g)
+                        it.data, it.source, it.error = _merge(gd, text, it), SRC_GEMINI, ""
+                        if _complete(text) and not it.warn:
+                            it.source = SRC_PDF            # lớp chữ PDF và Gemini khớp nhau: tin được
+                except GeminiError as e:
+                    if e.offline:
+                        gem_down = e
+                    if e.offline and not _complete(text):
+                        it.data, it.error, it.offline = None, f"Gemini chưa đọc được: {e}", True
+                    elif text is None:
                         it.error = f"Gemini chưa đọc được: {e}"
-                        it.offline = e.offline
-                else:
-                    it.error = (it.error or "File ảnh không có lớp chữ.") + (
-                        " Bấm \"Đọc bằng Gemini\" hoặc nhập tay." if gemini is None or not use_gemini else "")
+            elif it.data is None and not it.error:
+                it.error = "File ảnh không có lớp chữ."
+            if it.data is None and gem_down is not None and not it.offline and not it.not_invoice:
+                it.error, it.offline = f"Gemini chưa đọc được: {gem_down}", True
+            if it.data is None and not it.offline and not it.not_invoice and (gemini is None or not use_gemini):
+                it.error = (it.error or "Không đọc được.") + " Bấm \"Đọc bằng Gemini\" hoặc nhập tay."
+            if it.data is not None and pair(it):
+                continue
             items.append(it)
         return items
 
@@ -321,36 +496,95 @@ class InvoiceFolders:
             (kind, rel, size, mtime, status, ma, note or None,
              json.dumps(data, ensure_ascii=False, default=str) if data is not None else None, now_iso()))
 
-    def _existing(self, kind: str, values: dict):
+    def _index(self, kind: str) -> dict[str, list[dict]]:
+        col = "SoHoaDon" if kind == "ra" else "SoHoaDonGoc"
+        idx: dict[str, list[dict]] = {}
+        for r in self.db.query(f"SELECT * FROM {TABLE[kind]} WHERE DaXoa = 0"):
+            idx.setdefault(_num(r[col]), []).append(dict(r))
+        return idx
+
+    def _existing(self, kind: str, values: dict, idx: dict | None = None):
+        """Hóa đơn đã có trong phần mềm ứng với số liệu đọc từ file. So khớp mềm: số hóa đơn bỏ số 0 đầu, MST chỉ
+        lấy chữ số, ký hiệu có / không kèm mẫu số hoặc để trống (đầu ra để trống ký hiệu thì cần khớp thêm ngày
+        hoặc số tiền). Nhiều hóa đơn cùng khớp thì không chọn (để nhân viên xem)."""
+        so = _num(values.get("SoHoaDon" if kind == "ra" else "SoHoaDonGoc"))
+        if not so:
+            return None
+        rows = (idx if idx is not None else self._index(kind)).get(so, [])
+        if kind == "vao":
+            mst = _mst(values.get("MaThueNCC"))
+            if not mst:
+                return None
+            rows = [r for r in rows if _mst(r["MaThueNCC"]) == mst]
+        kh = _sym(values.get("KyHieuHD"))
+        exact = [r for r in rows if _sym(r["KyHieuHD"]) == kh]
+        if len(exact) == 1:
+            return exact[0]
+        comp = [r for r in rows if same_symbol(r["KyHieuHD"], kh)]
         if kind == "ra":
-            return self.db.one("SELECT * FROM HoaDonDauRa WHERE DaXoa = 0 AND COALESCE(KyHieuHD,'') = ? AND SoHoaDon = ?",
-                               (values.get("KyHieuHD") or "", values.get("SoHoaDon") or ""))
-        return self.db.one("SELECT * FROM HoaDonDauVao WHERE DaXoa = 0 AND MaThueNCC = ? AND COALESCE(KyHieuHD,'') = ?"
-                           " AND SoHoaDonGoc = ?", (values.get("MaThueNCC") or "", values.get("KyHieuHD") or "",
-                                                    values.get("SoHoaDonGoc") or ""))
+            day = (values.get("NgayXuatHD") or "")[:10]
+            total = int(values.get("GiaTriSauThue") or 0)
+            comp = [r for r in comp if (_sym(r["KyHieuHD"]) and kh) or (day and (r["NgayXuatHD"] or "")[:10] == day)
+                    or (total and abs(int(r["GiaTriSauThue"] or 0) - total) <= 2)]
+        return comp[0] if len(comp) == 1 else None
 
-    def _link(self, kind: str, inv, it: Item) -> None:
-        """Hóa đơn đã có trong phần mềm: chỉ gắn tệp gốc nếu hóa đơn chưa gắn (không đổi số liệu)."""
-        if inv["TepTuongDoi"] if "TepTuongDoi" in inv.keys() else False:
-            return
-        v = {"TepTuongDoi": it.rel}
-        if it.kem:
+    def _link(self, kind: str, inv: dict, it: Item) -> str:
+        """Hóa đơn đã có trong phần mềm: chỉ ghi nhận nơi chứa tệp (không đổi số liệu). Hóa đơn đã gắn một tệp
+        khác vẫn còn trong thư mục thì giữ tệp cũ, file này coi là bản sao."""
+        cur = inv.get("TepTuongDoi")
+        root = self.root(kind)
+        v = {}
+        if cur and cur != it.rel and root and (root / cur).exists():
+            return f"Bản sao: hóa đơn đã gắn tệp {cur}"
+        if cur != it.rel:
+            v["TepTuongDoi"] = it.rel
+        if it.kem and json.dumps(it.kem, ensure_ascii=False) != inv.get("TepKem"):
             v["TepKem"] = json.dumps(it.kem, ensure_ascii=False)
-        with self.db.auto():
-            self.db.update(TABLE[kind], inv["Ma"], v, commit=False)
+        if v:
+            with self.db.auto():
+                self.db.update(TABLE[kind], inv["Ma"], v, commit=False)
+            inv.update(v)
+        return ""
 
-    def prepare(self, kind: str, it: Item, mst_cty: str = "") -> tuple[dict, list[str], str | None]:
-        """Giá trị để lưu + lưu ý + lý do phải để nhân viên xem (None = thêm tự động được)."""
+    DIFF = {"vao": (("NgayNhanHD", "Ngày hóa đơn", "date"), ("GiaTriTruocThue", "Tiền trước thuế", "money"),
+                    ("VAT", "Tiền thuế", "money")),
+            "ra": (("NgayXuatHD", "Ngày lập", "date"), ("GiaTriTruocThue", "Tiền trước thuế", "money"),
+                   ("VAT", "Tiền thuế", "money"), ("MSTNguoiMua", "MST người mua", "mst"))}
+
+    def diff(self, kind: str, inv: dict, values: dict) -> list[tuple[str, str, str, str]]:
+        """Trường số liệu khác nhau giữa phần mềm và file (chỉ so khi cả hai bên đều có): (cột, tên, cũ, mới)."""
+        out = []
+        for col, label, typ in self.DIFF[kind]:
+            a, b = inv.get(col), values.get(col)
+            if a in (None, "") or b in (None, "", 0):
+                continue
+            if typ == "money":
+                if abs(int(a or 0) - int(b or 0)) > 2:
+                    out.append((col, label, fmt_money(a), fmt_money(b)))
+            elif typ == "date":
+                if str(a)[:10] != str(b)[:10]:
+                    out.append((col, label, str(a)[:10], str(b)[:10]))
+            elif _mst(a) != _mst(b):
+                out.append((col, label, str(a), str(b)))
+        return out
+
+    def values_for(self, kind: str, it: Item, mst_cty: str = "") -> tuple[dict, list[str]]:
         values, notes = invoice_values(kind, it.data, it.path, mst_cty)
         values.update(TepTuongDoi=it.rel, TepKem=json.dumps(it.kem, ensure_ascii=False) if it.kem else None,
                       NguonSoLieu=it.source)
+        if it.warn:
+            notes.append(it.warn)
+        return values, notes
+
+    def review_reason(self, kind: str, it: Item, values: dict, mst_cty: str = "") -> str | None:
+        """Lý do phải để nhân viên xem (None = thêm tự động được). Ghi thêm MaHopDong, _GoiY vào values."""
         missing = [label for key, label in REQUIRED[kind] if not values.get(key)]
         if missing:
-            return values, notes, "Thiếu " + ", ".join(missing)
+            return "Thiếu " + ", ".join(missing)
         m = invoice_match.match_contract(self.db, kind, it.data)
         if kind == "ra":
             if not m.ma:
-                return values, notes, "Chưa nhận ra hợp đồng" + (f": {m.note}" if m.note else "")
+                return "Chưa nhận ra hợp đồng" + (f": {m.note}" if m.note else "")
             values["MaHopDong"] = m.ma
         else:
             values["MaHopDong"] = m.ma or None
@@ -358,11 +592,15 @@ class InvoiceFolders:
         check = dupl.out_invoices if kind == "ra" else dupl.in_invoices
         found = check(self.db, values)
         if found:
-            return values, notes, "Nghi trùng: " + found[0]
-        if kind == "vao" and mst_cty and it.data.get("MSTNguoiMua") and \
-                "".join(c for c in it.data["MSTNguoiMua"] if c.isdigit()) != "".join(c for c in mst_cty if c.isdigit()):
-            return values, notes, f"MST người mua {it.data['MSTNguoiMua']} khác MST công ty"
-        return values, notes, None
+            return "Nghi trùng: " + found[0]
+        if kind == "vao" and mst_cty and it.data.get("MSTNguoiMua") and _mst(it.data["MSTNguoiMua"]) != _mst(mst_cty):
+            return f"MST người mua {it.data['MSTNguoiMua']} khác MST công ty"
+        return it.warn or None
+
+    def prepare(self, kind: str, it: Item, mst_cty: str = "") -> tuple[dict, list[str], str | None]:
+        """Giá trị để lưu + lưu ý + lý do phải để nhân viên xem (None = thêm tự động được)."""
+        values, notes = self.values_for(kind, it, mst_cty)
+        return values, notes, self.review_reason(kind, it, values, mst_cty)
 
     def save(self, kind: str, values: dict) -> str:
         """Thêm hóa đơn (đã rà soát trùng). Số liệu đọc từ file nên là dữ liệu tự động."""
@@ -373,12 +611,14 @@ class InvoiceFolders:
             return cs.save_out_invoice(v) if kind == "ra" else cs.save_in_invoice(v)
 
     def process(self, kind: str, items: list[Item], *, mst_cty: str = "", auto_add: bool | None = None) -> dict:
-        """Ghi kết quả đọc vào CSDL: tự thêm hóa đơn rõ ràng, hóa đơn đã có thì gắn tệp, còn lại để Cần xem.
-        Trả {them: [mã], can_xem: n, co_san: n, cho_gemini: n}."""
+        """Ghi kết quả đọc vào CSDL: tự thêm hóa đơn mới rõ ràng; hóa đơn đã có thì chỉ ghi nhận nơi chứa tệp (số
+        liệu khác thì để nhân viên xem); còn lại để Cần xem.
+        Trả {them: [mã], can_xem: n, co_san: n, lech: n, cho_gemini: n}."""
         first = self.first_scan(kind)
         if auto_add is None:
             auto_add = self.flag(K_AUTO_ADD) and not first
-        res = {"them": [], "can_xem": 0, "co_san": 0, "cho_gemini": 0, "lan_dau": first}
+        res = {"them": [], "can_xem": 0, "co_san": 0, "lech": 0, "cho_gemini": 0, "lan_dau": first}
+        idx = self._index(kind)
         seen: set[tuple] = set()
         for it in items:
             for rel in it.kem:
@@ -388,28 +628,49 @@ class InvoiceFolders:
                 if it.offline:                        # mất kết nối Gemini: chưa ghi nhớ, lần quét sau đọc lại
                     res["cho_gemini"] += 1
                     continue
-                self._mark(kind, it.rel, it.path, F_REVIEW, note=it.error or "Không đọc được")
+                self._mark(kind, it.rel, it.path, F_REVIEW, note=it.error or "Không đọc được",
+                           data={"not_invoice": True} if it.not_invoice else None)
                 res["can_xem"] += 1
                 continue
+            raw = {"raw": it.data, "src": it.source}
             try:
-                values, notes, why = self.prepare(kind, it, mst_cty)
+                values, notes = self.values_for(kind, it, mst_cty)
+                inv = self._existing(kind, values, idx)
             except Exception as e:  # noqa: BLE001 - dữ liệu đọc được lỗi bất thường: để nhân viên xem
-                self._mark(kind, it.rel, it.path, F_REVIEW, note=f"Lỗi khi đọc số liệu: {e}")
+                self._mark(kind, it.rel, it.path, F_REVIEW, note=f"Lỗi khi đọc số liệu: {e}", data=raw)
                 res["can_xem"] += 1
                 continue
-            inv = self._existing(kind, values)
+            old = it.old or {}
             if inv is not None:
-                self._link(kind, inv, it)
-                self._mark(kind, it.rel, it.path, F_EXISTS, inv["Ma"])
+                note = self._link(kind, inv, it)
+                diff = self.diff(kind, inv, values)
+                if diff:
+                    self._mark(kind, it.rel, it.path, F_CONFLICT, inv["Ma"],
+                               note="Đã có trong phần mềm, số liệu trong file khác: "
+                                    + "; ".join(f"{label} {a} → {b}" for _c, label, a, b in diff)
+                                    + (" (Gemini đọc, nên mở file xem lại)" if it.source == SRC_GEMINI else ""),
+                               data=_dump(values, notes, it))
+                    res["lech"] += 1
+                    res["can_xem"] += 1
+                    continue
+                keep = old.get("TrangThai") == F_ADDED and old.get("MaHoaDon") == inv["Ma"]
+                self._mark(kind, it.rel, it.path, F_ADDED if keep else F_EXISTS, inv["Ma"],
+                           note=note or (old.get("GhiChu") if keep else ""), data=raw)
                 res["co_san"] += 1
                 continue
             key = invoice_key(kind, it.data)
             if key in seen and key[2]:
                 self._mark(kind, it.rel, it.path, F_REVIEW, note="Trùng với file khác trong cùng lượt quét",
-                           data=_dump(values, notes))
+                           data=_dump(values, notes, it))
                 res["can_xem"] += 1
                 continue
             seen.add(key)
+            try:
+                why = self.review_reason(kind, it, values, mst_cty)
+            except Exception as e:  # noqa: BLE001
+                why = f"Lỗi khi đọc số liệu: {e}"
+            if why is None and (old.get("GhiChu") or "").startswith("Lần quét đầu"):
+                why = old["GhiChu"]                  # hóa đơn cũ từ lần quét đầu: vẫn chờ nhân viên chọn
             if why is None and not auto_add:
                 why = "Lần quét đầu: chờ nhân viên chọn thêm" if first else "Chờ nhân viên thêm (đang tắt tự thêm)"
             if why is None:
@@ -418,15 +679,34 @@ class InvoiceFolders:
                 except (ValidationError, DuplicateWarning) as e:
                     why = str(e)
                 else:
-                    self._mark(kind, it.rel, it.path, F_ADDED, ma)
+                    self._mark(kind, it.rel, it.path, F_ADDED, ma, data=raw)
+                    row = self.db.get(TABLE[kind], ma)
+                    if row is not None:
+                        idx.setdefault(_num(values.get("SoHoaDon" if kind == "ra" else "SoHoaDonGoc")),
+                                       []).append(dict(row))
                     res["them"].append(ma)
                     continue
-            self._mark(kind, it.rel, it.path, F_REVIEW, note=why, data=_dump(values, notes))
+            self._mark(kind, it.rel, it.path, F_REVIEW, note=why, data=_dump(values, notes, it))
             res["can_xem"] += 1
         if first and not res["cho_gemini"]:
             self.db.set_setting(K_SCANNED[kind], self.db.setting(K_DIR[kind]))
         self.db.conn.commit()
         return res
+
+    def apply_file_values(self, kind: str, rel: str) -> list[tuple[str, str, str, str]]:
+        """File có số liệu khác hóa đơn trong phần mềm: nhân viên chọn cập nhật theo file (đã xác nhận cũ → mới)."""
+        r = self._rows(kind).get(rel)
+        if not r or not r["MaHoaDon"]:
+            return []
+        inv = self.db.get(TABLE[kind], r["MaHoaDon"])
+        values = load_values(json.loads(r["DuLieu"]) if r["DuLieu"] else None)
+        if inv is None or not values:
+            return []
+        diff = self.diff(kind, dict(inv), values)
+        if diff:
+            self.db.update(TABLE[kind], inv["Ma"], {c: values[c] for c, *_ in diff})
+        self.set_status(kind, [rel], F_EXISTS, inv["Ma"], note="Đã cập nhật số liệu theo file")
+        return diff
 
     # ---- danh sách cho cửa sổ "Thư mục hóa đơn"
     def files(self, kind: str | None = None, status: str | None = None) -> list[dict]:
@@ -446,7 +726,7 @@ class InvoiceFolders:
         for r in rows:
             r["HoaDon"] = invs.get((r["Chieu"], r["MaHoaDon"])) if r["MaHoaDon"] else None
             r["Data"] = json.loads(r["DuLieu"]) if r["DuLieu"] else None
-            if r["HoaDon"] is None and r["TrangThai"] in (F_ADDED, F_EXISTS):
+            if r["HoaDon"] is None and r["TrangThai"] in (F_ADDED, F_EXISTS, F_CONFLICT):
                 r["TrangThai"] = F_REVIEW if r["TrangThai"] == F_ADDED else r["TrangThai"]
                 r["GhiChu"] = r["GhiChu"] or "Hóa đơn đã bị xóa khỏi phần mềm"
         return rows
@@ -469,7 +749,7 @@ class InvoiceFolders:
         self.db.conn.commit()
 
     def review_count(self) -> int:
-        return self.db.one("SELECT COUNT(*) c FROM TepDaQuet WHERE TrangThai = ?", (F_REVIEW,))["c"]
+        return self.db.one("SELECT COUNT(*) c FROM TepDaQuet WHERE TrangThai IN (?, ?)", F_OPEN)["c"]
 
     def save_summary(self, summary: dict) -> None:
         self.db.set_setting(K_LAST, now_iso())
@@ -482,9 +762,12 @@ class InvoiceFolders:
             return {}
 
 
-def _dump(values: dict, notes: list[str]) -> dict:
+def _dump(values: dict, notes: list[str], it: Item | None = None) -> dict:
     v = {k: val for k, val in values.items() if k not in ("_Dong", "_GoiY")}
-    return {"values": v, "dong": values.get("_Dong"), "notes": notes}
+    out = {"values": v, "dong": values.get("_Dong"), "notes": notes}
+    if it is not None:
+        out.update(raw=it.data, src=it.source)
+    return out
 
 
 def load_values(data: dict | None) -> dict:

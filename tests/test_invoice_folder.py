@@ -254,3 +254,89 @@ def test_gemini_retired_model_switches_to_available_one(company, monkeypatch):
     assert db.setting(gm.K_MODEL) == "gemini-3.8-flash" and svc.client().model == "gemini-3.8-flash"
     assert gm.best_model(["gemini-3.8-flash", "gemini-4.1-flash", "gemini-4.1-flash-lite"], "x-flash") == "gemini-4.1-flash"
     assert gm.best_model(["gemini-flash-latest"], "gemini-2.5-flash") == "gemini-flash-latest"
+
+
+def test_existing_invoices_only_link_file_conflict_and_rescan(company, tmp_path):
+    """Hóa đơn đã nhập tay (số có số 0 đầu, ký hiệu kèm mẫu số / để trống): quét chỉ ghi nhận nơi chứa tệp, không
+    báo nghi trùng; số liệu khác thì để Cần xem; xóa bản sao khỏi thư mục thì quên file; xét lại file Cần xem."""
+    from qlhd.core.contracts import ContractService
+    from qlhd.core.invoice_folder import F_CONFLICT
+    db = company["kt"].db
+    d0 = sample_data(db)
+    cs = ContractService(db)
+    a = cs.save_in_invoice({"SoHoaDonGoc": "0000201", "KyHieuHD": "1C26TMA", "TenNhaCungCap": "Cửa hàng Tin học A",
+                            "MaThueNCC": "0400000004", "NgayNhanHD": "2026-11-10", "GiaTriTruocThue": 1_000_000,
+                            "VAT": 100_000})
+    b = cs.save_in_invoice({"SoHoaDonGoc": "202", "TenNhaCungCap": "Cửa hàng Tin học A", "MaThueNCC": "0400000004",
+                            "NgayNhanHD": "2026-11-10", "GiaTriTruocThue": 900_000, "VAT": 90_000})
+    db.update("HoaDonDauVao", a, {"MatHang": "kế toán đã sửa"})
+    vao, ra = tmp_path / "vao", tmp_path / "ra"
+    f = InvoiceFolders(db)
+    _xml(vao / "201.xml", 201)
+    _xml(vao / "202.xml", 202)                                         # số tiền khác hóa đơn đã nhập
+    _xml(vao / "ban sao" / "201.xml", 201)
+    _xml(ra / "hd12.xml", 12, mst="0100000001", kh="1C26TAA")           # hóa đơn đầu ra đã có (C26TAA số 12)
+    f.save_settings({"vao": str(vao), "ra": str(ra)})
+    r = _scan(f, "vao")
+    assert r["co_san"] == 2 and r["lech"] == 1 and r["them"] == []
+    inv = db.get("HoaDonDauVao", a)
+    assert inv["TepTuongDoi"] == "201.xml" and inv["MatHang"] == "kế toán đã sửa"
+    st = {x["DuongDan"]: (x["TrangThai"], x["GhiChu"]) for x in f.files("vao")}
+    assert st["ban sao/201.xml"][0] == F_EXISTS and "Bản sao" in st["ban sao/201.xml"][1]
+    assert st["202.xml"][0] == F_CONFLICT and "Tiền trước thuế 900.000 → 1.000.000" in st["202.xml"][1]
+    assert db.get("HoaDonDauVao", b)["GiaTriTruocThue"] == 900_000 and db.get("HoaDonDauVao", b)["TepTuongDoi"]
+    assert f.review_count() == 1
+    assert f.apply_file_values("vao", "202.xml")[0][0] == "GiaTriTruocThue"
+    assert db.get("HoaDonDauVao", b)["GiaTriTruocThue"] == 1_000_000 and f.review_count() == 0
+    rr = _scan(f, "ra")
+    assert rr["lech"] == 1 and rr["them"] == [] and db.get("HoaDonDauRa", d0["inv"])["TepTuongDoi"] == "hd12.xml"
+    assert "Ngày lập 2026-03-01 → 2026-11-10" in f.files("ra", F_CONFLICT)[0]["GhiChu"]
+    # xóa bản sao khỏi thư mục: phần mềm quên file đó
+    (vao / "ban sao" / "201.xml").unlink()
+    assert f.prune("vao") == 1 and "ban sao/201.xml" not in {x["DuongDan"] for x in f.files("vao")}
+    # file Cần xem được xét lại mỗi lần quét: nghi trùng do có 2 file cùng hóa đơn, xóa một file thì hết
+    _xml(vao / "moi" / "301.xml", 301, tien=3_000_000)
+    _xml(vao / "moi" / "301 - Copy.xml", 301, tien=3_000_000)
+    r = _scan(f, "vao")
+    assert len(r["them"]) == 1 and r["co_san"] == 1                    # bản thứ hai nhận ra là hóa đơn vừa thêm
+    # quét lại toàn bộ: không thêm gì, không đổi số liệu
+    again = f.recheck_files("vao", everything=True)
+    items = InvoiceFolders.read("vao", again, cache=f.cache("vao", [x for x, _ in again]))
+    r = f.process("vao", items)
+    assert r["them"] == [] and r["can_xem"] == 0 and db.get("HoaDonDauVao", a)["MatHang"] == "kế toán đã sửa"
+    assert {x["TrangThai"] for x in f.files("vao")} <= {F_ADDED, F_EXISTS}
+
+
+def test_pdf_without_xml_goes_to_gemini_even_first_scan(company, tmp_path, monkeypatch):
+    from qlhd.core import invoice_folder as fo
+    from qlhd.core import pdf_invoice
+    db = company["kt"].db
+    sample_data(db)
+    root = tmp_path / "vao"
+    root.mkdir()
+    (root / "quet.pdf").write_bytes(b"%PDF-1.4 quet")
+    (root / "co_san.pdf").write_bytes(b"%PDF-1.4 chu")
+    text = {"SoHoaDon": "88", "KyHieuHD": "K26T", "KyHieuMauSo": "1", "MSTNguoiBan": "0200000002",
+            "TenNguoiBan": "Công ty Vật tư X", "NgayLap": "2026-02-10", "GiaTriTruocThue": 10_000_000, "VAT": 1_000_000,
+            "GiaTriSauThue": 11_000_000, "MSTNguoiMua": "", "TenNguoiMua": "", "ThueSuatHD": "10%", "MatHang": "x"}
+
+    def fake_pdf(path):
+        if path.endswith("co_san.pdf"):
+            return dict(text)
+        raise pdf_invoice.InvoicePDFError("PDF quét, không có lớp chữ")
+    monkeypatch.setattr(pdf_invoice, "parse_invoice", fake_pdf)
+    gem = FakeGemini(extract={"la_hoa_don": True, "ky_hieu": "C26TQQ", "so_hoa_don": "55", "ngay_lap": "2026-11-12",
+                              "ten_nguoi_ban": "Quán C", "mst_nguoi_ban": "0700000007", "tien_truoc_thue": 100_000,
+                              "tien_thue": 8_000, "tong_thanh_toan": 108_000, "thue_suat": "8%"})
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root)})
+    items = InvoiceFolders.read("vao", f.new_files("vao"), gem, known=fo.known_keys(db, "vao"))
+    assert [c[1].rsplit("/", 1)[-1] for c in gem.calls] == ["quet.pdf"]     # hóa đơn đã có: không gửi Gemini
+    r = f.process("vao", items)
+    assert r["lan_dau"] and r["co_san"] == 1 and r["can_xem"] == 1
+    rv = f.files("vao", F_REVIEW)[0]
+    assert rv["Data"]["raw"]["SoHoaDon"] == "55" and rv["Data"]["src"] == SRC_GEMINI
+    # xét lại lần sau dùng số liệu đã đọc, không gửi Gemini nữa
+    again = f.recheck_files("vao")
+    InvoiceFolders.read("vao", again, gem, cache=f.cache("vao", [x for x, _ in again]))
+    assert len(gem.calls) == 1
