@@ -568,12 +568,29 @@ class InvoiceFolders:
         cur = inv.get("TepTuongDoi")
         root = self.root(kind)
         v = {}
+        kem = json.loads(inv.get("TepKem") or "[]") if inv.get("TepKem") else []
+        is_xml = it.rel.lower().endswith(".xml")
         if cur and cur != it.rel and root and (root / cur).exists():
-            return f"Bản sao: hóa đơn đã gắn tệp {cur}"
-        if cur != it.rel:
+            cur_xml = cur.lower().endswith(".xml")
+            if cur_xml and not is_xml:                 # đã có XML, nay thêm PDF / ảnh của cùng hóa đơn: gắn kèm
+                if it.rel not in kem:
+                    v["TepKem"] = json.dumps(kem + [it.rel], ensure_ascii=False)
+                    with self.db.auto():
+                        self.db.update(TABLE[kind], inv["Ma"], v, commit=False)
+                    inv.update(v)
+                return "kem"
+            if is_xml and not cur_xml:                 # đã gắn PDF / ảnh, nay có XML: XML làm tệp chính, PDF kèm
+                v["TepTuongDoi"] = it.rel
+                kem = [cur] + [k for k in kem if k != cur]
+            else:
+                return f"Bản sao: hóa đơn đã gắn tệp {cur}"
+        elif cur != it.rel:
             v["TepTuongDoi"] = it.rel
-        if it.kem and json.dumps(it.kem, ensure_ascii=False) != inv.get("TepKem"):
-            v["TepKem"] = json.dumps(it.kem, ensure_ascii=False)
+        for k in it.kem:
+            if k not in kem:
+                kem.append(k)
+        if json.dumps(kem, ensure_ascii=False) != (inv.get("TepKem") or "[]") and kem:
+            v["TepKem"] = json.dumps(kem, ensure_ascii=False)
         if v:
             with self.db.auto():
                 self.db.update(TABLE[kind], inv["Ma"], v, commit=False)
@@ -677,6 +694,11 @@ class InvoiceFolders:
             old = it.old or {}
             if inv is not None:
                 note = self._link(kind, inv, it)
+                if note == "kem":
+                    self._mark(kind, it.rel, it.path, F_COMPANION, inv["Ma"],
+                               note=f"Cùng hóa đơn với {Path(inv['TepTuongDoi']).name}", data=raw)
+                    res["co_san"] += 1
+                    continue
                 diff = self.diff(kind, inv, values)
                 if diff:
                     self._mark(kind, it.rel, it.path, F_CONFLICT, inv["Ma"],

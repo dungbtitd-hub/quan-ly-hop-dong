@@ -367,3 +367,40 @@ def test_gemini_full_fields_multi_rate_fees_discount():
     assert v["ThueSuat"] == "10%; 8%" and v["ChiTietThueSuat"] and v["PhiKhac"] == 200_000
     assert v["GiaTriSauThue"] == 1_408_000 and len(v["_Dong"]) == 3
     assert any("nhiều mức thuế" in n for n in notes)
+
+
+def test_pdf_and_xml_same_invoice_added_at_different_times_are_merged(company, tmp_path, monkeypatch):
+    """XML quét trước, PDF (tên khác) chép vào sau: PDF gắn kèm hóa đơn, không thêm trùng; ngược lại PDF trước,
+    XML sau: XML làm tệp chính, PDF thành tệp kèm."""
+    from qlhd.core import pdf_invoice
+    db = company["kt"].db
+    sample_data(db)
+    vao = tmp_path / "vao"
+    vao.mkdir()
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(vao)})
+    _scan(f, "vao")                                                    # lần đầu: thư mục trống
+    _xml(vao / "hd401.xml", 401, tien=4_000_000)
+    r = _scan(f, "vao")
+    ma = r["them"][0]
+    text = {"SoHoaDon": "0000401", "KyHieuHD": "C26TMA", "KyHieuMauSo": "1", "MSTNguoiBan": "0400000004",
+            "TenNguoiBan": "Cửa hàng Tin học A", "NgayLap": "2026-11-10", "GiaTriTruocThue": 4_000_000,
+            "VAT": 400_000, "GiaTriSauThue": 4_400_000, "MSTNguoiMua": "", "TenNguoiMua": "", "ThueSuatHD": "10%",
+            "MatHang": "Giấy A4"}
+    monkeypatch.setattr(pdf_invoice, "parse_invoice", lambda path: dict(text))
+    (vao / "ban in hoa don 401.pdf").write_bytes(b"%PDF-1.4")
+    r = _scan(f, "vao")
+    assert r["them"] == [] and r["can_xem"] == 0 and r["co_san"] == 1
+    inv = db.get("HoaDonDauVao", ma)
+    assert inv["TepTuongDoi"] == "hd401.xml" and json.loads(inv["TepKem"]) == ["ban in hoa don 401.pdf"]
+    assert {x["DuongDan"]: x["TrangThai"] for x in f.files("vao")}["ban in hoa don 401.pdf"] == F_COMPANION
+    # PDF trước, XML sau
+    text.update(SoHoaDon="402", GiaTriTruocThue=5_000_000, VAT=500_000, GiaTriSauThue=5_500_000)
+    (vao / "scan402.pdf").write_bytes(b"%PDF-1.4")
+    r = _scan(f, "vao")
+    ma2 = r["them"][0]
+    assert db.get("HoaDonDauVao", ma2)["TepTuongDoi"] == "scan402.pdf"
+    _xml(vao / "402.xml", 402, tien=5_000_000)
+    r = _scan(f, "vao")
+    inv = db.get("HoaDonDauVao", ma2)
+    assert r["them"] == [] and inv["TepTuongDoi"] == "402.xml" and json.loads(inv["TepKem"]) == ["scan402.pdf"]
