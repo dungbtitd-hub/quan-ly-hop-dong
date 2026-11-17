@@ -93,8 +93,11 @@ class SyncPage(QWidget):
         self.b_auto_save = button("Lưu cài đặt", self.save_auto, "Primary")
         self.b_auto_now = button("Đồng bộ ngay", self.sync_now)
         self.b_auto_now.setToolTip("Gửi ngay các thay đổi của máy này và nhận các gói mới trong thư mục chung")
+        self.b_again = button("Quét lại thư mục đồng bộ", self.receive_again)
+        self.b_again.setToolTip("Đọc lại tất cả gói của các máy khác trong thư mục chung, kể cả gói đã nhận "
+                                "(bản cũ không đè dữ liệu mới hơn; bản ghi có người sửa vẫn theo quy tắc cũ)")
         self.b_pending = button("Mở gói có bản ghi cần chọn…", self.open_pending)
-        lay.addLayout(toolbar(self.b_auto_save, self.b_auto_now, self.b_pending, "stretch"))
+        lay.addLayout(toolbar(self.b_auto_save, self.b_auto_now, self.b_again, self.b_pending, "stretch"))
         self.auto_list = DataTable([("May", "Máy gửi", "text"), ("Luc", "Thời điểm xuất", "text"),
                                     ("Ten", "Tệp", "text"), ("TT", "Trạng thái", "text")])
         lay.addWidget(self.auto_list, 1)
@@ -128,6 +131,7 @@ class SyncPage(QWidget):
         can = self.ctx.can("DongBo", "Xuat")
         self.b_auto_save.setEnabled(can)
         self.b_auto_now.setEnabled(can and self.auto.ready())
+        self.b_again.setEnabled(can and self.auto.ready())
         pending = self.auto.pending_choices()
         self.b_pending.setEnabled(bool(pending))
         self.b_pending.setText(f"Mở gói có bản ghi cần chọn ({sum(pending.values())})…" if pending
@@ -157,7 +161,7 @@ class SyncPage(QWidget):
             n = self.auto.pending_changes()
             txt = (f"<b>Đang đồng bộ tự động</b> qua {st['thu_muc']} · gửi lần cuối {last or '—'} · quét lần "
                    f"cuối {scan or '—'} · " + (f"<b>{n} thay đổi chưa gửi</b>" if n else "không có thay đổi chưa gửi"))
-            err = self.auto.last_error()
+            err = self.auto.unreachable() or self.auto.last_error()
             if err:
                 txt += f"<br><span style='color:{style.color('danger')}'>Lỗi: {err}</span>"
             if not self.auto.ready():
@@ -209,6 +213,19 @@ class SyncPage(QWidget):
             p = self.auto.send_if_changed(self.ctx.user)
             r = self.auto.receive(self.ctx.user)
             info(self, ("Đã gửi các thay đổi. " if p else "") + f"Nhận {r.nhan} gói.")
+        self.refresh_auto()
+
+    def receive_again(self):
+        if not confirm(self, "Quét lại toàn bộ thư mục đồng bộ, nhận lại cả các gói đã nhận?\n\n"
+                             "Dữ liệu cũ hơn không đè dữ liệu mới hơn trên máy này; bản ghi hai máy cùng có người "
+                             "sửa vẫn để anh/chị chọn."):
+            return
+        win = self.window()
+        if hasattr(win, "receive_again"):
+            win.receive_again()
+        else:
+            r = self.auto.receive(self.ctx.user, again=True)
+            info(self, f"Đã quét lại {r.nhan} gói." + (("\nLỗi: " + "; ".join(r.loi[:3])) if r.loi else ""))
         self.refresh_auto()
 
     def open_pending(self):

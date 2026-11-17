@@ -594,9 +594,11 @@ class SyncService:
         return d
 
     def apply(self, pkg: Package, *, user, decisions: dict | None = None, prefer: str | None = None,
-              only_groups: set | None = None) -> dict:
+              only_groups: set | None = None, history: bool = True) -> dict:
         """decisions: {(bảng, mã bên gửi): hành động}. only_groups: chỉ đồng bộ các hợp đồng đã chọn.
-        Đồng bộ tất cả (only_groups None) nhận cả cài đặt phần mềm dùng chung trong gói."""
+        Đồng bộ tất cả (only_groups None) nhận cả cài đặt phần mềm dùng chung trong gói.
+        history=False (nhận lại gói đã nhận): không ghi lần nhận mới, để mốc so sánh "ai sửa sau lần nhận trước"
+        giữ nguyên – nếu không, gói cũ đọc lại sẽ kéo lùi mốc và bản của máy gửi đè chỗ máy này vừa sửa."""
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup = self.backup_dir() / f"QuanLyHopDong-truoc-dong-bo-{stamp}.db"
         self.db.backup_to(backup)
@@ -671,10 +673,11 @@ class SyncService:
                    f"(bổ sung thông tin {result['bo_sung']}), "
                    f"bỏ qua {result['bo_qua']}, chưa xử lý {result['chua_xu_ly']}, lỗi {result['loi']}"
                    + (f", cài đặt {result['cai_dat']}" if result["cai_dat"] else ""))
-        self.db.conn.execute(
-            "INSERT INTO LichSuDongBo (MaMayDoiTac, TenMayDoiTac, Chieu, ThoiDiem, MocDuLieu, PhamVi, KetQua, TenDangNhap)"
-            " VALUES (?, ?, 'Nhận', ?, ?, ?, ?, ?)",
-            (h["may_gui"], h["ten_may"], now_iso(), h["thoi_diem"], h["pham_vi"], summary, user["TenDangNhap"]))
+        if history:
+            self.db.conn.execute(
+                "INSERT INTO LichSuDongBo (MaMayDoiTac, TenMayDoiTac, Chieu, ThoiDiem, MocDuLieu, PhamVi, KetQua,"
+                " TenDangNhap) VALUES (?, ?, 'Nhận', ?, ?, ?, ?, ?)",
+                (h["may_gui"], h["ten_may"], now_iso(), h["thoi_diem"], h["pham_vi"], summary, user["TenDangNhap"]))
         self.db.conn.commit()
         self.db.set_setting("dong_bo_hoan_tac", str(backup))
         self.db.log(user["TenDangNhap"], "Nhận gói đồng bộ", summary)

@@ -153,3 +153,45 @@ def test_partial_file_ignored(company, tmp_path):
     fg = _folder(gd, shared)
     assert fg.receive(gd.user).nhan == 0
     os.remove(shared / "DongBo_dang_ghi.qlhd")
+
+
+def test_new_packages_seen_quickly_and_receive_again_keeps_newest(company, tmp_path):
+    kt, gd = company["kt"], company["gd"]
+    d0 = sample_data(kt.db)
+    shared = tmp_path / "chung"
+    shared.mkdir()
+    fk, fg = _start(kt, gd, shared)
+    assert not fg.has_new()
+    kt.db.update("HopDong", d0["hd"], {"GhiChu": "lần 1"})
+    assert fk.send_if_changed(kt.user)
+    assert fg.has_new()                                   # kiểm tra nhanh thấy gói mới
+    assert fg.receive(gd.user).nhan == 1
+    assert not fg.has_new()
+    time.sleep(1.1)
+    kt.db.update("HopDong", d0["hd"], {"GhiChu": "lần 2"})
+    assert fk.send_if_changed(kt.user)
+    assert fg.has_new() and fg.receive(gd.user).nhan == 1  # lần sửa sau vẫn nhận được
+    assert gd.db.get("HopDong", d0["hd"])["GhiChu"] == "lần 2"
+    # quét lại toàn bộ: đọc lại cả 2 gói, bản cũ ("lần 1") không đè bản mới
+    r = fg.receive(gd.user, again=True)
+    assert r.nhan == 2 and not r.loi
+    assert gd.db.get("HopDong", d0["hd"])["GhiChu"] == "lần 2"
+    # máy nhận sửa sau đó: quét lại không đè chỗ người dùng máy này vừa sửa
+    time.sleep(1.1)
+    gd.db.update("HopDong", d0["hd"], {"GhiChu": "giám đốc sửa"})
+    fg.receive(gd.user, again=True)
+    assert gd.db.get("HopDong", d0["hd"])["GhiChu"] == "giám đốc sửa"
+    assert fg.receive(gd.user).nhan == 0                  # quét lại không làm mất dấu "đã nhận"
+
+
+def test_unreachable_folder_is_reported(company, tmp_path):
+    kt, gd = company["kt"], company["gd"]
+    sample_data(kt.db)
+    shared = tmp_path / "chung"
+    shared.mkdir()
+    fk, fg = _start(kt, gd, shared)
+    shared.rename(tmp_path / "doi_ten")
+    r = fg.receive(gd.user)
+    assert r.loi and "Không đọc được thư mục đồng bộ chung" in r.loi[0]
+    assert "Không đọc được" in fg.last_error()
+    assert not fg.has_new()

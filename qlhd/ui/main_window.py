@@ -38,6 +38,7 @@ from .invoice_files import FolderSettingsDialog, InvoiceFolderDialog, Scanner, s
 
 PAGE_ROLE = Qt.UserRole          # chỉ số trang trong stack; None = dòng tiêu đề nhóm
 BADGE_ROLE = Qt.UserRole + 1     # số hiện trên huy hiệu đỏ
+PEEK_MS = 2 * 60_000             # cứ 2 phút xem thư mục đồng bộ có gói mới từ máy khác không
 
 
 class _ActivityFilter(QObject):
@@ -212,6 +213,8 @@ class MainWindow(QMainWindow):
         self.send_timer.timeout.connect(self._auto_send)
         self.recv_timer = QTimer(self)
         self.recv_timer.timeout.connect(lambda: self._auto_receive(False))
+        self.peek_timer = QTimer(self)          # kiểm tra nhanh gói mới từ máy khác (chỉ đọc phần đầu tệp)
+        self.peek_timer.timeout.connect(self._peek_receive)
         self.restart_auto_sync()
         self._paint_status_buttons()
 
@@ -584,11 +587,13 @@ class MainWindow(QMainWindow):
         st = self.auto_sync.settings()
         self.send_timer.stop()
         self.recv_timer.stop()
+        self.peek_timer.stop()
         if st["thu_muc"]:
             if st["tu_gui"]:
                 self.send_timer.start(max(1, st["gui_phut"]) * 60_000)
             if st["tu_nhan"]:
                 self.recv_timer.start(max(5, st["nhan_phut"]) * 60_000)
+                self.peek_timer.start(PEEK_MS)
         self._paint_status_buttons()
 
     def _paint_status_buttons(self) -> None:
@@ -640,9 +645,18 @@ class MainWindow(QMainWindow):
             return
         self._receive_now(show=False)
 
-    def _receive_now(self, show: bool):
+    def _peek_receive(self) -> None:
+        """Máy khác vừa gửi gói vào thư mục chung thì nhận luôn, không đợi đến lượt quét định kỳ."""
         try:
-            r = self.auto_sync.receive(self.ctx.user)
+            new = self.auto_sync.has_new()
+        except Exception:  # noqa: BLE001 - tự động: không làm gián đoạn người dùng
+            return
+        if new:
+            self._auto_receive(False)
+
+    def _receive_now(self, show: bool, again: bool = False):
+        try:
+            r = self.auto_sync.receive(self.ctx.user, again=again)
         except Exception as e:  # noqa: BLE001
             if show:
                 error(self, f"Không nhận được dữ liệu đồng bộ: {e}")
@@ -675,13 +689,36 @@ class MainWindow(QMainWindow):
         if r is None:
             return
         lines = ["Đã gửi các thay đổi của máy này." if sent else "Máy này không có thay đổi mới để gửi."]
-        lines.append(f"Nhận {r.nhan} gói mới ({r.ban_ghi} bản ghi)." if r.nhan else "Không có gói mới từ máy khác.")
+        lines.append(f"Nhận {r.nhan} gói mới ({r.ban_ghi} bản ghi)." if r.nhan else
+                     "Không có gói mới từ máy khác. (Muốn nhận lại các gói đã nhận: màn Đồng bộ › "
+                     "\"Quét lại thư mục đồng bộ\".)")
         if r.cho_chon:
             lines.append(f"{r.cho_chon} bản ghi cả hai máy cùng có người sửa / nghi trùng: mở màn Đồng bộ › Tự động "
                          "› \"Mở gói có bản ghi cần chọn\".")
         if r.loi:
             lines.append("Lỗi: " + "; ".join(r.loi[:3]))
         info(self, "\n".join(lines), "Đồng bộ ngay")
+        if self.stack.currentWidget() is self.sync_page:
+            self.sync_page.refresh()
+
+    def receive_again(self) -> None:
+        """Quét lại toàn bộ thư mục đồng bộ: nhận lại cả các gói đã nhận (bản cũ không đè bản mới hơn)."""
+        if not self.auto_sync.settings()["thu_muc"]:
+            return error(self, "Chưa cài thư mục đồng bộ chung.")
+        if not self.auto_sync.ready():
+            return error(self, "Chưa nhập mật khẩu đồng bộ trên máy này (màn Đồng bộ › Tự động qua thư mục chung).")
+        r = self._receive_now(show=True, again=True)
+        if r is None:
+            return
+        if r.loi and not r.nhan:
+            return error(self, "\n".join(r.loi[:3]))
+        lines = [f"Đã quét lại {r.nhan} gói của các máy khác trong thư mục đồng bộ, cập nhật {r.ban_ghi} bản ghi."
+                 if r.nhan else "Thư mục đồng bộ không có gói nào của máy khác."]
+        if r.cho_chon:
+            lines.append(f"{r.cho_chon} bản ghi cần chọn: màn Đồng bộ › \"Mở gói có bản ghi cần chọn\".")
+        if r.loi:
+            lines.append("Lỗi: " + "; ".join(r.loi[:3]))
+        info(self, "\n".join(lines), "Quét lại thư mục đồng bộ")
         if self.stack.currentWidget() is self.sync_page:
             self.sync_page.refresh()
 
@@ -777,6 +814,7 @@ class MainWindow(QMainWindow):
         self.tg_timer.stop()
         self.send_timer.stop()
         self.recv_timer.stop()
+        self.peek_timer.stop()
         if not self.ctx.wiped:
             try:                                    # đóng phần mềm: gửi nốt thay đổi vào thư mục chung
                 self.auto_sync.send_if_changed(self.ctx.user)

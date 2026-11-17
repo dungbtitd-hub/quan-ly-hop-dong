@@ -12,6 +12,7 @@ Mỗi máy (máy kế toán, máy Giám đốc) trỏ tới cùng một thư m�
 from __future__ import annotations
 
 import json
+import sys
 import os
 import re
 import time
@@ -43,6 +44,17 @@ DEFAULT_SEND_MIN = 2
 DEFAULT_RECV_MIN = 60
 DEFAULT_CLEAN_DAYS = 3
 DEFAULT_REMIND_DAYS = 2
+
+
+def running_as_admin() -> bool:
+    """Windows: phần mềm đang chạy bằng quyền Quản trị (Windows chặn đi vào ổ Google Drive / OneDrive)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _safe(name: str) -> str:
@@ -177,13 +189,37 @@ class SyncFolder:
         return self.db.one("SELECT 1 FROM LichSuDongBo WHERE Chieu = 'Nhận' AND MaMayDoiTac = ? AND MocDuLieu = ?",
                            (header["may_gui"], header["thoi_diem"])) is not None
 
+    def unreachable(self) -> str | None:
+        """Lý do không đọc được thư mục đồng bộ chung (None nếu đọc được hoặc chưa cài)."""
+        folder = self.folder()
+        if not folder:
+            return None
+        try:
+            if folder.is_dir():
+                next(iter(folder.iterdir()), None)
+                return None
+            why = "không thấy thư mục (ổ đám mây chưa chạy / chưa đăng nhập, hoặc đã đổi tên)"
+        except OSError as e:
+            why = f"Windows không cho đọc ({e.strerror or e})"
+        msg = f"Không đọc được thư mục đồng bộ chung {folder}: {why}."
+        if running_as_admin():
+            msg += (" Phần mềm đang chạy bằng quyền Quản trị nên Windows chặn thư mục Google Drive / OneDrive: "
+                    "hãy tắt phần mềm và mở lại từ biểu tượng trên Desktop (không chọn Run as administrator).")
+        return msg
+
     def packages(self) -> list[tuple[Path, dict]]:
         """Các gói trong thư mục (bỏ tệp đang ghi dở, tệp không đọc được), sắp theo thời điểm xuất."""
         folder = self.folder()
         out = []
-        if not folder or not folder.is_dir():
+        if not folder:
             return out
-        for p in folder.glob(f"*{PKG_EXT}"):
+        try:
+            if not folder.is_dir():
+                return out
+            files = list(folder.glob(f"*{PKG_EXT}"))
+        except OSError:
+            return out
+        for p in files:
             try:
                 h = self.sync.read_header(p)
             except (OSError, ValueError, SyncError):
@@ -192,11 +228,17 @@ class SyncFolder:
         out.sort(key=lambda x: x[1].get("thoi_diem", ""))
         return out
 
-    def waiting(self) -> list[tuple[Path, dict]]:
+    def waiting(self, again: bool = False) -> list[tuple[Path, dict]]:
+        """Gói của máy khác cùng công ty chưa nhận. again=True: cả gói đã nhận (quét lại toàn bộ thư mục)."""
         mst = self.db.one("SELECT MaCongTy FROM BanQuyen WHERE Id = 1")
         mst = mst["MaCongTy"] if mst else None
         return [(p, h) for p, h in self.packages()
-                if h.get("may_gui") != self.db.machine_id and h.get("mst") == mst and not self._received(h)]
+                if h.get("may_gui") != self.db.machine_id and h.get("mst") == mst
+                and (again or not self._received(h))]
+
+    def has_new(self) -> bool:
+        """Kiểm tra nhanh (chỉ đọc phần đầu tệp) xem thư mục có gói mới chưa nhận không."""
+        return self.ready() and bool(self.waiting())
 
     def pending_choices(self) -> dict[str, int]:
         try:
@@ -213,16 +255,22 @@ class SyncFolder:
         if d.pop(str(path), None) is not None:
             self._set_pending(d)
 
-    def receive(self, user) -> ReceiveResult:
+    def receive(self, user, again: bool = False) -> ReceiveResult:
         """Nhận lần lượt các gói chưa nhận. Bản ghi tự xử lý được (theo quy tắc người sửa thắng tự động, bản mới hơn…)
-        được ghi ngay; bản ghi cần người chọn để lại và gói được giữ để mở ra chọn."""
+        được ghi ngay; bản ghi cần người chọn để lại và gói được giữ để mở ra chọn.
+        again=True: quét lại cả các gói đã nhận (theo thứ tự thời điểm xuất, bản cũ không đè bản mới hơn)."""
         res = ReceiveResult()
         if not self.ready() or user is None:
             return res
         self.db.set_setting(K_LAST_SCAN, now_iso())
+        bad = self.unreachable()
+        if bad:
+            res.loi.append(bad)
+            self._error(bad[:500])
+            return res
         pw = self.password()
         pending = self.pending_choices()
-        for path, h in self.waiting():
+        for path, h in self.waiting(again):
             try:
                 pkg = self.sync.read_package(path, pw)
             except SyncError as e:
@@ -236,7 +284,7 @@ class SyncFolder:
             items = self.sync.compare(pkg)
             need = [it for it in items if it.action is None and it.status in (ST_CONFLICT, ST_DUP)]
             try:
-                r = self.sync.apply(pkg, user=user)
+                r = self.sync.apply(pkg, user=user, history=not self._received(h))
             except SyncError as e:
                 res.loi.append(f"{path.name}: {e}")
                 continue
