@@ -1,5 +1,6 @@
 """Quét thư mục hóa đơn, Gemini đọc ảnh / kiểm tra / phân loại (giả lập Gemini, không gọi mạng)."""
 import json
+from pathlib import Path
 
 from qlhd.core import gemini as gm
 from qlhd.core.assets import AssetService
@@ -331,7 +332,7 @@ def test_pdf_without_xml_goes_to_gemini_even_first_scan(company, tmp_path, monke
     f = InvoiceFolders(db)
     f.save_settings({"vao": str(root)})
     items = InvoiceFolders.read("vao", f.new_files("vao"), gem, known=fo.known_keys(db, "vao"))
-    assert [c[1].rsplit("/", 1)[-1] for c in gem.calls] == ["quet.pdf"]     # hóa đơn đã có: không gửi Gemini
+    assert [Path(c[1]).name for c in gem.calls] == ["quet.pdf"]     # hóa đơn đã có: không gửi Gemini
     r = f.process("vao", items)
     assert r["lan_dau"] and r["co_san"] == 1 and r["can_xem"] == 1
     rv = f.files("vao", F_REVIEW)[0]
