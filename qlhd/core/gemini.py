@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -22,8 +23,27 @@ from . import local_secret
 from .db import now_iso
 
 API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
+LIST_API = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+# tên gọi tắt luôn trỏ tới bản mới nhất; Google ngừng cấp mô hình cũ thì phần mềm tự tìm mô hình còn dùng được
+MODELS = ["gemini-flash-latest", "gemini-pro-latest", "gemini-flash-lite-latest"]
 DEFAULT_MODEL = MODELS[0]
+_RESOLVED: dict[str, str] = {}           # mô hình đã chọn → mô hình thay thế còn dùng được (trong phiên chạy)
+
+
+def best_model(names: list[str], wanted: str = "") -> str | None:
+    """Chọn mô hình thay thế từ danh sách Google trả về: cùng loại (flash / pro / flash-lite), bản số cao nhất,
+    không phải bản thử nghiệm."""
+    kind = "flash-lite" if "lite" in wanted else "pro" if "pro" in wanted else "flash"
+    pat = re.compile(rf"^gemini-(\d+(?:\.\d+)?)-{kind}$")
+    stable = sorted(((float(m.group(1)), n) for n in names if (m := pat.match(n))), reverse=True)
+    if stable:
+        return stable[0][1]
+    alias = f"gemini-{kind}-latest"
+    if alias in names:
+        return alias
+    loose = [n for n in names if kind in n and "preview" not in n and "exp" not in n and "image" not in n
+             and "tts" not in n and "audio" not in n and "live" not in n]
+    return sorted(loose)[-1] if loose else None
 MAX_FILE = 18 * 1024 * 1024
 IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
@@ -53,7 +73,8 @@ CL_LABELS = {None: "Chưa được Gemini rà soát", "": "Chưa được Gemini
 class GeminiError(Exception):
     def __init__(self, msg: str, kind: str = "khac"):
         super().__init__(msg)
-        self.kind = kind                 # mang / khoa / han_muc / khac
+        self.kind = kind                 # mang / khoa / han_muc / chua_cai / mo_hinh / khac
+        self.detail = ""
 
     @property
     def offline(self) -> bool:
@@ -64,10 +85,45 @@ class Gemini:
     def __init__(self, key: str, model: str = DEFAULT_MODEL, timeout: float = 120):
         if not key:
             raise GeminiError("Chưa nhập khóa API Gemini (Cài đặt › Thư mục hóa đơn và Gemini).", "chua_cai")
-        self.key, self.model, self.timeout = key.strip(), model or DEFAULT_MODEL, timeout
+        model = model or DEFAULT_MODEL
+        self.key, self.model, self.timeout = key.strip(), _RESOLVED.get(model, model), timeout
+        self.requested = model
 
     # ---------------------------------------------------------------- gọi API
+    def list_models(self) -> list[str]:
+        """Các mô hình khóa API này dùng được để tạo nội dung."""
+        req = urllib.request.Request(LIST_API, headers={"x-goog-api-key": self.key})
+        try:
+            with urllib.request.urlopen(req, timeout=min(self.timeout, 30)) as r:
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403):
+                raise GeminiError("Khóa API Gemini không hợp lệ hoặc chưa được cấp quyền.", "khoa") from None
+            raise GeminiError(f"Không lấy được danh sách mô hình Gemini ({e.code}).", "mang") from None
+        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as e:
+            raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {getattr(e, 'reason', e)}", "mang") from None
+        return [m["name"].split("/", 1)[-1] for m in data.get("models", [])
+                if "generateContent" in (m.get("supportedGenerationMethods") or [])]
+
     def _post(self, body: dict) -> dict:
+        try:
+            return self._post_once(body)
+        except GeminiError as e:
+            if e.kind != "mo_hinh":
+                raise
+            # mô hình đã ngừng cấp / không có: tìm mô hình thay thế còn dùng được rồi gửi lại một lần
+            names = self.list_models()
+            hints = [h.rstrip(".") for h in re.findall(r"models/(gemini-[\w.\-]+)", str(e.detail or ""))]
+            new = next((h for h in hints if h != self.model and h in names), None)
+            new = new or best_model(names, self.requested)
+            if not new or new == self.model:
+                raise GeminiError(f"Mô hình {self.model} không còn dùng được và không tìm thấy mô hình thay thế. "
+                                  "Chọn mô hình khác ở Cài đặt › Thư mục hóa đơn và Gemini.") from None
+            self.model = new
+            _RESOLVED[self.requested] = new
+            return self._post_once(body)
+
+    def _post_once(self, body: dict) -> dict:
         req = urllib.request.Request(API.format(model=self.model), data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json", "x-goog-api-key": self.key})
         try:
@@ -84,6 +140,10 @@ class Gemini:
                 raise GeminiError("Gemini báo hết hạn mức sử dụng, thử lại sau.", "han_muc") from None
             if e.code >= 500:
                 raise GeminiError(f"Máy chủ Gemini đang lỗi ({e.code}), thử lại sau.", "mang") from None
+            if e.code == 404 or "no longer available" in msg or "is not found" in msg:
+                err = GeminiError(f"Mô hình {self.model} không còn dùng được: {msg[:200]}", "mo_hinh")
+                err.detail = msg
+                raise err from None
             raise GeminiError(f"Gemini từ chối yêu cầu ({e.code}): {msg[:200]}") from None
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, OSError) as e:
             raise GeminiError(f"Không kết nối được Gemini (mất mạng?): {getattr(e, 'reason', e)}", "mang") from None
@@ -211,7 +271,8 @@ class GeminiService:
         return local_secret.load(self.db, K_KEY)
 
     def model(self) -> str:
-        return self.db.setting(K_MODEL) or DEFAULT_MODEL
+        m = self.db.setting(K_MODEL) or DEFAULT_MODEL
+        return _RESOLVED.get(m, m)
 
     def configured(self) -> bool:
         return bool(self.key())
@@ -255,6 +316,9 @@ class GeminiService:
         return "chua_ro", "Gemini: đã cài khóa, chưa kết nối lần nào"
 
     def record_ok(self) -> None:
+        m = self.db.setting(K_MODEL)
+        if m and _RESOLVED.get(m) and _RESOLVED[m] != m:        # đã tự chuyển sang mô hình còn dùng được: lưu lại
+            self.db.set_setting(K_MODEL, _RESOLVED[m])
         if self.db.setting(K_STATE) != "ok":
             self.db.set_setting(K_STATE, "ok")
             self.db.set_setting(K_ERROR, None)

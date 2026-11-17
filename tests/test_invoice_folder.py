@@ -225,3 +225,31 @@ def test_gemini_check_compare_and_api_errors(company, monkeypatch):
     assert gm.apply_suggestion({"ma_nhom": "XX99", "do_chac": "cao"}, 1) is None
     assert gm.apply_suggestion({"ma_nhom": "TB02", "do_chac": "cao", "so_thang": 36}, 35_000_000)["PhanLoai"] == "TSCĐ"
 
+
+
+def test_gemini_retired_model_switches_to_available_one(company, monkeypatch):
+    """Google ngừng cấp mô hình cũ (404): tự lấy danh sách mô hình, chuyển sang mô hình còn dùng được, lưu lại."""
+    db = company["kt"].db
+    svc = GeminiService(db)
+    svc.save_settings({"khoa": "AIza-thu", "mo_hinh": "gemini-2.5-flash"})
+    calls = []
+
+    def post_once(self, body):
+        calls.append(self.model)
+        if self.model == "gemini-2.5-flash":
+            e = GeminiError("Mô hình gemini-2.5-flash không còn dùng được", "mo_hinh")
+            e.detail = ("This model models/gemini-2.5-flash is no longer available to new users. Please update your "
+                        "code to use models/gemini-3.8-flash for the latest features.")
+            raise e
+        return {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]}
+    monkeypatch.setattr(gm.Gemini, "_post_once", post_once)
+    monkeypatch.setattr(gm.Gemini, "list_models",
+                        lambda self: ["gemini-3.8-flash", "gemini-3.8-pro", "gemini-flash-latest", "gemini-3.9-flash-preview"])
+    monkeypatch.setattr(gm, "_RESOLVED", {})
+    g = svc.client()
+    g.ping()
+    assert calls == ["gemini-2.5-flash", "gemini-3.8-flash"] and g.model == "gemini-3.8-flash"
+    svc.record_ok()
+    assert db.setting(gm.K_MODEL) == "gemini-3.8-flash" and svc.client().model == "gemini-3.8-flash"
+    assert gm.best_model(["gemini-3.8-flash", "gemini-4.1-flash", "gemini-4.1-flash-lite"], "x-flash") == "gemini-4.1-flash"
+    assert gm.best_model(["gemini-flash-latest"], "gemini-2.5-flash") == "gemini-flash-latest"

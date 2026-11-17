@@ -600,7 +600,8 @@ class FolderSettingsDialog(QDialog):
         if g["co_khoa"]:
             krow.addWidget(button("Xóa khóa", self._clear_key))
         f.addRow("Khóa API", krow)
-        self.model = Combo([(m, m) for m in gm.MODELS], g["mo_hinh"])
+        self.model = Combo()
+        self._set_models([], g["mo_hinh"])
         f.addRow("Mô hình", self.model)
         self.state = QLabel()
         self.state.setWordWrap(True)
@@ -647,6 +648,10 @@ class FolderSettingsDialog(QDialog):
             self.key.setPlaceholderText("Dán khóa API Gemini")
             self._show_state()
 
+    def _set_models(self, names: list[str], current: str) -> None:
+        opts = list(dict.fromkeys([current] + gm.MODELS + sorted(n for n in names if n.startswith("gemini"))))
+        self.model.set_options([(m, m) for m in opts], current)
+
     def test(self):
         key = self.key.text().strip() or self.gem.key()
         if not key:
@@ -654,24 +659,32 @@ class FolderSettingsDialog(QDialog):
         g = gm.Gemini(key, self.model.value(), timeout=30)
         self.state.setText("Đang kiểm tra…")
 
-        def done(_, err):
+        def work():
+            g.ping()                   # mô hình đã ngừng cấp thì tự chuyển sang mô hình còn dùng được
+            try:
+                return g.list_models()
+            except GeminiError:
+                return []
+
+        def done(names, err):
             if err is None:
+                moved = g.model != g.requested
+                self._set_models(names or [], g.model)
+                self.gem.save_settings({"khoa": self.key.text().strip() or None, "mo_hinh": g.model})
                 if self.key.text().strip():
-                    self.gem.save_settings({"khoa": self.key.text().strip(), "mo_hinh": self.model.value()})
                     self.key.clear()
                     self.key.setPlaceholderText("Đã cài – để trống là giữ nguyên")
                 self.gem.record_ok()
-            elif isinstance(err, GeminiError):
-                if not self.key.text().strip():
-                    self.gem.record_error(err)
-                self.state.setText(str(err))
-                tagged(self.state, "Warn")
+                self._show_state()
+                if moved:
+                    self.state.setText(self.state.text() + f" · mô hình {g.requested} đã ngừng cấp, "
+                                                           f"đã chuyển sang {g.model}")
                 return
-            else:
-                self.state.setText(str(err))
-                return
-            self._show_state()
-        run_bg(g.ping, done)
+            if isinstance(err, GeminiError) and not self.key.text().strip():
+                self.gem.record_error(err)
+            self.state.setText(str(err))
+            tagged(self.state, "Warn")
+        run_bg(work, done)
 
     def save(self):
         v = {k: e.text().strip() for k, e in self.dirs.items()}
