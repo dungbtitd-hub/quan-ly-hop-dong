@@ -53,4 +53,4 @@ Name: "{group}\Gỡ cài đặt Quản lý Hợp đồng"; Filename: "{uninstall
 Name: "{autodesktop}\Quản lý Hợp đồng"; Filename: "{app}\QuanLyHopDong.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\QuanLyHopDong.exe"; Description: "Mở Quản lý Hợp đồng"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\QuanLyHopDong.exe"; Description: "Mở Quản lý Hợp đồng"; Flags: nowait postinstall skipifsilent runasoriginaluser
