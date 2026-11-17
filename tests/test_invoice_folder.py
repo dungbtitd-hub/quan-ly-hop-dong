@@ -548,3 +548,28 @@ def test_user_gemini_read_of_review_files_adds_new_and_links_existing(company, t
     assert linked["TepTuongDoi"] == "da_co.pdf"                     # hóa đơn cũ chỉ ghi nhận nơi chứa file
     assert linked["GiaTriSauThue"] == old["GiaTriSauThue"]
     assert not f.files("vao", F_REVIEW)
+
+
+def test_gemini_discount_amounts_checked_fixed_or_sent_to_review(tmp_path, monkeypatch):
+    from qlhd.core.gemini import Gemini, amounts_mismatch
+    from qlhd.core.invoice_folder import from_gemini
+    base = {"la_hoa_don": True, "so_hoa_don": "12", "ngay_lap": "2026-11-01", "ten_nguoi_ban": "Siêu thị F",
+            "mst_nguoi_ban": "0300000003"}
+    # Gemini lấy tiền hàng trước giảm giá (1.000.000), giảm 100.000: tự trừ chiết khấu cho khớp tổng
+    d = from_gemini(dict(base, tien_truoc_thue=1_000_000, tien_chiet_khau=100_000, tien_thue=72_000,
+                         tong_thanh_toan=972_000))
+    assert d["GiaTriTruocThue"] == 900_000 and d["GiaTriSauThue"] == 972_000 and not d.get("LechTien")
+    # vẫn không khớp: ghi lý do để nhân viên xem
+    d = from_gemini(dict(base, tien_truoc_thue=1_000_000, tien_thue=80_000, tong_thanh_toan=950_000))
+    assert "chưa khớp" in d["LechTien"]
+    assert amounts_mismatch({"tien_truoc_thue": 900_000, "tien_thue": 72_000, "tong_thanh_toan": 972_000}) is None
+    # lần đọc đầu không khớp → hỏi lại phần tổng tiền, lần sau khớp thì lấy
+    pdf = tmp_path / "hd.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    g = Gemini("AIza-thu", "gemini-thu-flash")
+    replies = [dict(base, tien_truoc_thue=1_000_000, tien_thue=72_000, tong_thanh_toan=972_000),
+               dict(base, tien_chiet_khau=100_000, tien_truoc_thue=900_000, tien_thue=72_000, tong_thanh_toan=972_000)]
+    monkeypatch.setattr(g, "_post", lambda body: {"candidates": [{"content": {"parts": [
+        {"text": json.dumps(replies.pop(0), ensure_ascii=False)}]}}]})
+    r = g.extract_invoice(pdf)
+    assert r["tien_truoc_thue"] == 900_000 and r["tien_chiet_khau"] == 100_000 and not replies

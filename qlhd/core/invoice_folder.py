@@ -194,8 +194,17 @@ def from_gemini(g: dict) -> dict:
     thue = money(g.get("tien_thue")) or sum(x["VAT"] or 0 for x in by_rate)
     phi = sum(t for _, t in fees)
     tong = money(g.get("tong_thanh_toan")) or (truoc + thue + phi if truoc else 0)
-    if not phi and truoc and tong - truoc - thue > 2:
+    ck = abs(money(g.get("tien_chiet_khau")))
+    tol = max(2, tong // 100_000)
+    lech = ""
+    if truoc and tong and ck and abs(truoc - ck + thue + phi - tong) <= tol < abs(truoc + thue + phi - tong):
+        truoc -= ck                                   # Gemini lấy tiền hàng trước chiết khấu / giảm giá
+    if not phi and truoc and tong - truoc - thue > tol:
         phi = tong - truoc - thue                     # tổng thanh toán lớn hơn tiền hàng + thuế: phần chênh là phí
+    if truoc and tong and abs(truoc + thue + phi - tong) > tol:
+        lech = (f"Số tiền Gemini đọc chưa khớp: trước thuế {fmt_money(truoc)} + thuế {fmt_money(thue)}"
+                + (f" + phí {fmt_money(phi)}" if phi else "") + f" ≠ tổng thanh toán {fmt_money(tong)}. "
+                "Mở file xem lại số tiền trước khi thêm.")
     hd_rate = "; ".join(rates) if len(rates) > 1 else rate(g.get("thue_suat")) or (rates[0] if rates else "")
     d = {"SoHopDong": _s(g.get("so_hop_dong")), "VanBan": _s(g.get("so_hop_dong")),
          "KyHieuMauSo": _s(g.get("mau_so")),
@@ -211,6 +220,10 @@ def from_gemini(g: dict) -> dict:
                       for x in by_rate],
          "ThueSuatHD": hd_rate, "MatHang": xml_invoice.join_items(names),
          "ChiTietThueSuat": by_rate if len(by_rate) > 1 else [], "Dong": lines}
+    if ck:
+        d["ChietKhau"] = ck
+    if lech:
+        d["LechTien"] = lech
     return d
 
 
@@ -607,6 +620,8 @@ class InvoiceFolders:
                     else:
                         gd = from_gemini(g)
                         it.data, it.source, it.error = _merge(gd, text, it), SRC_GEMINI, ""
+                        if gd.get("LechTien") and not it.warn:
+                            it.warn = gd["LechTien"]       # số tiền không khớp: để nhân viên xem, không tự thêm
                         if _complete(text) and not it.warn:
                             it.source = SRC_PDF            # lớp chữ PDF và Gemini khớp nhau: tin được
                 except GeminiError as e:

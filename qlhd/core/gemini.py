@@ -331,10 +331,12 @@ class Gemini:
         raise GeminiError("Gemini chưa đọc được hóa đơn này.")
 
     def _fill_header(self, part: dict, g: dict) -> dict:
-        """Còn thiếu thông tin chính (số, ngày, người bán, tổng tiền) thì hỏi riêng phần đầu hóa đơn (nhanh, ngắn)."""
+        """Còn thiếu thông tin chính (số, ngày, người bán, tổng tiền) hoặc số tiền không khớp (trước thuế + thuế + phí
+        ≠ tổng thanh toán, hay gặp khi Gemini lấy số trước giảm giá) thì hỏi riêng phần đầu và tổng tiền."""
         if not isinstance(g, dict) or g.get("la_hoa_don") is False:
             return g
-        if not any(_empty(g.get(k)) for k in MAIN_FIELDS):
+        bad_money = amounts_mismatch(g) is not None
+        if not bad_money and not any(_empty(g.get(k)) for k in MAIN_FIELDS):
             return g
         try:
             h = self.ask_json([part, {"text": HEADER_PROMPT}], HEADER_SCHEMA, max_tokens=4096)
@@ -342,6 +344,10 @@ class Gemini:
             if e.offline:
                 raise
             return g
+        if bad_money and amounts_mismatch(dict(h, phi_khac=g.get("phi_khac"))) is None \
+                and not _empty(h.get("tong_thanh_toan")):
+            for k in MONEY_KEYS:                     # lần hỏi riêng khớp số: lấy số tiền của lần này
+                g[k] = h.get(k)
         for k in HEADER_KEYS:
             if k != "la_hoa_don" and _empty(g.get(k)) and not _empty(h.get(k)):
                 g[k] = h[k]
@@ -377,8 +383,15 @@ biên lai… dạng ảnh chụp hoặc PDF). Đọc chính xác và trả về 
   có trên hóa đơn (VD 10% và 8%, KCT, KKKNT).
 - phi_khac: các khoản phí, lệ phí, thuế khác ngoài thuế GTGT (VD phí bảo vệ môi trường, phí dịch vụ, lệ phí trước
   bạ, thuế tiêu thụ đặc biệt ghi riêng): tên và số tiền.
-- Tổng: tiền chiết khấu (tien_chiet_khau), tổng tiền chưa thuế (tien_truoc_thue), tổng tiền thuế GTGT (tien_thue),
-  tổng tiền thanh toán (tong_thanh_toan), số tiền bằng chữ.
+- Tổng: tiền chiết khấu / giảm giá (tien_chiet_khau), tổng tiền chưa thuế (tien_truoc_thue), tổng tiền thuế GTGT
+  (tien_thue), tổng tiền thanh toán (tong_thanh_toan), số tiền bằng chữ.
+RẤT QUAN TRỌNG về số tiền khi hóa đơn có chiết khấu / giảm giá:
+- tien_truoc_thue là tiền chưa thuế SAU KHI đã trừ chiết khấu, giảm giá (dòng "Cộng tiền hàng" / "Tổng tiền chưa
+  thuế" dùng để tính thuế), KHÔNG phải tổng giá trị hàng trước giảm giá.
+- tien_thue là tiền thuế GTGT ghi trên hóa đơn (đã tính trên số sau giảm giá; hóa đơn được giảm thuế GTGT theo nghị
+  quyết thì lấy số thuế sau khi giảm).
+- tong_thanh_toan là số tiền cuối cùng người mua phải trả (dòng "Tổng tiền thanh toán"), khớp số tiền bằng chữ.
+- Phải thỏa: tien_truoc_thue + tien_thue + các khoản phi_khac = tong_thanh_toan. Không khớp thì đọc lại hóa đơn.
 Quy ước: số tiền là số nguyên (đồng), bỏ dấu chấm / phẩy phân cách nghìn. Thuế suất dạng '10%', '8%', '5%', '0%',
 'KCT' hoặc 'KKKNT'. Trường nào không có hoặc không đọc chắc chắn thì để trống (không đoán). la_hoa_don = false nếu
 tệp không phải hóa đơn."""
@@ -400,7 +413,9 @@ EXTRACT_SCHEMA = {"type": "OBJECT", "properties": {
 # luôn số hóa đơn, ngày, người bán… → phần mềm báo "Thiếu …". Thứ tự: thông tin chung, tổng tiền trước, dòng hàng
 # (dài nhất) sau cùng — trả lời bị cắt vẫn còn đủ thông tin chính.
 HEADER_KEYS = ["la_hoa_don", "mau_so", "ky_hieu", "so_hoa_don", "ngay_lap", "ten_nguoi_ban", "mst_nguoi_ban",
-               "ten_nguoi_mua", "mst_nguoi_mua", "tien_truoc_thue", "tien_thue", "tong_thanh_toan", "thue_suat"]
+               "ten_nguoi_mua", "mst_nguoi_mua", "tien_chiet_khau", "tien_truoc_thue", "tien_thue", "tong_thanh_toan",
+               "thue_suat"]
+MONEY_KEYS = ("tien_chiet_khau", "tien_truoc_thue", "tien_thue", "tong_thanh_toan")
 EXTRACT_SCHEMA["required"] = HEADER_KEYS + ["thue_theo_muc", "dong"]
 EXTRACT_SCHEMA["propertyOrdering"] = HEADER_KEYS + [k for k in EXTRACT_SCHEMA["properties"]
                                                      if k not in HEADER_KEYS and k != "dong"] + ["dong"]
@@ -409,13 +424,35 @@ HEADER_SCHEMA = {"type": "OBJECT", "properties": {k: EXTRACT_SCHEMA["properties"
 HEADER_PROMPT = """Đây là hóa đơn Việt Nam. Chỉ đọc phần thông tin chung và tổng tiền (KHÔNG cần dòng hàng): mẫu số
 (mau_so), ký hiệu (ky_hieu), số hóa đơn (so_hoa_don), ngày lập (ngay_lap, YYYY-MM-DD), tên và MST người bán, tên và MST
 người mua, tổng tiền chưa thuế (tien_truoc_thue), tiền thuế GTGT (tien_thue), tổng tiền thanh toán (tong_thanh_toan),
-thuế suất (thue_suat, VD '10%'; nhiều mức thì ghi các mức cách nhau bằng '; '). Số tiền là số nguyên (đồng). Trường
+thuế suất (thue_suat, VD '10%'; nhiều mức thì ghi các mức cách nhau bằng '; '), tiền chiết khấu / giảm giá
+(tien_chiet_khau). tien_truoc_thue là tiền chưa thuế SAU KHI trừ chiết khấu / giảm giá; tong_thanh_toan là số cuối
+cùng phải trả (khớp số tiền bằng chữ); tien_truoc_thue + tien_thue (+ phí khác nếu có) = tong_thanh_toan. Số tiền là
+số nguyên (đồng). Trường
 nào thật sự không có trên hóa đơn thì để trống. la_hoa_don = false nếu tệp không phải hóa đơn."""
 MAIN_FIELDS = ("so_hoa_don", "ngay_lap", "ten_nguoi_ban", "mst_nguoi_ban", "tong_thanh_toan")
 
 
 def _empty(v) -> bool:
     return v in (None, "", 0, [], {})
+
+
+def _int(x) -> int:
+    from .invoice_folder import _money
+    return _money(x)
+
+
+def amounts_mismatch(g: dict) -> str | None:
+    """Kiểm tra số tiền Gemini đọc: trước thuế + thuế + phí khác phải bằng tổng thanh toán (sai lệch làm tròn vài
+    đồng). Trả câu mô tả chỗ không khớp, None nếu khớp hoặc chưa đủ số để so."""
+    truoc, thue, tong = _int(g.get("tien_truoc_thue")), _int(g.get("tien_thue")), _int(g.get("tong_thanh_toan"))
+    if not tong or not truoc:
+        return None
+    phi = sum(_int(f.get("so_tien")) for f in g.get("phi_khac") or [] if isinstance(f, dict))
+    gap = truoc + thue + phi - tong
+    if abs(gap) <= max(2, tong // 100_000):
+        return None
+    return (f"trước thuế {truoc:,} + thuế {thue:,}" + (f" + phí {phi:,}" if phi else "")
+            + f" = {truoc + thue + phi:,} khác tổng thanh toán {tong:,}").replace(",", ".")
 CLASSIFY_SCHEMA = {"type": "OBJECT", "properties": {"ket_qua": {"type": "ARRAY", "items": {
     "type": "OBJECT", "properties": {"id": _S, "ma_nhom": _S, "so_thang": _I,
                                      "do_chac": {"type": "STRING", "enum": ["cao", "trung_binh", "thap"]},
