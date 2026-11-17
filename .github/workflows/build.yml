@@ -130,7 +130,7 @@ jobs:
   release:
     name: Phát hành
     # Phát hành cả khi máy macOS của GitHub không nhận việc (bị hủy): bản Windows vẫn ra, macOS bổ sung sau
-    if: always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.phat_hanh))
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.phat_hanh))
     needs: build
     runs-on: ubuntu-latest
     steps:
