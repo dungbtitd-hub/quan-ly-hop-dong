@@ -738,9 +738,18 @@ class InvoiceFolders:
     def diff(self, kind: str, inv: dict, values: dict) -> list[tuple[str, str, str, str]]:
         """Trường số liệu khác nhau giữa phần mềm và file (chỉ so khi cả hai bên đều có): (cột, tên, cũ, mới)."""
         out = []
+
+        def total(d):
+            return int(d.get("GiaTriTruocThue") or 0) + int(d.get("VAT") or 0) + int(d.get("PhiKhac") or 0)
+        tong = int(values.get("GiaTriSauThue") or 0)
+        misread = bool(tong) and abs(total(values) - tong) > 2 and (
+            abs(total(inv) - tong) <= 2 or abs(int(inv.get("GiaTriSauThue") or 0) - tong) <= 2)
         for col, label, typ in self.DIFF[kind]:
             a, b = inv.get(col), values.get(col)
             if a in (None, "") or b in (None, "", 0):
+                continue
+            if typ == "money" and misread:
+                # số đọc từ file tự nó không cộng khớp tổng thanh toán, còn số trong phần mềm khớp: file bị đọc nhầm
                 continue
             if typ == "money":
                 if abs(int(a or 0) - int(b or 0)) > 2:

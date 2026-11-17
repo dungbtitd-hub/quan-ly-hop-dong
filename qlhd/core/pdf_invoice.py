@@ -41,6 +41,15 @@ def _money(s: str) -> int:
 AMOUNT = r"(\d{1,3}(?:[.,]\d{3})+|\d+)"
 
 
+def _amounts(labels, text) -> list[int]:
+    """Mọi số tiền đứng ngay sau các nhãn (theo thứ tự xuất hiện), bỏ thuế suất ("8%") và số cột ("(5)", "6 = …")."""
+    found = []
+    for lab in labels:
+        for m in re.finditer(lab + AMOUNT + r"(?!\d)(?![.,]\d)(?!\s*%)(?!\s*=)(?!\s*\))", text, re.IGNORECASE):
+            found.append((m.start(), _money(m.group(1))))
+    return [v for _, v in sorted(found)]
+
+
 def _first(patterns, text, flags=re.IGNORECASE):
     for p in patterns:
         m = re.search(p, text, flags)
@@ -90,25 +99,46 @@ def parse_text(text: str) -> dict:
     m = _first([r"(?:Tên đơn vị|Đơn vị mua hàng|Tên người mua|Người mua hàng)(?:\s*\([^)]*\))?\s*[:：]\s*(.+)"], t)
     if m:
         out["TenNguoiMua"] = m.group(1).strip()
-    m = _first([r"C[ộo]ng ti[ềe]n h[àa]ng(?:\s*h[óo]a, d[ịi]ch v[ụu])?(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT,
-                r"C[ộo]ng ti[ềe]n (?:n[ưu][ớo]c|đi[ệe]n)(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT], flat)
-    if m:
-        out["GiaTriTruocThue"] = _money(m.group(1))
-    m = _first([r"Ti[ềe]n thu[ếe] GTGT(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT,
-                r"T[ổo]ng (?:c[ộo]ng )?ti[ềe]n thu[ếe](?: GTGT)?(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT], flat)
-    if m:
-        out["VAT"] = _money(m.group(1))
-    m = _first([r"T[ổo]ng (?:c[ộo]ng )?ti[ềe]n thanh to[áa]n(?:\s*\([^)]*\))?\s*[:：]?\s*" + AMOUNT], flat)
-    if m:
-        out["GiaTriSauThue"] = _money(m.group(1))
+    # Số tiền: lấy MỌI chỗ khớp nhãn rồi chọn bộ số cộng khớp (trước thuế + thuế + phí = tổng thanh toán). Số đi
+    # ngay sau nhãn có thể là số thứ tự cột ("Tiền thuế GTGT (5) = (4) x …", "(1)", "6 = 4 x 5") hoặc thuế suất "8%".
+    truocs = _amounts([r"C[ộo]ng ti[ềe]n h[àa]ng(?:\s*h[óo]a,? d[ịi]ch v[ụu])?(?:\s*\([^)]*\))?\s*[:：]?\s*",
+                       r"C[ộo]ng ti[ềe]n (?:n[ưu][ớo]c|đi[ệe]n)(?:\s*\([^)]*\))?\s*[:：]?\s*",
+                       r"T[ổo]ng (?:c[ộo]ng )?ti[ềe]n (?:h[àa]ng )?ch[ưu]a (?:c[óo] )?thu[ếe](?: GTGT)?(?:\s*\([^)]*\))?\s*[:：]?\s*"],
+                      flat)
+    vats = _amounts([r"T[ổo]ng (?:c[ộo]ng )?ti[ềe]n thu[ếe](?: GTGT)?(?:\s*\([^)]*\))?\s*[:：]?\s*",
+                     r"Ti[ềe]n thu[ếe] GTGT(?:\s*\([^)]*\))?\s*[:：]?\s*"], flat)
+    tongs = _amounts([r"T[ổo]ng (?:c[ộo]ng )?ti[ềe]n thanh to[áa]n(?:\s*\([^)]*\))?\s*[:：]?\s*"], flat)
     m = _first([r"Ph[íi] b[ảa]o v[ệe] m[ôo]i tr[ưu][ờo]ng[^:：]{0,60}[:：]\s*" + AMOUNT], flat)
     out["PhiKhac"] = _money(m.group(1)) if m else 0
     if out["PhiKhac"]:
         out["TenPhiKhac"] = "Phí bảo vệ môi trường"
+    phi = out["PhiKhac"]
+    tong = tongs[-1] if tongs else 0                     # dòng tổng thanh toán nằm cuối hóa đơn
+    pick = None
+    if tong:
+        for t in truocs:
+            for v in vats + [0]:
+                if abs(t + v + phi - tong) <= 2:
+                    pick = (t, v)
+                    break
+            if pick:
+                break
+        if pick is None and truocs:                      # có tiền hàng + tổng: thuế = phần chênh
+            t = max((x for x in truocs if x <= tong), default=0)
+            if t:
+                pick = (t, tong - t - phi)
+    if pick:
+        out["GiaTriTruocThue"], out["VAT"] = pick
+    else:
+        out["GiaTriTruocThue"] = truocs[0] if truocs else 0
+        big = [v for v in vats if v >= 100]               # bỏ số thứ tự cột / thuế suất bắt nhầm
+        out["VAT"] = big[-1] if big else 0
+    out["GiaTriSauThue"] = tong
     if not out["GiaTriSauThue"] and out["GiaTriTruocThue"]:
         out["GiaTriSauThue"] = out["GiaTriTruocThue"] + out["VAT"] + out["PhiKhac"]
     if not out["GiaTriTruocThue"] and out["GiaTriSauThue"]:
         out["GiaTriTruocThue"] = out["GiaTriSauThue"] - out["VAT"] - out["PhiKhac"]
+    out["KhopTien"] = bool(pick) or not tong
     m = _first([r"(?:S[ốo] h[ợo]p đ[ồo]ng|H[ợo]p đ[ồo]ng s[ốo])(?:\s*\([^)]*\))?\s*[:：]\s*([^\s,;]+)"], flat)
     if m:
         out["SoHopDong"] = m.group(1).strip(".")
@@ -123,6 +153,8 @@ def parse_text(text: str) -> dict:
     labels = {"SoHoaDon": "Số hóa đơn", "NgayLap": "Ngày lập", "KyHieuHD": "Ký hiệu",
               "MSTNguoiBan": "MST người bán", "GiaTriSauThue": "Tổng thanh toán"}
     out["ThieuTruong"] = [label for k, label in labels.items() if not out[k]]
+    if not out["KhopTien"]:
+        out["ThieuTruong"].append("Tiền thuế (số đọc được không cộng khớp tổng thanh toán)")
     return out
 
 

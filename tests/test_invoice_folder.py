@@ -609,3 +609,38 @@ def test_skipped_and_kept_files_not_reported_again_after_rescan(company, tmp_pat
             os.utime(vao / name, (1_700_000_000, 1_700_000_000))
     st = {x["DuongDan"]: (x["TrangThai"], x["GhiChu"]) for x in f.files("vao")}
     assert st["202.xml"] == (F_EXISTS, fo.NOTE_KEEP) and st["doc_nham.xml"] == (fo.F_SKIP, fo.NOTE_SKIP)
+
+
+def test_pdf_text_amounts_skip_column_numbers_and_rates():
+    from qlhd.core.pdf_invoice import parse_text
+    text = """HÓA ĐƠN GIÁ TRỊ GIA TĂNG
+Ký hiệu: 1C26TAB Số: 0000240
+Ngày 05 tháng 01 năm 2026
+Đơn vị bán hàng: Công ty G
+Mã số thuế: 0101234567
+STT Tên hàng hóa Đơn vị tính Số lượng Đơn giá Thành tiền Thuế suất Tiền thuế GTGT 5 = 4 x 3
+1 Dịch vụ A lần 1 405.000 405.000 8% 32.400
+Thuế suất GTGT: 8%
+Cộng tiền hàng: 405.000
+Tiền thuế GTGT: 32.400
+Tổng tiền thanh toán: 437.400
+"""
+    d = parse_text(text)
+    assert (d["GiaTriTruocThue"], d["VAT"], d["GiaTriSauThue"]) == (405_000, 32_400, 437_400)
+    assert not d["ThieuTruong"]
+    # chỉ có số cột sau nhãn tiền thuế: suy ra thuế = tổng - tiền hàng
+    d = parse_text(text.replace("Tiền thuế GTGT: 32.400\n", ""))
+    assert d["VAT"] == 32_400 and not d["ThieuTruong"]
+
+
+def test_misread_amounts_not_reported_as_conflict(company):
+    db = company["kt"].db
+    sample_data(db)
+    f = InvoiceFolders(db)
+    inv = {"NgayNhanHD": "2026-01-05", "GiaTriTruocThue": 3_268_250, "VAT": 261_460, "GiaTriSauThue": 3_529_710}
+    # Gemini / lớp chữ đọc nhầm tiền trước thuế (cộng không khớp tổng), phần mềm khớp tổng: không báo lệch
+    assert f.diff("vao", inv, {"GiaTriTruocThue": 3_711_750, "VAT": 261_460, "GiaTriSauThue": 3_529_710}) == []
+    assert f.diff("vao", dict(inv, VAT=261_460), {"GiaTriTruocThue": 3_268_250, "VAT": 5,
+                                                  "GiaTriSauThue": 3_529_710}) == []
+    # file cộng khớp mà khác phần mềm: vẫn báo
+    assert f.diff("vao", inv, {"GiaTriTruocThue": 3_000_000, "VAT": 240_000, "GiaTriSauThue": 3_240_000})
