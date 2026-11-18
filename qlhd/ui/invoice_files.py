@@ -205,6 +205,9 @@ class FileActions:
         except ValueError:
             pass
         self.ctx.db.update(TABLE[self.kind], inv["Ma"], v)
+        if v["TepTuongDoi"]:
+            # file đang chờ ở Cần xem (đọc không được…): nhân viên đã gắn vào hóa đơn này → thôi không báo
+            self.folders.attach_done(self.kind, v["TepTuongDoi"], inv["Ma"])
         self.after()
 
     def confirm_gemini(self, rows: list[dict]) -> None:

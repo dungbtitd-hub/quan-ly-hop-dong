@@ -820,7 +820,18 @@ class InvoiceFolders:
         res = {"them": [], "can_xem": 0, "co_san": 0, "lech": 0, "cho_gemini": 0, "lan_dau": first}
         idx = self._index(kind)
         seen: set[tuple] = set()
+        rows = self._rows(kind)
+        in_batch = {it.rel for it in items} | {k for it in items for k in it.kem}
         for it in items:
+            if it.rel.lower().endswith(".xml") and it.data is not None:
+                # XML tải về sau, cùng tên với PDF / ảnh đã quét trước (kể cả file đã bỏ qua, đọc không được):
+                # đọc số liệu từ XML, gắn PDF làm file đi kèm để mở được file gốc
+                stem = (str(Path(it.rel).parent), Path(it.rel).stem.lower())
+                for rel, r in rows.items():
+                    if rel not in in_batch and not rel.lower().endswith(".xml") and not r["MaHoaDon"] \
+                            and (str(Path(rel).parent), Path(rel).stem.lower()) == stem:
+                        it.kem.append(rel)
+                        in_batch.add(rel)
             for rel in it.kem:
                 self._mark(kind, rel, str(Path(it.path).parent.joinpath(Path(rel).name)), F_COMPANION,
                            note=f"Cùng hóa đơn với {Path(it.rel).name}")
@@ -956,6 +967,12 @@ class InvoiceFolders:
                                  " GhiChu = ?, ThoiDiem = ? WHERE Chieu = ? AND DuongDan = ?",
                                  (status, ma, note, now_iso(), kind, rel))
         self.db.conn.commit()
+
+    def attach_done(self, kind: str, rel: str, ma: str) -> None:
+        """Nhân viên tự gắn file vào hóa đơn: file đó (đang ở Cần xem / bỏ qua) ghi nhận là đã có."""
+        r = self._rows(kind).get(rel)
+        if r is not None and r["TrangThai"] in (F_REVIEW, F_CONFLICT, F_SKIP):
+            self.set_status(kind, [rel], F_EXISTS, ma, note="Nhân viên gắn tay vào hóa đơn")
 
     def forget(self, kind: str, rels: list[str]) -> None:
         """Cho quét lại các file (VD sau khi có kết nối Gemini để đọc ảnh)."""

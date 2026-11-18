@@ -700,3 +700,25 @@ def test_pdf_always_gemini_except_when_xml_of_same_invoice(company, tmp_path, mo
     assert [Path(c[1]).name for c in gem.calls] == ["le.pdf"]
     xml = [it for it in items if it.rel == "hd901.xml"][0]
     assert xml.kem == ["hd901.pdf"]                                     # mở được cả file PDF gốc
+
+
+def test_xml_downloaded_later_same_name_attaches_unreadable_pdf(company, tmp_path, monkeypatch):
+    from qlhd.core import pdf_invoice
+    db = company["kt"].db
+    sample_data(db)
+    root = tmp_path / "vao"
+    root.mkdir()
+    (root / "hd902.pdf").write_bytes(b"%PDF-1.4 khong doc duoc")
+    monkeypatch.setattr(pdf_invoice, "parse_invoice",
+                        lambda p: (_ for _ in ()).throw(pdf_invoice.InvoicePDFError("PDF quét")))
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root)})
+    _scan(f, "vao")
+    f.set_status("vao", ["hd902.pdf"], "bo_qua", note="Nhân viên bỏ qua")    # đọc không được, đã bỏ qua
+    _xml(root / "hd902.xml", 902)                                             # tải XML về, đặt cùng tên
+    r = f.process("vao", InvoiceFolders.read("vao", f.new_files("vao"), None), auto_add=True)
+    assert len(r["them"]) == 1
+    inv = db.get("HoaDonDauVao", r["them"][0])
+    assert inv["TepTuongDoi"] == "hd902.xml" and "hd902.pdf" in (inv["TepKem"] or "")
+    st = {x["DuongDan"]: x["TrangThai"] for x in f.files("vao")}
+    assert st["hd902.pdf"] == F_COMPANION and f.review_count() == 0
