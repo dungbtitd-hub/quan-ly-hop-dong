@@ -252,6 +252,48 @@ def manual_rule(table: str, theirs: dict, mine: dict, status: str, their_mark, l
     return ST_MINE, "Máy này có người sửa, thắng dữ liệu tự động"
 
 
+def field_times(row: dict | None) -> dict:
+    """Giờ sửa từng ô của bản ghi: {tên ô: (giờ, 1 người sửa / 0 tự động)}; bản cũ chưa ghi thì rỗng."""
+    try:
+        raw = json.loads((row or {}).get("NgaySuaTruong") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return {k: (str(v[0]), int(v[1])) for k, v in raw.items() if isinstance(v, (list, tuple)) and len(v) == 2 and v[0]}
+
+
+def _newer(a, b) -> bool:
+    """Giờ sửa ô a thắng b không: người sửa thắng phần mềm tự cập nhật; cùng loại thì ai sửa sau cùng thắng."""
+    return (a[1], a[0]) > (b[1], b[0])
+
+
+def lww_fields(theirs: dict, mine: dict, fallback_theirs: bool) -> list[str]:
+    """Các ô khác nhau mà bản bên gửi thắng, xét riêng từng ô theo giờ sửa ô đó. Ô cả hai bên chưa có giờ sửa
+    riêng (dữ liệu từ bản cũ) thì theo bản ghi sửa sau cùng (fallback_theirs)."""
+    tt, mt = field_times(theirs), field_times(mine)
+    bi, bl = business_fields(theirs), business_fields(mine)
+    out = []
+    for k, v in bi.items():
+        if k not in bl or v == bl.get(k):
+            continue
+        a, b = tt.get(k), mt.get(k)
+        if a and b:
+            win = _newer(a, b) or (a == b and fallback_theirs)
+        elif a or b:
+            win = bool(a)
+        else:
+            win = fallback_theirs
+        if win:
+            out.append(k)
+    return out
+
+
+def merged_times(theirs: dict, mine: dict, take: list[str]) -> str:
+    tt, mt = field_times(theirs), field_times(mine)
+    keys = set(tt) | set(mt)
+    ft = {k: list(tt[k] if k in take or (k in tt and (k not in mt or _newer(tt[k], mt[k]))) else mt[k]) for k in keys}
+    return json.dumps(ft, ensure_ascii=False, sort_keys=True)
+
+
 def business_fields(row: dict) -> dict:
     return {k: v for k, v in row.items() if k not in SYNC_FIELDS and k != "Ma"}
 
@@ -522,13 +564,15 @@ class SyncService:
                             if table == "DongHoaDonDauVao" and not r.get("TuDong") and dup_row.get("TuDong"):
                                 # máy gửi đã phân loại tay, máy này mới tự phân loại: lấy phân loại tay
                                 fill.update({k: r.get(k) for k in CLASS_FIELDS if r.get(k) != dup_row.get(k)})
+                            newer = [k for k in lww_fields(r, dup_row, False) if k not in fill]
+                            fill.update({k: r[k] for k in newer})
                             diff = [k for k in differing_fields(r, dup_row) if k not in fill]
                             note = "Nghi trùng: " + ", ".join(reasons)
                             if fill:
                                 note += " · Gộp sẽ bổ sung: " + ", ".join(field_label(k) for k in fill)
                             if diff:
                                 note += " · Khác nhau (giữ máy này): " + ", ".join(field_label(k) for k in diff)
-                            default = A_MERGE if strong else None
+                            default = A_MERGE   # cùng số + cùng đơn vị bán là cùng hóa đơn: gộp tự động
                 else:
                     bi, bl = business_fields(r), business_fields(local)
                     diff = [k for k in bi if bi.get(k) != bl.get(k)]
@@ -560,6 +604,29 @@ class SyncService:
                         if not r["DaXoa"] and not local["DaXoa"]:
                             status, why = manual_rule(table, r, local, status, their_mark, local_mark, sender)
                             note = why or note
+                            # Gộp tự động theo từng ô: ô nào bên nào sửa sau cùng thì lấy bên đó (không hỏi người dùng)
+                            fb = status == ST_THEIRS or (status == ST_CONFLICT and r["NgaySua"] >= local["NgaySua"])
+                            take = lww_fields(r, local, fb)
+                            rest = [k for k in diff if k not in take]
+                            if not take:
+                                status = ST_MINE
+                            else:
+                                merged = dict(local)
+                                merged.update({k: r[k] for k in take})
+                                for k in SYNC_FIELDS:
+                                    if k in r:
+                                        merged[k] = r[k]
+                                merged["NgaySua"] = max(r["NgaySua"], local["NgaySua"])
+                                merged["SuaTay"] = max(r.get("SuaTay") or "", local.get("SuaTay") or "") or None
+                                merged["NgaySuaTruong"] = merged_times(r, local, take)
+                                r = merged
+                                status = ST_THEIRS
+                                if rest:
+                                    note = ("Gộp theo từng ô (lấy ô sửa sau cùng): lấy bên gửi " +
+                                            ", ".join(field_label(k) for k in take) + "; giữ máy này " +
+                                            ", ".join(field_label(k) for k in rest))
+                        elif status == ST_CONFLICT:       # một bên xóa, bên kia sửa: bên làm sau cùng thắng
+                            status = ST_THEIRS if r["NgaySua"] >= local["NgaySua"] else ST_MINE
                 if table == "HopDong":
                     group = r["Ma"]
                 elif table in ("LichSuBanGiao", "LichSuNghiemThu"):
@@ -577,6 +644,8 @@ class SyncService:
                     action = A_KEEP if r.get("TuDong") else A_TAKE      # phân loại tay luôn thắng phân loại tự động
                 if status == ST_CONFLICT and action is None and prefer:
                     action = A_TAKE if prefer == "gui" else A_KEEP
+                if status == ST_CONFLICT and action is None and local is not None:
+                    action = A_TAKE if r["NgaySua"] >= local["NgaySua"] else A_KEEP     # bên sửa sau cùng thắng
                 item = SyncItem(table, row["Ma"], r["Ma"], status, action, describe(table, r), group, r, local,
                                 dup_ma, diff, note, fill)
                 if status == ST_DUP and action == A_MERGE:
@@ -629,8 +698,11 @@ class SyncService:
             if it.action == A_MERGE:
                 self.db.conn.execute("INSERT OR REPLACE INTO AnhXaMa (Bang, MaNgoai, MaNoiBo) VALUES (?, ?, ?)",
                                      (it.table, it.their_ma, it.dup_ma))
-                if it.fill:                     # giữ nguyên bản ghi máy này, chỉ điền thêm các ô còn trống
-                    self.db.update(it.table, it.dup_ma, it.fill, commit=False)
+                if it.fill:                     # giữ bản ghi máy này, điền ô còn trống + ô bên gửi sửa sau cùng
+                    ft = field_times(it.incoming)
+                    self.db.merge_fields(it.table, it.dup_ma, it.fill,
+                                         {k: list(ft[k]) if k in ft else [it.incoming.get("NgaySua"), 0]
+                                          for k in it.fill})
                     result["bo_sung"] += 1
                     if it.table == "DongHoaDonDauVao" and set(CLASS_FIELDS) & set(it.fill):
                         lines.append(it.dup_ma)

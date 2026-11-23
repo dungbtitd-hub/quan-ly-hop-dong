@@ -52,13 +52,47 @@ def test_newer_mine_conflict(company, tmp_path):
     kt.db.update("HopDong", d0["hd"], {"GhiChu": "kế toán sửa lần 2"})
     d, pkg = _send(kt, gd, tmp_path, "g4.qlhd")
     hd = next(i for i in d.compare(pkg) if i.table == "HopDong" and i.ma == d0["hd"])
-    assert hd.status == ST_CONFLICT and hd.action is None
+    # hai máy sửa hai ô khác nhau: gộp tự động theo từng ô, không hỏi
+    assert hd.status == ST_THEIRS and hd.action is not None
     res = d.apply(pkg, user=gd.user)
-    assert res["chua_xu_ly"] == 1
-    d.apply(pkg, user=gd.user, prefer="gui")
-    assert gd.db.get("HopDong", d0["hd"])["GhiChu"] == "kế toán sửa lần 2"
+    assert res["chua_xu_ly"] == 0
+    row = gd.db.get("HopDong", d0["hd"])
+    assert row["GhiChu"] == "kế toán sửa lần 2" and row["TinhTrangHopDong"] == "Hoàn thành"
     d.undo_last(gd.user)
     assert gd.db.get("HopDong", d0["hd"])["GhiChu"] == "giám đốc sửa"
+
+
+def test_same_field_last_edit_wins_and_machines_converge(company, tmp_path):
+    """Hai máy cùng sửa: ô nào máy nào sửa sau cùng thì lấy máy đó, tự động cả hai chiều, hai máy giống hệt nhau."""
+    import time
+    kt, gd = company["kt"], company["gd"]
+    d0 = sample_data(kt.db)
+    d, pkg = _send(kt, gd, tmp_path)
+    d.apply(pkg, user=gd.user)
+    d, pkg = _send(gd, kt, tmp_path, "b0.qlhd")
+    d.apply(pkg, user=kt.user)
+    kt.db.update("HopDong", d0["hd"], {"GhiChu": "kt sửa trước", "TenHopDong": "Tên do kế toán sửa"})
+    time.sleep(0.01)
+    gd.db.update("HopDong", d0["hd"], {"GhiChu": "gd sửa sau", "TinhTrangHopDong": "Hoàn thành"})
+    time.sleep(0.01)
+    kt.db.update("HopDong", d0["hd"], {"GiaTriTongSauThue": 123_000_000})
+    d, pkg = _send(kt, gd, tmp_path, "a1.qlhd")
+    assert d.apply(pkg, user=gd.user)["chua_xu_ly"] == 0
+    d, pkg = _send(gd, kt, tmp_path, "b1.qlhd")
+    assert d.apply(pkg, user=kt.user)["chua_xu_ly"] == 0
+    for m in (kt, gd):
+        row = m.db.get("HopDong", d0["hd"])
+        assert row["GhiChu"] == "gd sửa sau"                    # cùng ô: máy sửa sau cùng thắng
+        assert row["TenHopDong"] == "Tên do kế toán sửa"         # ô chỉ một máy sửa: giữ
+        assert row["TinhTrangHopDong"] == "Hoàn thành"
+        assert row["GiaTriTongSauThue"] == 123_000_000
+    # một máy xóa, máy kia sửa sau: bên làm sau cùng thắng, không hỏi
+    gd.db.soft_delete("HopDong", d0["hd"])
+    time.sleep(0.01)
+    kt.db.update("HopDong", d0["hd"], {"GhiChu": "sửa sau khi bên kia xóa"})
+    d, pkg = _send(kt, gd, tmp_path, "a2.qlhd")
+    assert d.apply(pkg, user=gd.user)["chua_xu_ly"] == 0
+    assert gd.db.get("HopDong", d0["hd"])["DaXoa"] == 0
 
 
 def test_duplicates_merge_and_keep_both(company, tmp_path):

@@ -6,6 +6,7 @@ Tiền lưu dạng số nguyên (đồng), ngày lưu dạng YYYY-MM-DD.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -20,7 +21,9 @@ SYNC_COLS = """
     DaXoa INTEGER NOT NULL DEFAULT 0,
     NgayXoa TEXT"""
 
-SYNC_FIELDS = ("NgayTao", "NgaySua", "MaMaySua", "PhienBan", "DaXoa", "NgayXoa", "SuaTay")
+SYNC_FIELDS = ("NgayTao", "NgaySua", "MaMaySua", "PhienBan", "DaXoa", "NgayXoa", "SuaTay", "NgaySuaTruong")
+# NgaySuaTruong: JSON {tên ô: [giờ sửa UTC, 1 = người sửa / 0 = phần mềm tự cập nhật]} – giờ sửa riêng từng ô, để khi
+# đồng bộ hai máy cùng sửa một bản ghi thì gộp tự động theo từng ô: ô nào máy nào sửa sau cùng thì lấy của máy đó.
 # SuaTay: giờ (UTC) người dùng sửa bản ghi lần gần nhất; trống = bản ghi chỉ do phần mềm tự tạo / tự cập nhật
 # (quét thư mục, đọc XML / PDF, Gemini, tự tính lại). Khi đồng bộ, dữ liệu người dùng đã sửa thắng dữ liệu tự động.
 
@@ -362,7 +365,7 @@ ADDED_COLUMNS = [
     ("DongHoaDonDauVao", "GeminiTT", "TEXT"),          # dong_y / da_doi / khong_chac / khac / (trống = chưa rà soát)
     ("DongHoaDonDauVao", "GeminiGoiY", "TEXT"),        # JSON {ma, phan_loai, so_thang, ly_do, do_chac}
     ("DongHoaDonDauVao", "PLTruocGemini", "TEXT"),     # JSON phân loại trước khi Gemini đổi (để trả về)
-] + [(t, "SuaTay", "TEXT") for t in SYNCED_TABLES]
+] + [(t, "SuaTay", "TEXT") for t in SYNCED_TABLES] + [(t, "NgaySuaTruong", "TEXT") for t in SYNCED_TABLES]
 
 
 def now_iso() -> str:
@@ -384,6 +387,7 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self._auto = 0
         self._has_manual: dict[str, bool] = {}
+        self._has_ft: dict[str, bool] = {}
 
     @contextmanager
     def auto(self):
@@ -402,6 +406,31 @@ class Store:
         if table not in self._has_manual:
             self._has_manual[table] = "SuaTay" in self.columns(table)
         return self._has_manual[table]
+
+    def _ft_col(self, table: str) -> bool:
+        if table not in self._has_ft:
+            self._has_ft[table] = "NgaySuaTruong" in self.columns(table)
+        return self._has_ft[table]
+
+    def _stamp_fields(self, table: str, ma: str | None, row: dict, ts: str) -> None:
+        """Ghi giờ sửa cho các ô thực sự đổi giá trị (ô giữ nguyên thì giữ giờ sửa cũ)."""
+        if not self._ft_col(table):
+            return
+        cur = self.get(table, ma) if ma else None
+        try:
+            ft = json.loads((cur["NgaySuaTruong"] if cur is not None else None) or "{}")
+        except ValueError:
+            ft = {}
+        flag = 0 if self._auto else 1
+        for k, v in row.items():
+            if k in SYNC_FIELDS or k == "Ma":
+                continue
+            if cur is None:
+                if v not in (None, ""):
+                    ft[k] = [ts, flag]
+            elif k in cur.keys() and cur[k] != v:
+                ft[k] = [ts, flag]
+        row["NgaySuaTruong"] = json.dumps(ft, ensure_ascii=False, sort_keys=True)
 
     def close(self) -> None:
         self.conn.close()
@@ -431,6 +460,8 @@ class Store:
         row.setdefault("MaMaySua", self.machine_id)
         if self._manual_col(table) and not self._auto:
             row.setdefault("SuaTay", ts)
+        if "NgaySuaTruong" not in row:
+            self._stamp_fields(table, None, row, ts)
         cols = ", ".join(row)
         marks = ", ".join("?" for _ in row)
         self.conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", list(row.values()))
@@ -445,6 +476,7 @@ class Store:
         row["MaMaySua"] = self.machine_id
         if self._manual_col(table) and not self._auto:
             row["SuaTay"] = row["NgaySua"]
+        self._stamp_fields(table, ma, row, row["NgaySua"])
         sets = ", ".join(f"{c} = ?" for c in row)
         self.conn.execute(
             f"UPDATE {table} SET {sets}, PhienBan = PhienBan + 1 WHERE Ma = ?",
@@ -463,12 +495,41 @@ class Store:
         if commit:
             self.conn.commit()
 
+    def merge_fields(self, table: str, ma: str, values: dict, times: dict, *, commit: bool = False) -> None:
+        """Đồng bộ: ghi các ô lấy từ máy khác, giữ nguyên giờ sửa từng ô của máy đó (không coi là máy này sửa)."""
+        if not values:
+            return
+        cur = self.get(table, ma)
+        row = dict(values)
+        row["NgaySua"] = max(now_iso(), cur["NgaySua"] or "")
+        row["MaMaySua"] = self.machine_id
+        if self._ft_col(table):
+            try:
+                ft = json.loads(cur["NgaySuaTruong"] or "{}")
+            except ValueError:
+                ft = {}
+            ft.update({k: t for k, t in times.items() if k in values and t})
+            row["NgaySuaTruong"] = json.dumps(ft, ensure_ascii=False, sort_keys=True)
+        sets = ", ".join(f"{c} = ?" for c in row)
+        self.conn.execute(f"UPDATE {table} SET {sets}, PhienBan = PhienBan + 1 WHERE Ma = ?", [*row.values(), ma])
+        if commit:
+            self.conn.commit()
+
     def soft_delete(self, table: str, ma: str, *, commit: bool = True) -> None:
         ts = now_iso()
+        ft_sql, params = "", [ts, ts, self.machine_id]
+        if self._ft_col(table):
+            cur = self.get(table, ma)
+            try:
+                ft = json.loads((cur["NgaySuaTruong"] if cur is not None else None) or "{}")
+            except ValueError:
+                ft = {}
+            ft["DaXoa"] = [ts, 0 if self._auto else 1]
+            ft_sql, params = ", NgaySuaTruong = ?", params + [json.dumps(ft, ensure_ascii=False, sort_keys=True)]
         self.conn.execute(
-            f"UPDATE {table} SET DaXoa = 1, NgayXoa = ?, NgaySua = ?, MaMaySua = ?, "
+            f"UPDATE {table} SET DaXoa = 1, NgayXoa = ?, NgaySua = ?, MaMaySua = ?{ft_sql}, "
             f"PhienBan = PhienBan + 1 WHERE Ma = ?",
-            (ts, ts, self.machine_id, ma),
+            (*params, ma),
         )
         if commit:
             self.conn.commit()
@@ -526,6 +587,7 @@ class Database(Store):
         source.close()
         self._restores += 1
         self._has_manual.clear()
+        self._has_ft.clear()
         self._upgrade()
         self.conn.commit()
 

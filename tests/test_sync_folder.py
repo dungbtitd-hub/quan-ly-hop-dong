@@ -66,7 +66,7 @@ def test_manual_edit_beats_auto_update(company, tmp_path):
     assert inv.status != ST_CONFLICT and inv.action is not None
 
 
-def test_both_manual_still_asks(company, tmp_path):
+def test_both_manual_last_edit_wins_without_asking(company, tmp_path):
     kt, gd = company["kt"], company["gd"]
     d0 = sample_data(kt.db)
     shared = tmp_path / "chung"
@@ -76,10 +76,12 @@ def test_both_manual_still_asks(company, tmp_path):
     gd.db.update("HopDong", d0["hd"], {"GhiChu": "gd"})
     fk.send_if_changed(kt.user)
     r = fg.receive(gd.user)
-    assert r.nhan == 1 and r.cho_chon == 1
-    assert gd.db.get("HopDong", d0["hd"])["GhiChu"] == "gd"
-    assert fg.pending_choices()
-    assert any("cần chọn" in t for t, _ in fg.warnings())
+    assert r.nhan == 1 and r.cho_chon == 0
+    assert gd.db.get("HopDong", d0["hd"])["GhiChu"] == "gd"          # máy GĐ sửa sau cùng: giữ, không hỏi
+    assert not fg.pending_choices()
+    fg.send_if_changed(gd.user)
+    assert fk.receive(kt.user).cho_chon == 0
+    assert kt.db.get("HopDong", d0["hd"])["GhiChu"] == "gd"          # máy kia tự nhận bản sửa sau cùng
 
 
 def test_two_way_changes_only_skip_received_and_no_ping_pong(company, tmp_path):
