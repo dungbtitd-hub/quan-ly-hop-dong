@@ -14,7 +14,7 @@ from ..core.reports import (CONTEXT_LABELS, CONTEXTS, DETAIL_LEVELS, INVOICE_PER
                             ContractReports, Report, ReportFilters, export_xlsx,
                             relative_range)
 from .column_picker import CheckGrid, PreviewTable
-from .widgets import (CheckList, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm_delete, hint, info,
+from .widgets import (CheckList, PickButton, Combo, DataTable, DateEdit, FormDialog, ask_text, button, confirm_delete, hint, info,
                       page_title, toolbar)
 
 TEMPLATE_PREFIX = "mau_bao_cao:"
@@ -118,10 +118,10 @@ class ReportsPage(QWidget):
         self.tach_nam.setChecked(True)
         self.tach_nam.setToolTip("Mỗi năm một nhóm có dòng Cộng năm, cuối bảng là tổng cộng. Hóa đơn, thanh toán "
                                  "của hợp đồng nằm trong năm ký hợp đồng đó; hóa đơn mua trực tiếp theo năm hóa đơn.")
-        self.loai = CheckList()
-        self.doi_tac = CheckList()
-        self.nhom = CheckList()
-        self.tinh_trang = CheckList(list(CONTRACT_STATUSES))
+        self.loai = PickButton(title="Chọn loại hợp đồng")
+        self.doi_tac = PickButton(title="Chọn chủ đầu tư / nhà cung cấp")
+        self.nhom = PickButton(title="Chọn nhóm chủ đầu tư")
+        self.tinh_trang = PickButton(list(CONTRACT_STATUSES), title="Chọn tình trạng hợp đồng")
         self.tt_tt = Combo(PAY_OPTIONS)
         self.tt_tt.setToolTip("Chỉ xét hợp đồng / hóa đơn đã xuất hóa đơn: hợp đồng chưa xuất hóa đơn không có tình "
                               "trạng thanh toán nên không nằm trong kết quả khi chọn ô này.")
@@ -130,7 +130,7 @@ class ReportsPage(QWidget):
         self.tt_xuat.currentIndexChanged.connect(lambda *_: hasattr(self, "_labels") and self._pay_enabled())
         self.lien_ket = Combo([("Tất cả", None), ("Có hợp đồng", True), ("Không có hợp đồng", False)])
         self.nhom_thue = Combo([(label, key) for key, label in TAX_MODES])
-        self.nguoi_mua = CheckList()
+        self.nguoi_mua = PickButton(title="Chọn người mua (hóa đơn đầu ra)")
         self.trong_ky = QRadioButton("Trong kỳ")
         self.luy_ke = QRadioButton("Lũy kế")
         self.luy_ke.setChecked(True)
@@ -143,8 +143,6 @@ class ReportsPage(QWidget):
         self.ky_hd.setToolTip("Chia danh sách hóa đơn theo tháng, quý hoặc năm, mỗi kỳ có dòng cộng.")
         self.cong_ky = QCheckBox("Gộp: chỉ dòng cộng mỗi kỳ")
         self.cong_ky.setToolTip("Bỏ tích để liệt kê từng hóa đơn trong từng kỳ.")
-        for lst in (self.loai, self.doi_tac, self.nhom, self.tinh_trang, self.nguoi_mua):
-            lst.setMaximumHeight(90)
         r = 0
         self._labels: dict[str, QLabel] = {}
         for label, name in (("Kỳ báo cáo", "ky_td"), ("Mức chi tiết", "muc"), ("Hóa đơn theo kỳ", "ky_hd"),
@@ -202,7 +200,8 @@ class ReportsPage(QWidget):
 
     def refresh(self):
         self.loai.set_options([(t["TenLoaiHD"], t["Ma"]) for t in self.ctx.cs.contract_types()], self.loai.values())
-        self.doi_tac.set_options([(p["TenDoiTac"], p["Ma"]) for p in self.ctx.cs.partners()], self.doi_tac.values())
+        self.doi_tac.set_options([(p["TenDoiTac"] + (f" – {p['MaSoThue']}" if p["MaSoThue"] else ""), p["Ma"])
+                                  for p in self.ctx.cs.partners()], self.doi_tac.values())
         self.nhom.set_options([(g["TenNhom"], g["Ma"]) for g in self.ctx.cs.groups()], self.nhom.values())
         self.nguoi_mua.set_options(self.cr.buyers(), self.nguoi_mua.values())
         names = self._template_names()
@@ -383,7 +382,8 @@ class ReportsPage(QWidget):
         self.gop.setChecked(f.gop_ra_vao)
         self.tach_nam.setChecked(f.tach_nam)
         self.loai.set_options([(t["TenLoaiHD"], t["Ma"]) for t in self.ctx.cs.contract_types()], f.loai_hd)
-        self.doi_tac.set_options([(p["TenDoiTac"], p["Ma"]) for p in self.ctx.cs.partners()], f.doi_tac)
+        self.doi_tac.set_options([(p["TenDoiTac"] + (f" – {p['MaSoThue']}" if p["MaSoThue"] else ""), p["Ma"])
+                                  for p in self.ctx.cs.partners()], f.doi_tac)
         self.nhom.set_options([(g["TenNhom"], g["Ma"]) for g in self.ctx.cs.groups()], f.nhom)
         self.tinh_trang.set_options(list(CONTRACT_STATUSES), f.tinh_trang)
         self.nguoi_mua.set_options(self.cr.buyers(), f.nguoi_mua)

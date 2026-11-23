@@ -36,6 +36,29 @@ def period_choices(mode: str, today: date | None = None) -> list[tuple[str, str]
     return out
 
 
+def by_date(key: str, mode: str):
+    """Hàm gom nhóm theo tháng / quý / năm của cột ngày: trả (khóa sắp xếp, nhãn)."""
+    def fn(r):
+        d = str(r.get(key) or "")[:10]
+        if len(d) < 7:
+            return ("~", "(Chưa có ngày)")
+        y, m = d[:4], int(d[5:7])
+        if mode == "thang":
+            return (d[:7], f"Tháng {m:02d}/{y}")
+        if mode == "quy":
+            q = (m - 1) // 3 + 1
+            return (f"{y}-{q}", f"Quý {q}/{y}")
+        return (y, f"Năm {y}")
+    return fn
+
+
+def by_field(key: str, empty: str = "(Chưa có)"):
+    def fn(r):
+        v = str(r.get(key) or "").strip()
+        return (v.lower() or "~", v or empty)
+    return fn
+
+
 def _digits(v) -> str:
     return "".join(ch for ch in str(v) if ch.isdigit())
 
@@ -46,12 +69,16 @@ class FilterBox(QWidget):
     changed = Signal()
 
     def __init__(self, ctx, name: str, placeholder: str, search_fields, money_keys=(), date_key: str | None = None,
-                 date_label: str = "Thời gian", filters=(), parent=None):
+                 date_label: str = "Thời gian", filters=(), groups=(), unit: str = "dòng", parent=None):
         super().__init__(parent)
         self.ctx, self.name = ctx, name
         self.search_fields = list(search_fields)
         self.money_keys = list(money_keys)
         self.date_key = date_key
+        self.unit = unit
+        # ngữ cảnh xem nhanh: [(nhãn, khóa, hàm gom nhóm)]; khóa None = từng dòng
+        self.groups = list(groups)
+        self.pin: tuple[str, str] | None = None        # đang xem chi tiết một nhóm: (khóa ngữ cảnh, nhãn nhóm)
         self._loading = False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -87,6 +114,16 @@ class FilterBox(QWidget):
         g = QGridLayout()
         g.setHorizontalSpacing(10)
         r = 0
+        self.group = None
+        if self.groups:
+            self.group = Combo([(label, key) for label, key, _ in self.groups])
+            self.group.setToolTip("Gom danh sách theo ngữ cảnh: mỗi nhóm một dòng, có số dòng và tổng tiền. "
+                                  "Bấm đúp một nhóm để xem các dòng của nhóm đó.")
+            lab = QLabel("<b>Ngữ cảnh xem</b>")
+            g.addWidget(lab, r, 0)
+            g.addWidget(self.group, r, 1)
+            r += 1
+            self.group.currentIndexChanged.connect(self._group_changed)
         self.field = Combo([("Tất cả cột", None)] + self.search_fields)
         g.addWidget(QLabel("Tìm trong"), r, 0)
         g.addWidget(self.field, r, 1)
@@ -181,6 +218,62 @@ class FilterBox(QWidget):
             return None
         return period_range(self.mode, date.fromisoformat(ref))
 
+    # ---- ngữ cảnh xem nhanh
+    def group_key(self):
+        return self.group.value() if self.group is not None else None
+
+    def _group_fn(self, key):
+        return next((fn for _, k, fn in self.groups if k == key), None)
+
+    def _group_changed(self, *_):
+        self.pin = None
+        self._emit()
+
+    def pin_group(self, gom) -> None:
+        """Bấm đúp một nhóm: xem các dòng của nhóm đó (bỏ gom, giữ lọc theo nhóm)."""
+        self.pin = tuple(gom)
+        if self.group is not None:
+            self.group.blockSignals(True)
+            self.group.setCurrentIndex(0)
+            self.group.blockSignals(False)
+        self._emit()
+
+    def apply_pin(self, rows: list[dict]) -> list[dict]:
+        """Đang xem chi tiết một nhóm (bấm đúp dòng nhóm): chỉ giữ các dòng thuộc nhóm đó."""
+        if self.pin:
+            fn = self._group_fn(self.pin[0])
+            if fn is not None:
+                rows = [r for r in rows if fn(r)[1] == self.pin[1]]
+        return rows
+
+    def finish(self, rows: list[dict], columns) -> list[dict]:
+        """Gom nhóm theo ngữ cảnh đang chọn. Dòng nhóm: _kieu "nhom", _gom (khóa, nhãn), cộng các cột tiền;
+        ô chữ đầu tiên ghi tên nhóm và số dòng. Gọi sau apply_pin."""
+        key = self.group_key()
+        fn = self._group_fn(key) if key else None
+        if fn is None:
+            return rows
+        money = [k for k, _, kind in columns if kind == "money"]
+        label_col = next((k for k, _, kind in columns if kind == "text" and k != "STT"), None)
+        buckets: dict = {}
+        for r in rows:
+            sk, label = fn(r)
+            b = buckets.setdefault((sk, label), {"n": 0, **{k: 0 for k in money}})
+            b["n"] += 1
+            for k in money:
+                try:
+                    b[k] += int(r.get(k) or 0)
+                except (TypeError, ValueError):
+                    pass
+        out = []
+        for i, ((sk, label), b) in enumerate(sorted(buckets.items(), key=lambda x: x[0][0])):
+            g = {"_kieu": "nhom", "_gom": (key, label), "STT": i + 1, **{k: b[k] for k in money}}
+            if label_col:
+                g[label_col] = f"{label}  ({b['n']} {self.unit})"
+            g["_so_dong"] = b["n"]
+            out.append(g)
+        return out
+
     # ---- lọc một dòng
     def matches(self, row: dict, keys=None) -> bool:
         q = self.text()
@@ -238,6 +331,9 @@ class FilterBox(QWidget):
         self._loading = True
         self.edit.clear()
         self.field.setCurrentIndex(0)
+        self.pin = None
+        if self.group is not None:
+            self.group.setCurrentIndex(0)
         for c in self.combos.values():
             c.setCurrentIndex(0)
         self.mode = "all"
@@ -252,6 +348,10 @@ class FilterBox(QWidget):
     def active(self) -> list[tuple[str, callable]]:
         """(nhãn, hàm bỏ lọc) của các bộ lọc đang dùng."""
         out = []
+        if self.group is not None and self.group.currentIndex() > 0:
+            out.append((f"Xem theo: {self.group.currentText()}", lambda: self.group.setCurrentIndex(0)))
+        if self.pin:
+            out.append((f"Nhóm: {self.pin[1]}", self._unpin))
         if self.field.value():
             out.append((f"Tìm trong: {self.field.currentText()}", lambda: self.field.setCurrentIndex(0)))
         rng = self.date_range()
@@ -262,6 +362,10 @@ class FilterBox(QWidget):
             if c.currentIndex() > 0:
                 out.append((f"{self.labels[key]}: {c.currentText()}", lambda c=c: c.setCurrentIndex(0)))
         return out
+
+    def _unpin(self):
+        self.pin = None
+        self._emit()
 
     def _update_chips(self):
         while self.chips.count():
@@ -299,7 +403,7 @@ class FilterBox(QWidget):
         key = self._key()
         if not key:
             return
-        state = {"field": self.field.value(), "mode": self.mode,
+        state = {"field": self.field.value(), "mode": self.mode, "group": self.group_key(),
                  "period": self.period.value() if self.date_key else None,
                  "tu": self.tu.value() if self.date_key else None, "den": self.den.value() if self.date_key else None,
                  "combos": {k: c.value() for k, c in self.combos.items()}}
@@ -316,6 +420,8 @@ class FilterBox(QWidget):
             return
         self._loading = True
         self.field.set_value(st.get("field"))
+        if self.group is not None and st.get("group"):
+            self.group.set_value(st["group"])
         for k, v in (st.get("combos") or {}).items():
             if k in self.combos:
                 self.combos[k].set_value(v)
@@ -335,4 +441,4 @@ class FilterBox(QWidget):
         self.clear(emit=False)
 
 
-__all__ = ["FilterBox", "period_choices"]
+__all__ = ["FilterBox", "by_date", "by_field", "period_choices"]

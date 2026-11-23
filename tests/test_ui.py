@@ -1238,3 +1238,55 @@ def test_every_page_filter_option_is_selectable_without_hang(qtbot, ctx, monkeyp
     page = win.contracts_page
     page.box.combo("loai").setCurrentIndex(1)
     assert page.box.value("loai") is not None
+
+
+def test_pick_button_popup_and_list_groups_with_totals(qtbot, ctx, tmp_path):
+    from qlhd.ui.contracts_page import ContractsPage
+    from qlhd.ui.invoices_page import InvoicesPage
+    from qlhd.ui.widgets import PickButton, PickDialog
+
+    b = PickButton([("Công ty A – 0101", "a"), ("Công ty B", "b"), ("Cục C – 0202", "c")], title="Chọn")
+    qtbot.addWidget(b)
+    assert b.values() == [] and "Tất cả" in b.text()
+    dlg = PickDialog("Chọn", b._options, ["a"])
+    qtbot.addWidget(dlg)
+    dlg.search.setText("0202")
+    assert dlg.table.rowCount() == 1 and dlg.table.item(0, 2).text() == "0202"
+    dlg._set_shown(True)
+    dlg.search.setText("")
+    assert dlg.values() == ["a", "c"]
+    dlg.only.setChecked(True)
+    assert dlg.table.rowCount() == 2
+    b._on = dlg.values()
+    b._show()
+    assert b.text().startswith("✔ 2 đã chọn: Công ty A, Cục C")
+    b.setEnabled(False)
+    assert "Không dùng" in b.text()
+
+    page = InvoicesPage(ctx, "ra")
+    qtbot.addWidget(page)
+    page.resize(1400, 700)
+    page.refresh()
+    invs = [r for r in page.table.rows if not r.get("_kieu")]
+    assert invs and page.table._totals is not None
+    total = sum(r["GiaTriSauThue"] for r in invs)
+    col = [k for k, _, _ in page.table.columns].index("GiaTriSauThue")
+    from qlhd.core.reports import fmt_money
+    assert page.table._totals.item(0, col).text() == fmt_money(total)
+    page.box.group.set_value("nam")                       # xem nhanh theo năm: mỗi năm một dòng có tổng tiền
+    groups = page.table.rows
+    assert groups and all(g.get("_gom") for g in groups)
+    assert sum(g["GiaTriSauThue"] for g in groups) == total
+    assert page.table._totals.item(0, col).text() == fmt_money(total)
+    assert page.table.current() is None and page.table.selected() == []
+    page.box.pin_group(groups[0]["_gom"])                 # bấm đúp một nhóm: xem các hóa đơn của nhóm đó
+    assert not any(r.get("_kieu") for r in page.table.rows) and len(page.table.rows) == groups[0]["_so_dong"]
+    page.box.clear()
+    page.grab().save(str(tmp_path / "hd_ra.png"))
+
+    cp = ContractsPage(ctx)
+    qtbot.addWidget(cp)
+    cp.refresh()
+    cp.box.group.set_value("doi_tac")
+    assert all(g.get("_gom") for g in cp.table.rows)
+    cp.box.clear()

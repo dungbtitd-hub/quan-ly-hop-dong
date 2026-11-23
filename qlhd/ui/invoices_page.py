@@ -19,7 +19,7 @@ from .contracts_page import edit_payment, payment_dialog
 from . import style
 from .in_invoice_form import InInvoiceDialog
 from .invoice_files import FileActions, display_fields
-from .filter_box import FilterBox
+from .filter_box import FilterBox, by_date, by_field
 from .widgets import (VAT_HINT, Combo, DataTable, bulk_edit, EditCombo, FormDialog, ask_secret, button, confirm, confirm_changes, confirm_delete,
                       error, hint, info, rate_field, require,
                       page_title, run_safely, toolbar, confirm_duplicate, review_duplicates)
@@ -188,7 +188,13 @@ class InvoicesPage(QWidget):
                     {"key": "tt", "label": "Thanh toán", "options": [
                         ("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du"),
                         ("Đã thu, chưa có số tham chiếu sao kê", "chua_sk")]},
-                    {"key": "hd", "label": "Hợp đồng", "options": [("Mọi hợp đồng", None)]}])
+                    {"key": "hd", "label": "Hợp đồng", "options": [("Mọi hợp đồng", None)]}],
+                groups=[("Từng hóa đơn", None, None), ("Theo người mua", "nguoi_mua", by_field("TenNguoiMua")),
+                        ("Theo hợp đồng", "hop_dong", by_field("SoHopDong")),
+                        ("Theo tình trạng thanh toán", "tt", by_field("TTThanhToan")),
+                        ("Theo tháng", "thang", by_date("NgayXuatHD", "thang")),
+                        ("Theo quý", "quy", by_date("NgayXuatHD", "quy")),
+                        ("Theo năm", "nam", by_date("NgayXuatHD", "nam"))], unit="hóa đơn")
         else:
             self.box = FilterBox(ctx, "hoa_don_vao", "Tìm số hóa đơn, người bán, MST, mặt hàng, số tiền…", [
                 ("Số hóa đơn", "SoHoaDonGoc"), ("Ký hiệu", "KyHieuHD"), ("Người bán", "TenNhaCungCap"),
@@ -205,7 +211,14 @@ class InvoicesPage(QWidget):
                     {"key": "tt", "label": "Thanh toán", "options": [
                         ("Tất cả", None), ("Đã trả (có số sao kê)", "da"), ("Chưa có số sao kê", "chua")]},
                     {"key": "ncc", "label": "Người bán", "options": [("Mọi người bán", None)]},
-                    {"key": "nguoi_mua", "label": "Người mua hàng", "options": [("Mọi người mua hàng", None)]}])
+                    {"key": "nguoi_mua", "label": "Người mua hàng", "options": [("Mọi người mua hàng", None)]}],
+                groups=[("Từng hóa đơn", None, None), ("Theo người bán", "nguoi_ban", by_field("TenNhaCungCap")),
+                        ("Theo nhóm thuế", "nhom_thue", by_field("NhomThue")),
+                        ("Theo người mua hàng", "nguoi_mua", by_field("NguoiMuaHang", "(Chưa ghi người mua hàng)")),
+                        ("Theo hợp đồng", "hop_dong", by_field("SoHopDong")),
+                        ("Theo tháng", "thang", by_date("NgayNhanHD", "thang")),
+                        ("Theo quý", "quy", by_date("NgayNhanHD", "quy")),
+                        ("Theo năm", "nam", by_date("NgayNhanHD", "nam"))], unit="hóa đơn")
         self.box.changed.connect(self.refresh)
         self.search = self.box.edit
         add_ok = ctx.can(self.feature, "Them")
@@ -269,6 +282,8 @@ class InvoicesPage(QWidget):
         cols += [("TenFileGoc", "Tên file gốc", "text"), ("ThuMuc", "Thư mục", "text"), ("GeminiHT", "Gemini", "text")]
         self.table = DataTable(cols, multi=True)      # chọn nhiều dòng (Ctrl / Shift) để sửa cùng lúc
         self.table.activated_row.connect(lambda _: self.edit())
+        self.table.group_activated.connect(self.box.pin_group)
+        self.table.show_totals("hóa đơn")
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(lambda pos: self.file_menu(self.table.viewport().mapToGlobal(pos)))
         self.files = FileActions(ctx, kind, self, self.refresh)
@@ -319,7 +334,8 @@ class InvoicesPage(QWidget):
                     continue
                 if self.box.matches(r):
                     rows.append(r)
-        self.table.set_rows(rows)
+        rows = self.box.apply_pin(rows)
+        self.table.set_rows(self.box.finish(rows, self.table.columns))
         self.total.setText(f"{len(rows)} hóa đơn · Tổng sau thuế {fmt_money(sum(r['GiaTriSauThue'] for r in rows))} đ")
 
     # ---- biểu mẫu

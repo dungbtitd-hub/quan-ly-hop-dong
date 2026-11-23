@@ -12,7 +12,7 @@ from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, INVOICE_FILTERS
                               DuplicateWarning, PAY_STATE_LABELS, TASK_STATUSES, VALUE_FILTERS, VALUE_FLAGS, ValidationError, contract_matches, contract_pay_state,
                               duration_text, end_date, invoice_filter_ok, value_filter_ok)
 from ..core.reports import fmt_date, fmt_money
-from .filter_box import FilterBox
+from .filter_box import FilterBox, by_date, by_field
 from ..core.duplicates import CONFIRM_KEY as DUP_OK, duplicate_payments
 from .widgets import (VAT_HINT, DataTable, bulk_edit, confirm_duplicate, review_duplicates, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
                       page_title,
@@ -182,7 +182,14 @@ class ContractsPage(QWidget):
                 {"key": "gia_tri", "label": "Giá trị HĐ so với hóa đơn",
                  "options": [("Tất cả", None)] + list(VALUE_FILTERS)},
                 {"key": "paid", "label": "Thanh toán", "options": [("Mọi tình trạng thanh toán", None)]
-                 + list(PAY_FILTERS)}])
+                 + list(PAY_FILTERS)}],
+            groups=[("Từng hợp đồng", None, None), ("Theo đối tác", "doi_tac", by_field("TenDoiTac")),
+                    ("Theo loại hợp đồng", "loai", by_field("LoaiHD")), ("Theo chiều", "chieu", by_field("ChieuHopDong")),
+                    ("Theo tình trạng", "tinh_trang", by_field("TinhTrangHopDong")),
+                    ("Theo tình trạng thanh toán", "tt", by_field("TTThanhToan", "(Không áp dụng)")),
+                    ("Theo tháng ký", "thang", by_date("NgayKy", "thang")),
+                    ("Theo quý ký", "quy", by_date("NgayKy", "quy")), ("Theo năm ký", "nam", by_date("NgayKy", "nam"))],
+            unit="hợp đồng")
         self.box.changed.connect(self.refresh)
         self.filter, self.status, self.paid = self.box.combo("chieu"), self.box.combo("status"), self.box.combo("paid")
         self.search = self.box.edit
@@ -211,6 +218,8 @@ class ContractsPage(QWidget):
         split = QSplitter(Qt.Vertical)
         self.table = DataTable(CONTRACT_COLS, multi=True)     # chọn nhiều dòng (Ctrl / Shift) để sửa cùng lúc
         self.table.activated_row.connect(lambda _: self.edit())
+        self.table.group_activated.connect(self.box.pin_group)
+        self.table.show_totals("hợp đồng")
         self.table.itemSelectionChanged.connect(self.refresh_detail)
         split.addWidget(self.table)
         self.detail = QTabWidget()
@@ -291,7 +300,8 @@ class ContractsPage(QWidget):
             r["LoaiHD"] = types.get(hd["MaLoaiHD"], "")
             r["ThoiGianTH"] = duration_text(hd["ThoiGianThucHien"], hd["DonViThoiGian"])
             rows.append(r)
-        self.table.set_rows(rows)
+        rows = self.box.apply_pin(rows)
+        self.table.set_rows(self.box.finish(rows, CONTRACT_COLS))
         tot = sum(r["GiaTriHD"] for r in rows)
         self.summary.setText(f"{len(rows)} hợp đồng · Tổng giá trị {fmt_money(tot)} đ · Còn phải thu "
                              f"{fmt_money(sum(max(r['ConPhaiThu'], 0) for r in rows if r['ChieuHopDong'] == 'Đầu ra'))} đ")

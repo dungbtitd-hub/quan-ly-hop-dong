@@ -315,6 +315,183 @@ class CheckList(QListWidget):
                 if self.item(i).checkState() == Qt.Checked]
 
 
+class PickDialog(QDialog):
+    """Bảng chọn nhiều bật lên: rộng, tìm theo tên / MST, chọn tất cả, bỏ chọn, chỉ hiện mục đã chọn."""
+
+    def __init__(self, title: str, options: list[tuple], checked, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(820, 560)
+        self.options = options
+        self.on = set(checked)
+        lay = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Gõ tên hoặc MST để tìm…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._fill)
+        top.addWidget(self.search, 1)
+        b_all = QPushButton("Chọn tất cả (đang hiện)")
+        b_all.clicked.connect(lambda: self._set_shown(True))
+        b_none = QPushButton("Bỏ chọn hết")
+        b_none.clicked.connect(self._clear)
+        self.only = QCheckBox("Chỉ hiện mục đã chọn")
+        self.only.toggled.connect(self._fill)
+        for w in (b_all, b_none, self.only):
+            top.addWidget(w)
+        lay.addLayout(top)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["", "Tên", "MST / ghi chú"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setWordWrap(True)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.itemChanged.connect(self._item_changed)
+        self.table.cellClicked.connect(self._cell_clicked)
+        lay.addWidget(self.table, 1)
+        bottom = QHBoxLayout()
+        self.count = QLabel()
+        bottom.addWidget(self.count, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Đồng ý")
+        bb.button(QDialogButtonBox.Cancel).setText("Hủy")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        bottom.addWidget(bb)
+        lay.addLayout(bottom)
+        self._fill()
+
+    @staticmethod
+    def split(label: str) -> tuple[str, str]:
+        name, sep, rest = str(label).rpartition(" – ")
+        return (name, rest) if sep else (str(label), "")
+
+    def shown(self) -> list[tuple]:
+        q = self.search.text().strip().lower()
+        return [(label, data) for label, data in self.options
+                if (not q or q in str(label).lower()) and (not self.only.isChecked() or data in self.on)]
+
+    def _fill(self, *_):
+        self.table.blockSignals(True)
+        rows = self.shown()
+        self.table.setRowCount(len(rows))
+        for i, (label, data) in enumerate(rows):
+            name, extra = self.split(label)
+            c = QTableWidgetItem()
+            c.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            c.setCheckState(Qt.Checked if data in self.on else Qt.Unchecked)
+            c.setData(Qt.UserRole, data)
+            self.table.setItem(i, 0, c)
+            for col, text in ((1, name), (2, extra)):
+                it = QTableWidgetItem(text)
+                it.setToolTip(str(label))
+                self.table.setItem(i, col, it)
+        self.table.resizeRowsToContents()
+        self.table.blockSignals(False)
+        self._count()
+
+    def _count(self):
+        self.count.setText(f"{len(self.on)} / {len(self.options)} mục đã chọn · không chọn mục nào = lấy tất cả")
+
+    def _item_changed(self, it):
+        if it.column() != 0:
+            return
+        data = it.data(Qt.UserRole)
+        if it.checkState() == Qt.Checked:
+            self.on.add(data)
+        else:
+            self.on.discard(data)
+        self._count()
+
+    def _cell_clicked(self, row, col):
+        if col:                                   # bấm vào tên cũng tích / bỏ tích
+            c = self.table.item(row, 0)
+            c.setCheckState(Qt.Unchecked if c.checkState() == Qt.Checked else Qt.Checked)
+
+    def _set_shown(self, on: bool):
+        for _, data in self.shown():
+            (self.on.add if on else self.on.discard)(data)
+        self._fill()
+
+    def _clear(self):
+        self.on.clear()
+        self._fill()
+
+    def values(self) -> list:
+        return [d for _, d in self.options if d in self.on]
+
+
+class PickButton(QPushButton):
+    """Ô chọn nhiều dạng nút: hiện "Tất cả" hoặc số mục đã chọn; bấm vào bật bảng chọn (PickDialog).
+    Cùng cách dùng với CheckList (set_options / values) để thay thế trực tiếp."""
+
+    changed = Signal()
+    OFF_TIP = "Không dùng cho ngữ cảnh đang chọn"
+
+    def __init__(self, options=(), checked=(), title: str = "Chọn", parent=None):
+        super().__init__(parent)
+        self.title = title
+        self._options: list[tuple] = []
+        self._on: list = []
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet("QPushButton{text-align:left;padding:6px 10px}"
+                           "QPushButton[chon=\"true\"]{background:#eef4ff;border:1px solid #1d4ed8;color:#1e3a8a;"
+                           "font-weight:600}"
+                           "QPushButton:disabled{color:#9ca3af;border:1px dashed #d1d5db}")
+        self.clicked.connect(self.pick)
+        self.set_options(options, checked)
+
+    def set_options(self, options, checked=()) -> None:
+        self._options = [opt if isinstance(opt, tuple) else (opt, opt) for opt in options]
+        keys = {d for _, d in self._options}
+        self._on = [d for _, d in self._options if d in set(checked)] if keys else []
+        self._show()
+
+    def values(self) -> list:
+        return list(self._on)
+
+    def set_values(self, values) -> None:
+        self.set_options(self._options, values)
+        self.changed.emit()
+
+    def labels(self) -> list[str]:
+        on = set(self._on)
+        return [str(label) for label, d in self._options if d in on]
+
+    def _show(self) -> None:
+        if not self.isEnabled():
+            self.setText("Không dùng cho ngữ cảnh này")
+            self.setToolTip(self.OFF_TIP)
+            return
+        names = self.labels()
+        if not names:
+            self.setText("Tất cả (bấm để chọn)…")
+            self.setToolTip("Chưa lọc: lấy tất cả. Bấm để mở bảng chọn.")
+        else:
+            short = ", ".join(PickDialog.split(n)[0] for n in names[:2]) + ("…" if len(names) > 2 else "")
+            self.setText(f"✔ {len(names)} đã chọn: {short}")
+            self.setToolTip("\n".join(names))
+        self.setProperty("chon", bool(names))
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == e.Type.EnabledChange:
+            self._show()
+
+    def pick(self) -> None:
+        dlg = PickDialog(self.title, self._options, self._on, self)
+        if dlg.exec() == QDialog.Accepted:
+            self._on = dlg.values()
+            self._show()
+            self.changed.emit()
+
+
 # ---------------------------------------------------------------- bảng
 class NumItem(QTableWidgetItem):
     def __init__(self, text: str, sort_value):
@@ -357,10 +534,28 @@ class PercentDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class _TotalsBar(QTableWidget):
+    """Dòng TỔNG ghim dưới đáy bảng: cùng độ rộng cột với bảng, cuộn ngang theo bảng."""
+
+    def __init__(self, table: "DataTable"):
+        super().__init__(table)
+        self.setObjectName("TotalsBar")
+        self.horizontalHeader().setVisible(False)
+        self.verticalHeader().setVisible(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSelectionMode(QAbstractItemView.NoSelection)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setShowGrid(True)
+
+
 class DataTable(QTableWidget):
     """Bảng hiển thị danh sách dict theo cột (khóa, tiêu đề, kiểu)."""
 
     activated_row = Signal(dict)
+    group_activated = Signal(tuple)      # bấm đúp một dòng nhóm (xem nhanh theo ngữ cảnh)
 
     def __init__(self, columns=None, parent=None, multi: bool = False):
         super().__init__(parent)
@@ -376,7 +571,120 @@ class DataTable(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(30)
         self.horizontalHeader().setHighlightSections(False)
         self.horizontalHeader().setResizeContentsPrecision(300)   # đo độ rộng cột theo 300 dòng đầu: bảng lớn không bị khựng
-        self.doubleClicked.connect(lambda _: self.current() and self.activated_row.emit(self.current()))
+        self.doubleClicked.connect(self._double)
+        self._totals: _TotalsBar | None = None
+        self._foot_h = 0
+        self._unit = "dòng"
+
+    def _double(self, idx):
+        row = self._row_of(self.item(idx.row(), 0))
+        if row and row.get("_gom"):
+            self.group_activated.emit(tuple(row["_gom"]))
+        elif self.current():
+            self.activated_row.emit(self.current())
+
+    # ---- dòng TỔNG dưới đáy bảng
+    def show_totals(self, unit: str = "dòng") -> None:
+        """Ghim dòng TỔNG các cột tiền (theo các dòng đang hiện) dưới đáy bảng; chọn từ 2 dòng thì thêm dòng
+        cộng riêng các dòng đang chọn."""
+        if self._totals is not None:
+            return
+        self._unit = unit
+        self._totals = _TotalsBar(self)
+        self.horizontalHeader().sectionResized.connect(lambda i, _o, n: self._totals.setColumnWidth(i, n))
+        self.horizontalScrollBar().valueChanged.connect(self._totals.horizontalScrollBar().setValue)
+        self.itemSelectionChanged.connect(self._update_totals)
+
+    def _sum_rows(self, rows) -> dict:
+        out = {}
+        for k, _, kind in self.columns:
+            if kind == "money":
+                total = 0
+                for r in rows:
+                    try:
+                        total += int(r.get(k) or 0)
+                    except (TypeError, ValueError):
+                        pass
+                out[k] = total
+        return out
+
+    def _update_totals(self) -> None:
+        bar = self._totals
+        if bar is None:
+            return
+        grouped = any(r.get("_gom") for r in self.rows)
+        base = [r for r in self.rows if r.get("_gom")] if grouped else [r for r in self.rows if not r.get("_kieu")]
+        n = sum(r.get("_so_dong", 1) for r in base)
+        lines = [(f"TỔNG {n} {self._unit}" + (f" · {len(base)} nhóm" if grouped else ""), self._sum_rows(base),
+                  "warn_soft")]
+        seen, sel = set(), []
+        for it in self.selectedItems():
+            idx = it.data(Qt.UserRole)
+            if idx is not None and idx not in seen and idx < len(self.rows):
+                seen.add(idx)
+                if not self.rows[idx].get("_kieu") or self.rows[idx].get("_gom"):
+                    sel.append(self.rows[idx])
+        if len(sel) >= 2:
+            lines.insert(0, (f"Đang chọn {sum(r.get('_so_dong', 1) for r in sel)} {self._unit}", self._sum_rows(sel),
+                             "accent_soft"))
+        bar.clearSpans()
+        bar.setColumnCount(self.columnCount())
+        bar.setRowCount(len(lines))
+        first_money = next((j for j, c in enumerate(self.columns) if c[2] == "money"), len(self.columns))
+        for i, (label, sums, color) in enumerate(lines):
+            for j, (k, _, kind) in enumerate(self.columns):
+                text = fmt_money(sums[k]) if kind == "money" else ""
+                item = QTableWidgetItem(text)
+                if kind == "money":
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
+                try:
+                    item.setBackground(QBrush(QColor(style.color(color))))
+                except Exception:   # noqa: BLE001 – thiếu màu trong giao diện thì để mặc định
+                    pass
+                bar.setItem(i, j, item)
+            lead = QTableWidgetItem(label)
+            f = lead.font()
+            f.setBold(True)
+            lead.setFont(f)
+            try:
+                lead.setBackground(QBrush(QColor(style.color(color))))
+            except Exception:   # noqa: BLE001
+                pass
+            bar.setItem(i, 0, lead)
+            if first_money > 1:
+                bar.setSpan(i, 0, 1, first_money)
+        h = self.verticalHeader().defaultSectionSize()
+        for i in range(len(lines)):
+            bar.setRowHeight(i, h)
+        for j in range(self.columnCount()):
+            bar.setColumnWidth(j, self.columnWidth(j))
+        self._foot_h = h * len(lines) + 2
+        self.updateGeometries()
+
+    def _place_totals(self) -> None:
+        bar = self._totals
+        if bar is None:
+            return
+        vp = self.viewport().geometry()
+        h = self._foot_h
+        bar.setGeometry(vp.left(), vp.bottom() + 1, vp.width(), h)
+        bar.horizontalScrollBar().setValue(self.horizontalScrollBar().value())
+        bar.show()
+
+    def updateGeometries(self):
+        super().updateGeometries()        # QTableView đặt lề trên cho tiêu đề cột; thêm lề dưới cho dòng TỔNG
+        if self._totals is not None and getattr(self, "_foot_h", 0):
+            m = self.viewportMargins()
+            if m.bottom() != self._foot_h:
+                self.setViewportMargins(m.left(), m.top(), m.right(), self._foot_h)
+            self._place_totals()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_totals()
 
     def set_rows(self, rows, columns=None) -> None:
         if columns is not None:
@@ -440,6 +748,7 @@ class DataTable(QTableWidget):
             self.setColumnWidth(j, 150 if kind == "pct" else min(max(self.columnWidth(j) + 12, 70), 360))
         hdr.setStretchLastSection(True)
         self.setUpdatesEnabled(True)
+        self._update_totals()
 
     def _row_of(self, item) -> dict | None:
         if item is None:
@@ -449,7 +758,8 @@ class DataTable(QTableWidget):
 
     def current(self) -> dict | None:
         r = self.currentRow()
-        return self._row_of(self.item(r, 0)) if r >= 0 else None
+        row = self._row_of(self.item(r, 0)) if r >= 0 else None
+        return None if row and row.get("_gom") else row     # dòng nhóm (xem theo ngữ cảnh) không phải bản ghi
 
     def selected(self) -> list[dict]:
         seen, out = set(), []
@@ -457,7 +767,8 @@ class DataTable(QTableWidget):
             idx = it.data(Qt.UserRole)
             if idx not in seen:
                 seen.add(idx)
-                out.append(self.rows[idx])
+                if not self.rows[idx].get("_gom"):
+                    out.append(self.rows[idx])
         return out
 
 
