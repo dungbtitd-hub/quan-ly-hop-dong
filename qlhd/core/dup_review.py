@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .duplicates import _digits, _norm, fmt_date, fmt_money, ignored, ignored_ids, overpaid_items
+from .duplicates import _digits, seller_name, _norm, fmt_date, fmt_money, ignored, ignored_ids, overpaid_items
 from .duplicates import set_ignored, signature
 
 __all__ = ["KINDS", "KIND_LABELS", "COLUMNS", "TABLES", "Group", "scan", "counts", "payment_groups",
@@ -138,10 +138,8 @@ def _scan(db, kind: str, fdb=None) -> list[Group]:
             " WHERE i.DaXoa = 0 AND i.TinhChatHD != 'Đã hủy' ORDER BY i.NgayTao, i.Ma")]
 
         def keys(r):
-            total = int(r["GiaTriSauThue"] or 0)
-            so = _digits(r["SoHoaDon"])
-            return [(("so", so, total) if so else None, "cùng số hóa đơn và số tiền"),
-                    (("hd", r["MaHopDong"], (r["NgayXuatHD"] or "")[:10], total), "cùng hợp đồng, ngày lập, số tiền")]
+            so = _digits(r["SoHoaDon"])          # khác số là hóa đơn khác, chỉ gom khi cùng số
+            return [(("so", so) if so else None, "cùng số hóa đơn")]
         return [Group(kind, f"Hóa đơn số {g[0]['SoHoaDon']} · {fmt_money(g[0]['GiaTriSauThue'])} đ", g)
                 for g in _group(rows, keys)]
     if kind == "hoa_don_vao":
@@ -154,9 +152,9 @@ def _scan(db, kind: str, fdb=None) -> list[Group]:
             so = _digits(r["SoHoaDonGoc"])
             if not mst:
                 return []
-            return [(("so", mst, so) if so else None, "cùng người bán và số hóa đơn"),
-                    (("ngay", mst, (r["NgayNhanHD"] or "")[:10], int(r["GiaTriSauThue"] or 0)),
-                     "cùng người bán, ngày và số tiền")]
+            # khác số là hóa đơn khác: chỉ gom khi cùng số + cùng MST + cùng tên người bán
+            return [(("so", mst, so, seller_name(r["TenNhaCungCap"])) if so else None,
+                     "cùng số hóa đơn, tên và MST người bán")]
         return [Group(kind, f"{g[0]['TenNhaCungCap']} · hóa đơn {g[0]['SoHoaDonGoc']}", g) for g in _group(rows, keys)]
     if kind == "hop_dong":
         rows = [dict(r) for r in db.query(

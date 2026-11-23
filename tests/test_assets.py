@@ -93,10 +93,10 @@ def _line(ten, sl, gia, tchat="1"):
             f"<DGia>{gia}</DGia><ThTien>{sl * gia}</ThTien><TSuat>10%</TSuat></HHDVu>")
 
 
-def _xml_invoice(cs, so, ngay, lines, ok_dup=False):
+def _xml_invoice(cs, so, ngay, lines, ok_dup=False, kh=None):
     xml = XML.format(so=so, ngay=ngay, lines="".join(_line(*x) for x in lines), tong=sum(x[1] * x[2] for x in lines))
     d = parse_invoice(xml.encode())
-    return cs.save_in_invoice({"SoHoaDonGoc": d["SoHoaDon"], "KyHieuHD": d["KyHieuHD"],
+    return cs.save_in_invoice({"SoHoaDonGoc": d["SoHoaDon"], "KyHieuHD": kh or d["KyHieuHD"],
                                "TenNhaCungCap": d["TenNguoiBan"], "MaThueNCC": d["MSTNguoiBan"],
                                "NgayNhanHD": d["NgayLap"], "GiaTriTruocThue": d["GiaTriTruocThue"],
                                "MatHang": d["MatHang"], "_Dong": d["Dong"], "_DaRaSoatTrung": ok_dup})
@@ -430,14 +430,41 @@ def test_recurring_bills_are_not_duplicates_and_confirm_clears_warning(company):
     cs, s = ContractService(db), AssetService(db)
     a = _xml_invoice(cs, "301", "2025-04-02", [("Tiền nước sinh hoạt", 1, 144_400)])
     b = _xml_invoice(cs, "302", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])    # tháng sau, cùng số tiền
+    # khám sức khỏe từng nhân viên: cùng người bán, ngày, nội dung, số tiền, chỉ khác số hóa đơn -> không nghi trùng
+    _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])
     assert not [r for r in s.review_lines() if r["MaCanhBao"] == "trung"]
-    with pytest.raises(DuplicateWarning):             # cùng người bán, ngày, số tiền: không tự thêm
-        _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)])
-    c = _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)], ok_dup=True)   # đã rà soát
+    with pytest.raises(DuplicateWarning):             # cùng số + cùng tên, MST người bán (khác ký hiệu): không tự thêm
+        _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)], kh="1C25TZZ")
+    c = _xml_invoice(cs, "303", "2025-05-02", [("Tiền nước sinh hoạt", 1, 144_400)], ok_dup=True, kh="1C25TZZ")
     dup = [r for r in s.review_lines() if r["MaCanhBao"] == "trung"]
     assert [r["MaHoaDon"] for r in dup] == [c]
     assert s.confirm_lines([dup[0]["Ma"]]) == 1                    # kế toán xác nhận đúng: dòng thôi hiện
     assert not [r for r in s.review_lines() if r["MaHoaDon"] in (a, b, c)]
+
+
+def test_invoice_duplicate_rule_same_number_and_same_seller_only(company):
+    """Khác số là hóa đơn khác; khác đơn vị bán thì trùng số là bình thường."""
+    from qlhd.core import duplicates as dupl
+    from qlhd.core.sync import suspect_match
+    db = company["kt"].db
+    cs = ContractService(db)
+    base = {"SoHoaDonGoc": "15", "KyHieuHD": "1C25TAA", "TenNhaCungCap": "Bệnh viện A", "MaThueNCC": "0101",
+            "NgayNhanHD": "2025-06-01", "GiaTriTruocThue": 500_000, "VAT": 0}
+    cs.save_in_invoice(dict(base))
+    cs.save_in_invoice(dict(base, SoHoaDonGoc="16"))                                      # khác số: thêm luôn
+    assert not dupl.in_invoices(db, dict(base, SoHoaDonGoc="17"))
+    assert not dupl.in_invoices(db, dict(base, KyHieuHD="1C25TBB", MaThueNCC="0202", TenNhaCungCap="Công ty B"))
+    assert not dupl.in_invoices(db, dict(base, KyHieuHD="1C25TBB", TenNhaCungCap="Phòng khám khác"))
+    assert dupl.in_invoices(db, dict(base, KyHieuHD="1C25TBB", TenNhaCungCap="BỆNH VIỆN  A."))
+    ok, *_ = suspect_match("HoaDonDauVao", dict(base, SoHoaDonGoc="17"), base)
+    assert not ok
+    ok, *_ = suspect_match("HoaDonDauVao", dict(base, MaThueNCC="0202", TenNhaCungCap="B"), base)
+    assert not ok
+    ok, sure, _ = suspect_match("HoaDonDauVao", dict(base, KyHieuHD="X"), base)
+    assert ok and not sure
+    out = {"SoHoaDon": "7", "MaHopDong": "h1", "GiaTriSauThue": 1_000, "NgayXuatHD": "2025-01-01"}
+    assert not suspect_match("HoaDonDauRa", dict(out, SoHoaDon="8"), out)[0]
+    assert suspect_match("HoaDonDauRa", dict(out, GiaTriSauThue=2_000), out)[0]
 
 
 def test_fixed_asset_depreciation_stops_on_write_off_day(company):

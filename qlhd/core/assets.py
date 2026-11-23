@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import asset_catalog as dm
 from .db import Database
+from .duplicates import _digits, seller_name
 
 CASES = [("toan_bo", "Tổng hợp toàn bộ (như sổ kế toán)"), ("con_kh", "Còn khấu hao / phân bổ"),
          ("het_kh", "Đã hết khấu hao / phân bổ"), ("dau_ky", "Đầu kỳ (chuyển từ các năm trước)"),
@@ -250,8 +251,8 @@ def line_flag(r: dict, dup: dict | None = None) -> tuple[str | None, str]:
     if not r.get("TuDong"):
         return None, ""             # kế toán đã phân loại / bấm "Xác nhận đúng": thôi cảnh báo
     if dup is not None:
-        return "trung", (f"Cùng người bán, tên hàng, số tiền, ngày với hóa đơn số {dup.get('SoHoaDonGoc')}: "
-                         "kiểm tra nhập trùng.")
+        return "trung", (f"Cùng số hóa đơn {dup.get('SoHoaDonGoc')}, cùng tên và MST người bán với một hóa đơn "
+                         "đã nhập: kiểm tra nhập trùng.")
     if pl in (dm.TSCD, dm.CCDC) and dm.near_threshold(unit):
         return "nguong", (f"Đơn giá {unit:,.0f} đ sát ngưỡng 30 triệu: xác nhận là CCDC hay TSCĐ.").replace(",", ".")
     kq = dm.classify(r["TenHang"], unit, co_hop_dong=bool(r.get("MaHopDong")))
@@ -401,11 +402,12 @@ class AssetService:
         """Gắn cảnh báo cho từng dòng (chỉ tô màu, không đổi dữ liệu): MaCanhBao, CanhBao, _mau."""
         seen: dict[tuple, dict] = {}
         for r in rows:
-            # hóa đơn định kỳ (nước, xăng hằng tháng) cùng số tiền nhưng khác ngày thì không phải trùng
-            key = (r.get("MaThueNCC") or r.get("TenNhaCungCap"), dm.normalize(r["TenHang"]), int(r["ThanhTien"] or 0),
-                   r.get("NgayNhanHD"))
+            # khác số hóa đơn là hóa đơn khác (kể cả nội dung, số tiền, ngày giống hệt, vd. khám sức khỏe từng người):
+            # chỉ nghi trùng khi cùng số hóa đơn + cùng MST + cùng tên người bán
+            so = _digits(r.get("SoHoaDonGoc"))
+            key = ((r.get("MaThueNCC") or "").strip(), seller_name(r.get("TenNhaCungCap")), so)
             other = seen.get(key)
-            dup = other if other and other["MaHoaDon"] != r["MaHoaDon"] and key[2] else None
+            dup = other if other and other["MaHoaDon"] != r["MaHoaDon"] and so and key[0] else None
             seen.setdefault(key, r)
             code, text = line_flag(r, dup)
             r["MaCanhBao"], r["CanhBao"] = code, text

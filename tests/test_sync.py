@@ -170,18 +170,14 @@ def test_suspected_invoice_duplicates_and_fill_on_merge(company, tmp_path):
     assert {"KyHieuHD", "MaHopDong", "NguoiMuaHang"} <= set(strong.fill) and "GhiChuHDDV" not in strong.fill
     assert "GhiChuHDDV" in strong.diff
     weak = next(i for i in items.values() if i.their_ma != inv_kt)
-    assert weak.status == ST_DUP and weak.dup_ma == other and weak.action is None
+    assert weak.status == ST_NEW and not weak.dup_ma
     res = d.apply(pkg, user=gd.user)
     row = gd.db.get("HoaDonDauVao", mine)
     assert row["SoHoaDonGoc"] == "0088" and row["GhiChuHDDV"] == "máy GĐ ghi"      # giữ nguyên hóa đơn máy này
     assert row["KyHieuHD"] == "K26T" and row["NguoiMuaHang"] == "Lan" and row["MaHopDong"]   # bổ sung ô trống
-    assert res["bo_sung"] >= 1 and res["chua_xu_ly"] >= 1
-    assert gd.db.one("SELECT COUNT(*) n FROM HoaDonDauVao WHERE DaXoa = 0")["n"] == 2
-    # chọn giữ cả hai cho dòng nghi ngờ
-    d, pkg = _send(kt, gd, tmp_path, "g2.qlhd")
-    weak = next(i for i in d.compare(pkg) if i.table == "HoaDonDauVao" and i.status == ST_DUP)
-    d.apply(pkg, user=gd.user, decisions={("HoaDonDauVao", weak.their_ma): A_BOTH})
-    assert gd.db.one("SELECT COUNT(*) n FROM HoaDonDauVao WHERE DaXoa = 0")["n"] == 3
+    assert res["bo_sung"] >= 1
+    assert gd.db.one("SELECT COUNT(*) n FROM HoaDonDauVao WHERE DaXoa = 0")["n"] == 3     # hóa đơn khác số được thêm
+    assert other
 
 
 def test_sync_all_carries_shared_settings_not_local_ones(company, tmp_path):

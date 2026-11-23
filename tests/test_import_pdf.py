@@ -92,5 +92,6 @@ def test_excel_duplicate_invoice_numbers(company, tmp_path):
     assert len(duplicate_invoice_rows(rows)) == 3
     rows[2].force = True
     res = import_rows(db, rows)
-    assert res["Hóa đơn đầu ra"] == 2          # số 99 cùng hợp đồng, ngày lập, số tiền với dòng 3: chờ rà soát
-    assert [x[0] for x in res["trung"]] == ["Hóa đơn dòng 5"]
+    # khác số là hóa đơn khác (số 99 lưu luôn); C25TAA số 12 cùng số với hóa đơn đã có (cùng đơn vị xuất): chờ rà soát
+    assert res["Hóa đơn đầu ra"] == 2
+    assert [x[0] for x in res["trung"]] == ["Hóa đơn dòng 3"]

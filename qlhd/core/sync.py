@@ -211,9 +211,14 @@ def suspect_match(table: str, incoming: dict, local: dict) -> tuple[bool, bool, 
     """(nghi trùng?, gần như chắc chắn?, các tiêu chí khớp) giữa hóa đơn bên gửi và một hóa đơn ở máy này."""
     spec = SUSPECT_FIELDS[table]
     hit = {k for k, (_, get) in spec.items() if get(incoming) and get(incoming) == get(local)}
-    party = bool(hit & {"mst", "ten", "hd"})
-    suspect = ("so" in hit and (party or "tien" in hit)) or (party and {"tien", "ngay"} <= hit)
-    strong = "so" in hit and party and "tien" in hit
+    # Khác số là hóa đơn khác (nội dung, số tiền, ngày giống nhau không tính). Đầu vào: cùng số + cùng MST + cùng tên
+    # người bán (thiếu tên một bên thì dựa vào MST). Đầu ra: đơn vị xuất luôn là công ty mình, cùng số là nghi trùng.
+    if table == "HoaDonDauVao":
+        names = [spec["ten"][1](x) for x in (incoming, local)]
+        suspect = {"so", "mst"} <= hit and ("ten" in hit or not all(names))
+    else:
+        suspect = "so" in hit
+    strong = suspect and "tien" in hit
     return suspect, strong, [spec[k][0] for k in spec if k in hit]
 
 

@@ -128,42 +128,45 @@ def overpaid_items(db) -> list[dict]:
 
 
 def out_invoices(db, v: dict, ma: str | None = None) -> list[str]:
-    """Hóa đơn đầu ra: cùng số (khác ký hiệu) và số tiền; hoặc cùng hợp đồng, ngày lập, số tiền."""
+    """Hóa đơn đầu ra (đơn vị xuất luôn là công ty mình): chỉ nghi trùng khi cùng số hóa đơn.
+    Khác số là hóa đơn khác, nội dung / số tiền / ngày giống nhau cũng không cảnh báo."""
     out = []
     so = _digits(v.get("SoHoaDon"))
-    total = int(v.get("GiaTriSauThue") or 0)
+    if not so:
+        return out
     for r in db.query("SELECT * FROM HoaDonDauRa WHERE DaXoa = 0 AND Ma != ? AND TinhChatHD != 'Đã hủy'", (ma or "",)):
-        why = []
-        same_total = total and int(r["GiaTriSauThue"] or 0) == total
-        if so and _digits(r["SoHoaDon"]) == so and same_total:
-            why.append("cùng số hóa đơn và số tiền")
-        if r["MaHopDong"] == v.get("MaHopDong") and same_total \
-                and (r["NgayXuatHD"] or "")[:10] == (v.get("NgayXuatHD") or "")[:10]:
-            why.append("cùng hợp đồng, ngày lập và số tiền")
-        if why:
+        if _digits(r["SoHoaDon"]) == so:
             out.append(f"Hóa đơn đầu ra {r['KyHieuHD'] or ''} số {r['SoHoaDon']} ngày {fmt_date(r['NgayXuatHD'])}: "
-                       f"{_money(r['GiaTriSauThue'])} – " + ", ".join(why))
+                       f"{_money(r['GiaTriSauThue'])} – cùng số hóa đơn")
     return out[:LIMIT]
 
 
+def seller_name(s) -> str:
+    """Tên người bán để so khớp: bỏ hoa thường, dấu chấm, phẩy, khoảng trắng thừa."""
+    return " ".join(str(s or "").lower().replace(".", " ").replace(",", " ").split())
+
+
+def same_seller(a: dict, b: dict) -> bool:
+    """Cùng đơn vị bán: cùng MST và cùng tên (thiếu tên ở một bên thì chỉ dựa vào MST)."""
+    ma, mb = (a.get("MaThueNCC") or "").strip(), (b.get("MaThueNCC") or "").strip()
+    if not ma or ma != mb:
+        return False
+    na, nb = seller_name(a.get("TenNhaCungCap")), seller_name(b.get("TenNhaCungCap"))
+    return not na or not nb or na == nb
+
+
 def in_invoices(db, v: dict, ma: str | None = None) -> list[str]:
-    """Hóa đơn đầu vào: cùng người bán + số (khác ký hiệu); hoặc cùng người bán, ngày và số tiền."""
+    """Hóa đơn đầu vào: chỉ nghi trùng khi cùng số hóa đơn + cùng tên + cùng MST người bán.
+    Khác số là hóa đơn khác (vd. nhiều hóa đơn khám sức khỏe giống hệt nội dung), không cảnh báo."""
     out = []
     so = _digits(v.get("SoHoaDonGoc"))
     mst = (v.get("MaThueNCC") or "").strip()
-    total = int(v.get("GiaTriSauThue") or 0)
-    if not mst:
+    if not mst or not so:
         return out
     for r in db.query("SELECT * FROM HoaDonDauVao WHERE DaXoa = 0 AND Ma != ? AND MaThueNCC = ?", (ma or "", mst)):
-        why = []
-        if so and _digits(r["SoHoaDonGoc"]) == so:
-            why.append("cùng người bán và số hóa đơn")
-        if total and int(r["GiaTriSauThue"] or 0) == total \
-                and (r["NgayNhanHD"] or "")[:10] == (v.get("NgayNhanHD") or "")[:10]:
-            why.append("cùng người bán, ngày và số tiền")
-        if why:
+        if _digits(r["SoHoaDonGoc"]) == so and same_seller(v, dict(r)):
             out.append(f"Hóa đơn đầu vào {r['KyHieuHD'] or ''} số {r['SoHoaDonGoc']} của {r['TenNhaCungCap']} ngày "
-                       f"{fmt_date(r['NgayNhanHD'])}: {_money(r['GiaTriSauThue'])} – " + ", ".join(why))
+                       f"{fmt_date(r['NgayNhanHD'])}: {_money(r['GiaTriSauThue'])} – cùng số hóa đơn, tên và MST người bán")
     return out[:LIMIT]
 
 
