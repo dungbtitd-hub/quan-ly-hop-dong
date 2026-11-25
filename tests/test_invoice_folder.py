@@ -53,11 +53,11 @@ def test_scan_only_new_files_and_pairs_xml_pdf(company, tmp_path):
     (root / "2026" / "Quy 4" / "hd1.pdf").write_bytes(b"%PDF-1.4 gia")
     f = InvoiceFolders(db)
     f.save_settings({"vao": str(root), "ra": ""})
-    # lần quét đầu: không tự thêm, để nhân viên chọn
+    # lần quét đầu: hóa đơn đọc được rõ ràng, không trùng thì tự thêm luôn (không bắt xác nhận)
     r = _scan(f, "vao")
-    assert r["lan_dau"] and r["them"] == [] and r["can_xem"] == 1
+    assert r["lan_dau"] and len(r["them"]) == 1 and r["can_xem"] == 0
     st = {x["DuongDan"]: x["TrangThai"] for x in f.files("vao")}
-    assert st == {"2026/Quy 4/hd1.xml": F_REVIEW, "2026/Quy 4/hd1.pdf": F_COMPANION}
+    assert st == {"2026/Quy 4/hd1.xml": F_ADDED, "2026/Quy 4/hd1.pdf": F_COMPANION}
     assert f.new_files("vao") == []                       # đã ghi nhớ: lần sau bỏ qua
     # hóa đơn mới xuất hiện: tự thêm, gắn tệp gốc + tệp PDF kèm, dữ liệu tự động
     _xml(root / "2026" / "Quy 4" / "hd2.xml", 102, hang="Máy tính xách tay Dell", tien=25_000_000)
@@ -336,7 +336,7 @@ def test_pdf_without_xml_goes_to_gemini_even_first_scan(company, tmp_path, monke
     assert sorted(Path(c[1]).name for c in gem.calls) == ["co_san.pdf", "quet.pdf"]
     items = [it for it in items if Path(it.path).name == "quet.pdf"] + [
         it for it in InvoiceFolders.read("vao", [x for x in f.new_files("vao") if x[0] == "co_san.pdf"], None)]
-    r = f.process("vao", items)
+    r = f.process("vao", items, auto_add=False)
     assert r["lan_dau"] and r["co_san"] == 1 and r["can_xem"] == 1
     rv = f.files("vao", F_REVIEW)[0]
     assert rv["Data"]["raw"]["SoHoaDon"] == "55" and rv["Data"]["src"] == SRC_GEMINI

@@ -43,7 +43,17 @@ def signature(ids) -> str:
     return ",".join(sorted(ids))
 
 
+# Đánh dấu "không trùng" hóa đơn làm trước quy tắc mới (cùng số + cùng đơn vị bán) là theo quy tắc cũ (giống nội dung):
+# bỏ, để các cặp cùng số, cùng người bán hiện lại.
+INVOICE_RULE_SINCE = {"hoa_don_ra": "2026-11-25", "hoa_don_vao": "2026-11-25"}
+
+
 def ignored(db, kind: str) -> set[str]:
+    since = INVOICE_RULE_SINCE.get(kind)
+    if since:
+        r = db.one("SELECT NgaySua FROM CaiDat WHERE Khoa = ?", (IGNORE_PREFIX + kind,))
+        if r and (r["NgaySua"] or "") < since:
+            return set()
     try:
         return set(json.loads(db.setting(IGNORE_PREFIX + kind) or "[]"))
     except ValueError:
@@ -146,9 +156,14 @@ def seller_name(s) -> str:
     return " ".join(str(s or "").lower().replace(".", " ").replace(",", " ").split())
 
 
+def mst_key(x) -> str:
+    """MST để so khớp: bỏ khoảng trắng, chấm, chữ; giữ gạch nối MST chi nhánh (0101234567-001)."""
+    return "".join(ch for ch in str(x or "") if ch.isdigit() or ch == "-").strip("-")
+
+
 def same_seller(a: dict, b: dict) -> bool:
     """Cùng đơn vị bán: cùng MST và cùng tên (thiếu tên ở một bên thì chỉ dựa vào MST)."""
-    ma, mb = (a.get("MaThueNCC") or "").strip(), (b.get("MaThueNCC") or "").strip()
+    ma, mb = mst_key(a.get("MaThueNCC")), mst_key(b.get("MaThueNCC"))
     if not ma or ma != mb:
         return False
     na, nb = seller_name(a.get("TenNhaCungCap")), seller_name(b.get("TenNhaCungCap"))
@@ -160,10 +175,10 @@ def in_invoices(db, v: dict, ma: str | None = None) -> list[str]:
     Khác số là hóa đơn khác (vd. nhiều hóa đơn khám sức khỏe giống hệt nội dung), không cảnh báo."""
     out = []
     so = _digits(v.get("SoHoaDonGoc"))
-    mst = (v.get("MaThueNCC") or "").strip()
+    mst = mst_key(v.get("MaThueNCC"))
     if not mst or not so:
         return out
-    for r in db.query("SELECT * FROM HoaDonDauVao WHERE DaXoa = 0 AND Ma != ? AND MaThueNCC = ?", (ma or "", mst)):
+    for r in db.query("SELECT * FROM HoaDonDauVao WHERE DaXoa = 0 AND Ma != ?", (ma or "",)):
         if _digits(r["SoHoaDonGoc"]) == so and same_seller(v, dict(r)):
             out.append(f"Hóa đơn đầu vào {r['KyHieuHD'] or ''} số {r['SoHoaDonGoc']} của {r['TenNhaCungCap']} ngày "
                        f"{fmt_date(r['NgayNhanHD'])}: {_money(r['GiaTriSauThue'])} – cùng số hóa đơn, tên và MST người bán")

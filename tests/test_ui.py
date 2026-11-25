@@ -1290,3 +1290,33 @@ def test_pick_button_popup_and_list_groups_with_totals(qtbot, ctx, tmp_path):
     cp.box.group.set_value("doi_tac")
     assert all(g.get("_gom") for g in cp.table.rows)
     cp.box.clear()
+
+
+def test_input_invoice_list_flags_existing_duplicates(qtbot, ctx):
+    """Hai hóa đơn đầu vào cùng số + cùng người bán đã có sẵn (vd. vào bằng đường khác) phải hiện nghi trùng ngay
+    trên danh sách, kể cả MST ghi lệch khoảng trắng và nhóm từng đánh dấu "không trùng" theo quy tắc cũ."""
+    from qlhd.core import dup_review as dr
+    from qlhd.core import duplicates as dupl
+    from qlhd.ui.invoices_page import InvoicesPage
+
+    base = {"KyHieuHD": "C26MHK", "SoHoaDonGoc": "00002663", "TenNhaCungCap": "CÔNG TY TNHH HANKOOK BBQ VN",
+            "NgayNhanHD": "2026-07-30", "GiaTriTruocThue": 1_312_000, "VAT": 107_660}
+    a = ctx.cs.save_in_invoice(dict(base, MaThueNCC="0111104420"))
+    # bản thứ hai lọt vào (MST có khoảng trắng): kiểm tra khi thêm phải bắt được
+    with pytest.raises(dupl.DuplicateWarning):
+        ctx.cs.save_in_invoice(dict(base, MaThueNCC=" 0111104420 "))
+    b = ctx.cs.save_in_invoice(dict(base, MaThueNCC=" 0111104420 ", **{dupl.CONFIRM_KEY: True}))
+    # đánh dấu "không trùng" làm từ trước quy tắc mới: bỏ qua
+    ctx.db.execute("INSERT OR REPLACE INTO CaiDat (Khoa, GiaTri, NgaySua) VALUES (?, ?, ?)",
+                   (dupl.IGNORE_PREFIX + "hoa_don_vao", f'["{dr.signature([a, b])}"]', "2026-11-20T00:00:00Z"))
+    assert [sorted(r["Ma"] for r in g.rows) for g in dr.scan(ctx.db, "hoa_don_vao")] == [sorted([a, b])]
+
+    page = InvoicesPage(ctx, "vao")
+    qtbot.addWidget(page)
+    page.refresh()
+    flagged = {r["Ma"] for r in page.table.rows if r.get("NghiTrung")}
+    assert flagged == {a, b}
+    assert all(r["_mau"] == "danger" for r in page.table.rows if r["Ma"] in flagged)
+    page.box.combo("trung").setCurrentIndex(1)                  # Lọc › chỉ hóa đơn nghi trùng
+    page.refresh()
+    assert {r["Ma"] for r in page.table.rows if not r.get("_gom")} == {a, b}

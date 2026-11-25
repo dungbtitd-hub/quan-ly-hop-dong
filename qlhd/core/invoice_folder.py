@@ -9,8 +9,8 @@ Quy tắc (chủ phần mềm chốt 17/11/2026):
 - XML và PDF / ảnh cùng một hóa đơn tính là một hóa đơn: số liệu lấy từ XML, file kia để xem / xuất PDF.
 - File ảnh, PDF quét (không có XML): nhờ Gemini đọc số liệu; hóa đơn thêm theo cách này ghi nguồn "Gemini" để nhân
   viên soát lại.
-- Lần quét đầu tiên một thư mục (thường chứa hóa đơn nhiều năm): không tự thêm, không gửi Gemini; hóa đơn chưa có
-  trong phần mềm nằm ở mục Cần xem để nhân viên chọn thêm.
+- (25/11/2026) Lần quét đầu tiên một thư mục cũng như các lần sau: hóa đơn đọc được rõ ràng, không trùng thì tự thêm,
+  không bắt nhân viên xác nhận.
 Đường dẫn thư mục là riêng từng máy; mỗi hóa đơn lưu đường dẫn tương đối nên máy khác (đặt cùng cấu trúc thư mục)
 vẫn mở được tệp sau khi đồng bộ.
 """
@@ -816,7 +816,7 @@ class InvoiceFolders:
         Trả {them: [mã], can_xem: n, co_san: n, lech: n, cho_gemini: n}."""
         first = self.first_scan(kind)
         if auto_add is None:
-            auto_add = user_asked or (self.flag(K_AUTO_ADD) and not first)
+            auto_add = user_asked or self.flag(K_AUTO_ADD)
         res = {"them": [], "can_xem": 0, "co_san": 0, "lech": 0, "cho_gemini": 0, "lan_dau": first}
         idx = self._index(kind)
         seen: set[tuple] = set()
@@ -895,10 +895,8 @@ class InvoiceFolders:
                 why = self.review_reason(kind, it, values, mst_cty)
             except Exception as e:  # noqa: BLE001
                 why = f"Lỗi khi đọc số liệu: {e}"
-            if why is None and not user_asked and (old.get("GhiChu") or "").startswith("Lần quét đầu"):
-                why = old["GhiChu"]                  # hóa đơn cũ từ lần quét đầu: vẫn chờ nhân viên chọn
             if why is None and not auto_add:
-                why = "Lần quét đầu: chờ nhân viên chọn thêm" if first else "Chờ nhân viên thêm (đang tắt tự thêm)"
+                why = "Chờ nhân viên thêm (đang tắt tự thêm)"
             if why is None:
                 try:
                     ma = self.save(kind, values)
@@ -914,7 +912,7 @@ class InvoiceFolders:
                     continue
             self._mark(kind, it.rel, it.path, F_REVIEW, note=why, data=_dump(values, notes, it))
             res["can_xem"] += 1
-        if first and not res["cho_gemini"]:
+        if first:
             self.db.set_setting(K_SCANNED[kind], self.db.setting(K_DIR[kind]))
         self.db.conn.commit()
         return res

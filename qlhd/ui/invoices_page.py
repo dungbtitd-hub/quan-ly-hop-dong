@@ -164,6 +164,24 @@ def read_invoice_file(parent, path: str) -> dict | None:
         return None
 
 
+
+def dup_marks(db, kind: str) -> dict[str, str]:
+    """Hóa đơn nghi trùng (đầu vào: cùng số + cùng tên, MST người bán; đầu ra: cùng số) -> chữ hiện ở cột Nghi trùng."""
+    from ..core import dup_review as dr
+    out = {}
+    for g in dr.scan(db, "hoa_don_ra" if kind == "ra" else "hoa_don_vao"):
+        for r in g.rows:
+            out[r["Ma"]] = f"⚠ Trùng ({len(g.rows)} hóa đơn cùng số)"
+    return out
+
+
+def _mark_dup(r: dict, dups: dict, only_dup: bool) -> bool:
+    """Ghi cột Nghi trùng, tô đỏ dòng nghi trùng. False = bỏ dòng (đang lọc chỉ hóa đơn nghi trùng)."""
+    r["NghiTrung"] = dups.get(r["Ma"], "")
+    if r["NghiTrung"]:
+        r["_mau"] = "danger"
+    return bool(r["NghiTrung"]) or not only_dup
+
 class InvoicesPage(QWidget):
     """kind = 'ra' (hóa đơn đầu ra) hoặc 'vao' (hóa đơn đầu vào)."""
 
@@ -188,6 +206,8 @@ class InvoicesPage(QWidget):
                     {"key": "tt", "label": "Thanh toán", "options": [
                         ("Tất cả", None), ("Còn phải thu", "con"), ("Đã thu đủ", "du"),
                         ("Đã thu, chưa có số tham chiếu sao kê", "chua_sk")]},
+                    {"key": "trung", "label": "Nghi trùng", "options": [
+                        ("Tất cả", None), ("Chỉ hóa đơn nghi trùng (cùng số, đầu ra)", "co")]},
                     {"key": "hd", "label": "Hợp đồng", "options": [("Mọi hợp đồng", None)]}],
                 groups=[("Từng hóa đơn", None, None), ("Theo người mua", "nguoi_mua", by_field("TenNguoiMua")),
                         ("Theo hợp đồng", "hop_dong", by_field("SoHopDong")),
@@ -210,6 +230,8 @@ class InvoicesPage(QWidget):
                         ("Không chịu thuế GTGT", "Không chịu thuế")]},
                     {"key": "tt", "label": "Thanh toán", "options": [
                         ("Tất cả", None), ("Đã trả (có số sao kê)", "da"), ("Chưa có số sao kê", "chua")]},
+                    {"key": "trung", "label": "Nghi trùng", "options": [
+                        ("Tất cả", None), ("Chỉ hóa đơn nghi trùng (cùng số, cùng đơn vị bán)", "co")]},
                     {"key": "ncc", "label": "Người bán", "options": [("Mọi người bán", None)]},
                     {"key": "nguoi_mua", "label": "Người mua hàng", "options": [("Mọi người mua hàng", None)]}],
                 groups=[("Từng hóa đơn", None, None), ("Theo người bán", "nguoi_ban", by_field("TenNhaCungCap")),
@@ -261,7 +283,7 @@ class InvoicesPage(QWidget):
         top.addWidget(self.box, 0, Qt.AlignTop)
         lay.addLayout(top)
         if kind == "ra":
-            cols = [("STT", "STT", "int"),
+            cols = [("STT", "STT", "int"), ("NghiTrung", "Nghi trùng", "text"),
                     ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDon", "Số", "text"), ("NgayXuatHD", "Ngày lập", "date"),
                     ("SoHopDong", "Số HĐ", "text"), ("TenNguoiMua", "Người mua", "text"),
                     ("MatHang", "Mặt hàng", "text"), ("ThueSuat", "Thuế suất", "text"),
@@ -271,7 +293,7 @@ class InvoicesPage(QWidget):
                     ("NgayTT", "Ngày thanh toán", "text"), ("SoThamChieuSK", "Số tham chiếu sao kê", "text"),
                     ("TinhChatHD", "Tính chất", "text"), ("DotThanhToan", "Đợt thanh toán", "text")]
         else:
-            cols = [("STT", "STT", "int"),
+            cols = [("STT", "STT", "int"), ("NghiTrung", "Nghi trùng", "text"),
                     ("KyHieuHD", "Ký hiệu", "text"), ("SoHoaDonGoc", "Số", "text"), ("NgayNhanHD", "Ngày", "date"),
                     ("TenNhaCungCap", "Tên người bán", "text"), ("MaThueNCC", "MST người bán", "text"),
                     ("MatHang", "Mặt hàng", "text"), ("GiaTriTruocThue", "Trước thuế", "money"),
@@ -294,6 +316,8 @@ class InvoicesPage(QWidget):
     def refresh(self):
         contracts = {r["Ma"]: r["SoHopDong"] for r in self.ctx.db.query("SELECT Ma, SoHopDong FROM HopDong")}
         rows = []
+        dups = dup_marks(self.ctx.db, self.kind)
+        only_dup = self.box.value("trung") == "co"
         if self.kind == "ra":
             invs = self.ctx.cs.out_invoices()
             used = sorted({i["MaHopDong"] for i in invs if i["MaHopDong"]}, key=lambda m: contracts.get(m, ""))
@@ -305,6 +329,8 @@ class InvoicesPage(QWidget):
                 r = out_invoice_row(self.ctx, inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "")
                 r.update(display_fields(self.ctx, "ra", inv))
+                if not _mark_dup(r, dups, only_dup):
+                    continue
                 pays = r.pop("_pays")
                 if tt == "con" and r["ConPhaiThu"] <= 0 or tt == "du" and r["ConPhaiThu"] > 0:
                     continue
@@ -327,6 +353,8 @@ class InvoicesPage(QWidget):
                 r = dict(inv)
                 r["SoHopDong"] = contracts.get(inv["MaHopDong"], "") if inv["MaHopDong"] else "(Mua trực tiếp)"
                 r.update(display_fields(self.ctx, "vao", inv))
+                if not _mark_dup(r, dups, only_dup):
+                    continue
                 paid = bool((inv["SoThamChieuSK"] or "").strip())
                 if co_hd == "co" and not inv["MaHopDong"] or co_hd == "khong" and inv["MaHopDong"] \
                         or thue and inv["NhomThue"] != thue or ncc and inv["TenNhaCungCap"] != ncc \

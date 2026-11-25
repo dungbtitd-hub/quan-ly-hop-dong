@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .duplicates import _digits, seller_name, _norm, fmt_date, fmt_money, ignored, ignored_ids, overpaid_items
+from .duplicates import _digits, mst_key, seller_name, _norm, fmt_date, fmt_money, ignored, ignored_ids, overpaid_items
 from .duplicates import set_ignored, signature
 
 __all__ = ["KINDS", "KIND_LABELS", "COLUMNS", "TABLES", "Group", "scan", "counts", "payment_groups",
@@ -148,7 +148,7 @@ def _scan(db, kind: str, fdb=None) -> list[Group]:
             " LEFT JOIN HopDong h ON h.Ma = i.MaHopDong WHERE i.DaXoa = 0 ORDER BY i.NgayTao, i.Ma")]
 
         def keys(r):
-            mst = (r["MaThueNCC"] or "").strip()
+            mst = mst_key(r["MaThueNCC"])
             so = _digits(r["SoHoaDonGoc"])
             if not mst:
                 return []

@@ -57,13 +57,14 @@ def test_scan_folder_list_columns_and_export_pdf(qtbot, ctx, tmp_path, monkeypat
 
     shown = _quiet(monkeypatch, ifl)
     root = tmp_path / "vao"
-    _xml(root / "2026" / "hd_cu.xml", 501)
+    # cùng số 88, cùng người bán với hóa đơn đã có: nghi trùng, để Cần xem
+    _xml(root / "2026" / "hd_cu.xml", 88, mst="0200000002", ban="Công ty Vật tư X", kh="K26X")
     f = InvoiceFolders(ctx.db)
     f.save_settings({"vao": str(root)})
     sc = Scanner(ctx)
     with qtbot.waitSignal(sc.finished, timeout=10_000) as sig:
         assert sc.start()
-    assert sig.args[0]["lan_dau"] and sig.args[0]["can_xem"] == 1
+    assert sig.args[0]["lan_dau"] and sig.args[0]["can_xem"] == 1 and sig.args[0]["them"] == 0
     _xml(root / "2026" / "Quy 4" / "hd_moi.xml", 502)
     from PySide6.QtGui import QColor, QImage
     img = QImage(200, 300, QImage.Format_RGB32)
