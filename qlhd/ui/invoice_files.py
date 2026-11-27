@@ -761,7 +761,7 @@ class FolderSettingsDialog(QDialog):
         f.addRow(hint("Phần mềm quét cả các thư mục con (Năm, Quý…). Chỉ xử lý file mới; file đã xử lý không nhập "
                       "lại, không ghi đè số liệu. Hóa đơn mới đọc được rõ ràng, không trùng thì tự thêm; "
                       "nghi trùng, thiếu thông tin, đọc không khớp mới để ở mục Cần xem."))
-        self.on_open = QCheckBox("Tự quét khi mở phần mềm")
+        self.on_open = QCheckBox("Tự quét khi mở phần mềm và 3 phút một lần trong lúc mở")
         self.on_open.setChecked(s["quet_khi_mo"])
         self.auto_add = QCheckBox("Tự thêm hóa đơn mới đọc được rõ ràng (nghi trùng, chưa nhận ra hợp đồng… vẫn để "
                                   "Cần xem)")

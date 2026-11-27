@@ -41,6 +41,8 @@ BADGE_ROLE = Qt.UserRole + 1     # số hiện trên huy hiệu đỏ
 PEEK_MS = 2 * 60_000             # cứ 2 phút xem thư mục đồng bộ có gói mới từ máy khác không
 
 
+SCAN_EVERY_MS = 3 * 60_000                       # tự quét thư mục hóa đơn 3 phút một lần
+
 class _ActivityFilter(QObject):
     def __init__(self, win):
         super().__init__(win)
@@ -209,6 +211,9 @@ class MainWindow(QMainWindow):
         self.scanner = Scanner(ctx, self)
         self.scanner.finished.connect(self._scanned)
         self.scanner.progress.connect(lambda t: self.statusBar().showMessage(t, 60_000))
+        self.scan_timer = QTimer(self)             # tự quét thư mục hóa đơn định kỳ khi phần mềm đang mở
+        self.scan_timer.timeout.connect(self._auto_scan)
+        self.scan_timer.start(SCAN_EVERY_MS)
         self.send_timer = QTimer(self)
         self.send_timer.timeout.connect(self._auto_send)
         self.recv_timer = QTimer(self)
@@ -733,9 +738,18 @@ class MainWindow(QMainWindow):
         InvoiceFolderDialog(self.ctx, self, tab=tab, scanner=self.scanner).exec()
         self.refresh_all()
 
+    def _auto_scan(self) -> None:
+        """Quét thư mục hóa đơn (đầu ra, đầu vào) định kỳ: chỉ xử lý file mới, không có file mới thì không làm gì."""
+        from ..core.invoice_folder import K_ON_OPEN, InvoiceFolders
+        if self.ctx.user is not None and not self.scanner.busy and InvoiceFolders(self.ctx.db).flag(K_ON_OPEN):
+            self.scanner.start()
+
     def _scanned(self, s: dict) -> None:
-        if s:
-            self.statusBar().showMessage("Quét thư mục hóa đơn: " + scan_text(s), 30_000)
+        if not s:
+            return                                  # không có file mới: không làm mới màn hình
+        self.statusBar().showMessage("Quét thư mục hóa đơn: " + scan_text(s), 30_000)
+        if not any(s.get(k) for k in ("them", "can_xem", "co_san", "lech", "loi")):
+            return
         self.refresh_all()
         if hasattr(self.home, "refresh"):
             self.home.refresh()
