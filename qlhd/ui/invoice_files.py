@@ -930,6 +930,7 @@ class Scanner(QObject):
             if not self.ctx.can(TABLE[kind], "Them") or not self.folders.root(kind):
                 continue
             self.folders.prune(kind)
+            self.folders.skip_known(kind)                # tên file đã có trong phần mềm: bỏ qua, không đọc
             first = self.folders.first_scan(kind)
             again = self.folders.recheck_files(kind, everything)
             changed = self.folders.new_files(kind)

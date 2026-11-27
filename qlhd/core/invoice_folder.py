@@ -431,6 +431,35 @@ class InvoiceFolders:
                 out.append((rel, full))                 # file đã bị chép đè: đọc lại
         return out
 
+    def known_names(self, kind: str) -> dict[str, str]:
+        """Tên file (chữ thường) đã gắn với hóa đơn trong phần mềm -> mã hóa đơn: tệp gốc, tệp kèm, đường dẫn tệp."""
+        out: dict[str, str] = {}
+        for r in self.db.query(f"SELECT Ma, TepTuongDoi, TepKem, DuongDanTep FROM {TABLE[kind]} WHERE DaXoa = 0"):
+            names = [r["TepTuongDoi"], r["DuongDanTep"]]
+            try:
+                names += json.loads(r["TepKem"]) if r["TepKem"] else []
+            except ValueError:
+                pass
+            for n in names:
+                n = str(n or "").replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+                if n:
+                    out.setdefault(n, r["Ma"])
+        return out
+
+    def skip_known(self, kind: str) -> int:
+        """Trước khi quét: file mới mà tên file đã có trong phần mềm thì bỏ qua luôn, không đọc (chỉ ghi nhận nơi
+        chứa file). Chủ phần mềm chốt 27/11/2026: chỉ quét file có tên mới; tên file đã có hoặc dữ liệu trùng thì bỏ qua."""
+        names = self.known_names(kind)
+        n = 0
+        for rel, full in self.new_files(kind):
+            ma = names.get(Path(rel).name.lower())
+            if ma:
+                self._mark(kind, rel, full, F_EXISTS, ma, note="Tên file đã có trong phần mềm: bỏ qua, không đọc")
+                n += 1
+        if n:
+            self.db.conn.commit()
+        return n
+
     def recheck_files(self, kind: str, everything: bool = False) -> list[tuple[str, str]]:
         """File đã quét nhưng còn chờ nhân viên (Cần xem, số liệu khác) — xét lại mỗi lần quét vì hóa đơn có thể đã
         được nhập tay, đã thêm hợp đồng, đã xóa bản trùng… everything: quét lại toàn bộ (trừ file đã bỏ qua)."""
@@ -871,13 +900,12 @@ class InvoiceFolders:
                     res["co_san"] += 1
                     continue
                 if diff:
-                    self._mark(kind, it.rel, it.path, F_CONFLICT, inv["Ma"],
-                               note="Đã có trong phần mềm, số liệu trong file khác: "
-                                    + "; ".join(f"{label} {a} → {b}" for _c, label, a, b in diff)
-                                    + (" (Gemini đọc, nên mở file xem lại)" if it.source == SRC_GEMINI else ""),
+                    # 27/11/2026: hóa đơn đã có thì bỏ qua (giữ số liệu trong phần mềm), không đưa vào Cần xem
+                    self._mark(kind, it.rel, it.path, F_EXISTS, inv["Ma"],
+                               note="Đã có trong phần mềm: bỏ qua, giữ số liệu trong phần mềm (file ghi khác: "
+                                    + "; ".join(f"{label} {a} → {b}" for _c, label, a, b in diff) + ")",
                                data=_dump(values, notes, it))
-                    res["lech"] += 1
-                    res["can_xem"] += 1
+                    res["co_san"] += 1
                     continue
                 keep = old.get("TrangThai") == F_ADDED and old.get("MaHoaDon") == inv["Ma"]
                 self._mark(kind, it.rel, it.path, F_ADDED if keep else F_EXISTS, inv["Ma"],

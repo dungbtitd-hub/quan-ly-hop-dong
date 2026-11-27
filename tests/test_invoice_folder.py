@@ -261,7 +261,6 @@ def test_existing_invoices_only_link_file_conflict_and_rescan(company, tmp_path)
     """Hóa đơn đã nhập tay (số có số 0 đầu, ký hiệu kèm mẫu số / để trống): quét chỉ ghi nhận nơi chứa tệp, không
     báo nghi trùng; số liệu khác thì để Cần xem; xóa bản sao khỏi thư mục thì quên file; xét lại file Cần xem."""
     from qlhd.core.contracts import ContractService
-    from qlhd.core.invoice_folder import F_CONFLICT
     db = company["kt"].db
     d0 = sample_data(db)
     cs = ContractService(db)
@@ -279,19 +278,18 @@ def test_existing_invoices_only_link_file_conflict_and_rescan(company, tmp_path)
     _xml(ra / "hd12.xml", 12, mst="0100000001", kh="1C26TAA")           # hóa đơn đầu ra đã có (C26TAA số 12)
     f.save_settings({"vao": str(vao), "ra": str(ra)})
     r = _scan(f, "vao")
-    assert r["co_san"] == 2 and r["lech"] == 1 and r["them"] == []
+    assert r["co_san"] == 3 and r["lech"] == 0 and r["them"] == []
     inv = db.get("HoaDonDauVao", a)
     assert inv["TepTuongDoi"] == "201.xml" and inv["MatHang"] == "kế toán đã sửa"
     st = {x["DuongDan"]: (x["TrangThai"], x["GhiChu"]) for x in f.files("vao")}
     assert st["ban sao/201.xml"][0] == F_EXISTS and "Bản sao" in st["ban sao/201.xml"][1]
-    assert st["202.xml"][0] == F_CONFLICT and "Tiền trước thuế 900.000 → 1.000.000" in st["202.xml"][1]
+    # 27/11/2026: đã có trong phần mềm thì bỏ qua, giữ số liệu phần mềm, không đưa vào Cần xem
+    assert st["202.xml"][0] == F_EXISTS and "Tiền trước thuế 900.000 → 1.000.000" in st["202.xml"][1]
     assert db.get("HoaDonDauVao", b)["GiaTriTruocThue"] == 900_000 and db.get("HoaDonDauVao", b)["TepTuongDoi"]
-    assert f.review_count() == 1
-    assert f.apply_file_values("vao", "202.xml")[0][0] == "GiaTriTruocThue"
-    assert db.get("HoaDonDauVao", b)["GiaTriTruocThue"] == 1_000_000 and f.review_count() == 0
+    assert f.review_count() == 0
     rr = _scan(f, "ra")
-    assert rr["lech"] == 1 and rr["them"] == [] and db.get("HoaDonDauRa", d0["inv"])["TepTuongDoi"] == "hd12.xml"
-    assert "Ngày lập 2026-03-01 → 2026-11-10" in f.files("ra", F_CONFLICT)[0]["GhiChu"]
+    assert rr["co_san"] == 1 and rr["them"] == [] and db.get("HoaDonDauRa", d0["inv"])["TepTuongDoi"] == "hd12.xml"
+    assert "Ngày lập 2026-03-01 → 2026-11-10" in f.files("ra", F_EXISTS)[0]["GhiChu"]
     # xóa bản sao khỏi thư mục: phần mềm quên file đó
     (vao / "ban sao" / "201.xml").unlink()
     assert f.prune("vao") == 1 and "ban sao/201.xml" not in {x["DuongDan"] for x in f.files("vao")}
@@ -597,7 +595,7 @@ def test_skipped_and_kept_files_not_reported_again_after_rescan(company, tmp_pat
     f.save_settings({"vao": str(vao)})
     _scan(f, "vao")
     st = {x["DuongDan"]: x["TrangThai"] for x in f.files("vao")}
-    assert st["202.xml"] == fo.F_CONFLICT and st["doc_nham.xml"] == F_REVIEW
+    assert st["202.xml"] == fo.F_EXISTS and st["doc_nham.xml"] == F_REVIEW
     f.set_status("vao", ["202.xml"], F_EXISTS, note=fo.NOTE_KEEP)       # như bấm "Bỏ qua" ở giao diện
     f.set_status("vao", ["doc_nham.xml"], fo.F_SKIP, note=fo.NOTE_SKIP)
     assert f.review_count() == 0
@@ -653,7 +651,6 @@ def test_misread_amounts_not_reported_as_conflict(company):
 def test_gemini_reread_of_conflict_pdf_clears_misread(company, tmp_path, monkeypatch):
     from qlhd.core import pdf_invoice
     from qlhd.core.contracts import ContractService
-    from qlhd.core.invoice_folder import F_CONFLICT
     db = company["kt"].db
     sample_data(db)
     ma = ContractService(db).save_in_invoice({"SoHoaDonGoc": "487863", "KyHieuHD": "C26MGG", "TenNhaCungCap": "NCC H",
@@ -670,7 +667,7 @@ def test_gemini_reread_of_conflict_pdf_clears_misread(company, tmp_path, monkeyp
     f = InvoiceFolders(db)
     f.save_settings({"vao": str(root)})
     f.process("vao", InvoiceFolders.read("vao", f.new_files("vao"), None))
-    assert f.files("vao")[0]["TrangThai"] == F_CONFLICT
+    assert f.files("vao")[0]["TrangThai"] == F_EXISTS                # đã có: bỏ qua, không Cần xem
     gem = FakeGemini(extract={"la_hoa_don": True, "ky_hieu": "C26MGG", "so_hoa_don": "487863", "ngay_lap": "2026-01-10",
                               "ten_nguoi_ban": "NCC H", "mst_nguoi_ban": "0600000006", "tien_truoc_thue": 3_268_250,
                               "tien_thue": 261_460, "tong_thanh_toan": 3_529_710, "thue_suat": "8%"})
@@ -722,3 +719,25 @@ def test_xml_downloaded_later_same_name_attaches_unreadable_pdf(company, tmp_pat
     assert inv["TepTuongDoi"] == "hd902.xml" and "hd902.pdf" in (inv["TepKem"] or "")
     st = {x["DuongDan"]: x["TrangThai"] for x in f.files("vao")}
     assert st["hd902.pdf"] == F_COMPANION and f.review_count() == 0
+
+
+def test_known_file_names_skipped_without_reading(company, tmp_path):
+    """27/11/2026: trước khi quét, file có tên đã gắn với hóa đơn trong phần mềm thì bỏ qua, không đọc."""
+    from qlhd.core.contracts import ContractService
+    db = company["kt"].db
+    sample_data(db)
+    ContractService(db).save_in_invoice({"SoHoaDonGoc": "777", "TenNhaCungCap": "NCC Z", "MaThueNCC": "0900000009",
+                                         "NgayNhanHD": "2026-11-10", "GiaTriTruocThue": 100_000, "VAT": 10_000,
+                                         "DuongDanTep": "C:\\Hoa don\\HD_777.xml"})
+    root = tmp_path / "vao"
+    _xml(root / "Quy 4" / "hd_777.xml", 999)                          # tên trùng (khác hoa thường), nội dung khác
+    _xml(root / "Quy 4" / "moi.xml", 1001)
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root)})
+    assert f.skip_known("vao") == 1
+    r = _scan(f, "vao")
+    assert len(r["them"]) == 1 and db.get("HoaDonDauVao", r["them"][0])["SoHoaDonGoc"] == "1001"
+    st = {x["DuongDan"]: x["TrangThai"] for x in f.files("vao")}
+    assert st == {"Quy 4/hd_777.xml": F_EXISTS, "Quy 4/moi.xml": F_ADDED}
+    assert not db.one("SELECT 1 FROM HoaDonDauVao WHERE SoHoaDonGoc = '999'")      # file tên đã có: không đọc
+    assert f.new_files("vao") == []

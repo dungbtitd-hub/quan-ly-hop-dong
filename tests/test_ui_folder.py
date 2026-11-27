@@ -207,7 +207,7 @@ def test_scan_button_on_invoice_page_and_gemini_read_in_folder_dialog(qtbot, ctx
     _xml(root / "hd88.xml", 88, mst="0200000002", ban="Công ty Vật tư X", kh="K26T")   # đã có trong phần mềm
     page.scan_now()
     qtbot.waitUntil(lambda: page.b_scan.isEnabled(), timeout=10_000)
-    assert f.files("vao")[0]["TrangThai"] == "lech" and opened      # đã có, số tiền khác → hỏi mở Cần xem
+    assert f.files("vao")[0]["TrangThai"] == "co_san" and not opened  # đã có (số tiền khác): bỏ qua, không hỏi
     # ảnh chưa đọc được (chưa cài Gemini lúc quét) → bấm Đọc bằng Gemini
     (root / "anh.jpg").write_bytes(b"\xff\xd8\xff")
     page.scan_now()
