@@ -41,8 +41,6 @@ BADGE_ROLE = Qt.UserRole + 1     # số hiện trên huy hiệu đỏ
 PEEK_MS = 2 * 60_000             # cứ 2 phút xem thư mục đồng bộ có gói mới từ máy khác không
 
 
-SCAN_EVERY_MS = 3 * 60_000                       # tự quét thư mục hóa đơn 3 phút một lần
-
 class _ActivityFilter(QObject):
     def __init__(self, win):
         super().__init__(win)
@@ -213,7 +211,7 @@ class MainWindow(QMainWindow):
         self.scanner.progress.connect(lambda t: self.statusBar().showMessage(t, 60_000))
         self.scan_timer = QTimer(self)             # tự quét thư mục hóa đơn định kỳ khi phần mềm đang mở
         self.scan_timer.timeout.connect(self._auto_scan)
-        self.scan_timer.start(SCAN_EVERY_MS)
+        self._restart_scan_timer()
         self.send_timer = QTimer(self)
         self.send_timer.timeout.connect(self._auto_send)
         self.recv_timer = QTimer(self)
@@ -731,12 +729,17 @@ class MainWindow(QMainWindow):
         dlg = FolderSettingsDialog(self.ctx, self)
         if dlg.exec() == FolderSettingsDialog.Accepted:
             self._paint_status_buttons()
+            self._restart_scan_timer()
             if getattr(dlg, "changed_dirs", False):
                 self.scanner.start()
 
     def invoice_folder(self, tab: int = 1) -> None:
         InvoiceFolderDialog(self.ctx, self, tab=tab, scanner=self.scanner).exec()
         self.refresh_all()
+
+    def _restart_scan_timer(self) -> None:
+        from ..core.invoice_folder import InvoiceFolders
+        self.scan_timer.start(InvoiceFolders(self.ctx.db).every_minutes() * 60_000)
 
     def _auto_scan(self) -> None:
         """Quét thư mục hóa đơn (đầu ra, đầu vào) định kỳ: chỉ xử lý file mới, không có file mới thì không làm gì."""

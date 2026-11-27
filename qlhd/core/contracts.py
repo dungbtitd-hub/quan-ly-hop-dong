@@ -298,6 +298,32 @@ class ContractService:
             return ma
         return self.db.insert("DoiTac", v)
 
+    def partner_by_mst(self, mst: str | None, ma: str | None = None):
+        mst = (mst or "").strip()
+        return self.db.one("SELECT * FROM DoiTac WHERE DaXoa = 0 AND MaSoThue = ? AND Ma != ?",
+                           (mst, ma or "")) if mst else None
+
+    def rename_partner(self, ma: str, values: dict) -> str:
+        """Đối tác đổi tên, giữ nguyên MST: đổi tên (và thông tin mới nhập) cho đối tác đã có, ghi tên cũ vào TenCu.
+        Hợp đồng đã ký giữ tên đối tác lúc ký; hợp đồng mới dùng tên mới."""
+        p = self.db.get("DoiTac", ma)
+        if p is None:
+            raise ValidationError("Không tìm thấy đối tác.")
+        new = (values.get("TenDoiTac") or "").strip()
+        if not new:
+            raise ValidationError("Chưa nhập tên đối tác.")
+        old = [x for x in (p["TenCu"] or "").split("; ") if x]
+        if p["TenDoiTac"] != new and p["TenDoiTac"] not in old:
+            old.append(p["TenDoiTac"])
+        old = [x for x in old if x.lower() != new.lower()]
+        upd = {k: (v.strip() if isinstance(v, str) else v) for k, v in values.items()
+               if k in ("DiaChi", "NguoiLienHe", "DienThoai") and v}
+        upd.update(TenDoiTac=new, TenCu="; ".join(old) or None)
+        if values.get("VaiTroDoiTac") and values["VaiTroDoiTac"] != p["VaiTroDoiTac"]:
+            upd["VaiTroDoiTac"] = "Cả hai"
+        self.db.update("DoiTac", ma, upd)
+        return ma
+
     def find_or_create_partner(self, ten: str, mst: str | None, vai_tro: str) -> str:
         if mst:
             r = self.db.one("SELECT * FROM DoiTac WHERE DaXoa = 0 AND MaSoThue = ?", (mst,))

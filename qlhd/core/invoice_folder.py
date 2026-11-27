@@ -41,6 +41,8 @@ K_ON_OPEN = "tmhd_quet_khi_mo"
 K_AUTO_ADD = "tmhd_tu_them"
 K_XML, K_PDF, K_IMG = "tmhd_xml", "tmhd_pdf", "tmhd_anh"
 K_LAST = "tmhd_lan_quet"
+K_EVERY = "tmhd_phut_quet"               # tự quét bao nhiêu phút một lần khi phần mềm đang mở (riêng từng máy)
+EVERY_DEFAULT = 3
 K_SCANNED = {"ra": "tmhd_da_quet_ra", "vao": "tmhd_da_quet_vao"}   # thư mục đã quét lần đầu (đổi thư mục = lần đầu)
 K_SUMMARY = "tmhd_ket_qua"              # JSON tóm tắt lần quét gần nhất (cho dòng báo trên Tổng quan)
 
@@ -318,8 +320,14 @@ class InvoiceFolders:
     def flag(self, key: str, default: bool = True) -> bool:
         return self.db.setting(key, "1" if default else "0") == "1"
 
+    def every_minutes(self) -> int:
+        try:
+            return max(1, min(1440, int(self.db.setting(K_EVERY) or EVERY_DEFAULT)))
+        except ValueError:
+            return EVERY_DEFAULT
+
     def settings(self) -> dict:
-        return {"ra": self.db.setting(K_DIR["ra"]) or "", "vao": self.db.setting(K_DIR["vao"]) or "",
+        return {"phut_quet": self.every_minutes(), "ra": self.db.setting(K_DIR["ra"]) or "", "vao": self.db.setting(K_DIR["vao"]) or "",
                 "quet_khi_mo": self.flag(K_ON_OPEN), "tu_them": self.flag(K_AUTO_ADD), "xml": self.flag(K_XML),
                 "pdf": self.flag(K_PDF), "anh": self.flag(K_IMG)}
 
@@ -333,6 +341,8 @@ class InvoiceFolders:
                           (K_IMG, "anh")):
             if name in v:
                 self.db.set_setting(key, "1" if v[name] else "0")
+        if v.get("phut_quet"):
+            self.db.set_setting(K_EVERY, str(max(1, min(1440, int(v["phut_quet"])))))
 
     def configured(self) -> bool:
         return any(self.root(k) for k in KINDS)
@@ -944,6 +954,22 @@ class InvoiceFolders:
             self.db.set_setting(K_SCANNED[kind], self.db.setting(K_DIR[kind]))
         self.db.conn.commit()
         return res
+
+    def fresh_values(self, kind: str, rel: str, mst_cty: str = "") -> dict | None:
+        """File XML ở Cần xem: đọc lại từ file ngay lúc thêm (đủ trường như nút Thêm), không dùng số liệu lưu từ lần
+        quét trước (có thể do bản phần mềm cũ đọc, thiếu trường). Không phải XML / không đọc được thì None."""
+        full = self.full_path(kind, rel)
+        if not rel.lower().endswith(".xml") or full is None or not full.is_file():
+            return None
+        try:
+            it = Item(kind, rel, str(full), source=SRC_XML, data=xml_invoice.parse_invoice(str(full)))
+            r = self._rows(kind).get(rel) or {}
+            data = json.loads(r["DuLieu"]) if r.get("DuLieu") else {}
+            it.kem = list(json.loads(data.get("values", {}).get("TepKem") or "[]"))
+            values, _ = self.values_for(kind, it, mst_cty)
+        except Exception:  # noqa: BLE001 - đọc lại lỗi: dùng số liệu đã lưu
+            return None
+        return values
 
     def apply_file_values(self, kind: str, rel: str) -> list[tuple[str, str, str, str]]:
         """File có số liệu khác hóa đơn trong phần mềm: nhân viên chọn cập nhật theo file (đã xác nhận cũ → mới)."""

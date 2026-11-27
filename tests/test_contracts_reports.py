@@ -462,3 +462,19 @@ def test_duplicate_payment_is_not_counted_as_advance(company):
     cs.save_payment({"MaHopDong": hd, "NgayThanhToan": "2026-03-10", "SoTien": 30_000_000, "SoThamChieuSK": "FT123",
                      dupl.CONFIRM_KEY: True})                                    # ghi lại lần đã có, không gắn hóa đơn
     assert cs.summary(hd)["TamUngConLai"] == before
+
+
+def test_partner_renamed_keeps_mst_and_old_contract_names(company):
+    from qlhd.core.contracts import ContractService
+    cs = ContractService(company["gd"].db)
+    p = cs.save_partner({"TenDoiTac": "Công ty Cũ", "MaSoThue": "0123456789", "VaiTroDoiTac": "Chủ đầu tư"})
+    db = cs.db
+    # thêm đối tác mới cùng MST vẫn bị chặn (một MST một đối tác)
+    with pytest.raises(ValidationError):
+        cs.save_partner({"TenDoiTac": "Công ty Mới", "MaSoThue": "0123456789", "VaiTroDoiTac": "Chủ đầu tư"})
+    assert cs.partner_by_mst(" 0123456789 ")["Ma"] == p
+    cs.rename_partner(p, {"TenDoiTac": "Công ty Mới", "DienThoai": "0900"})
+    r = db.get("DoiTac", p)
+    assert r["TenDoiTac"] == "Công ty Mới" and r["TenCu"] == "Công ty Cũ" and r["DienThoai"] == "0900"
+    cs.rename_partner(p, {"TenDoiTac": "Công ty Mới Hơn"})
+    assert db.get("DoiTac", p)["TenCu"] == "Công ty Cũ; Công ty Mới"

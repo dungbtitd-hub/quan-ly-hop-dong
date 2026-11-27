@@ -741,3 +741,32 @@ def test_known_file_names_skipped_without_reading(company, tmp_path):
     assert st == {"Quy 4/hd_777.xml": F_EXISTS, "Quy 4/moi.xml": F_ADDED}
     assert not db.one("SELECT 1 FROM HoaDonDauVao WHERE SoHoaDonGoc = '999'")      # file tên đã có: không đọc
     assert f.new_files("vao") == []
+
+
+def test_scan_interval_minutes_setting(company):
+    f = InvoiceFolders(company["kt"].db)
+    assert f.every_minutes() == 3 and f.settings()["phut_quet"] == 3
+    f.save_settings({"phut_quet": 15})
+    assert f.every_minutes() == 15
+    f.save_settings({"phut_quet": 0})                    # không đổi khi để trống
+    assert f.every_minutes() == 15
+
+
+def test_review_xml_is_reread_fresh_when_adding(company, tmp_path):
+    """File XML ở Cần xem: lúc thêm thì đọc lại file (đủ trường), không dùng số liệu cũ lưu từ lần quét trước."""
+    db = company["kt"].db
+    sample_data(db)
+    root = tmp_path / "vao"
+    _xml(root / "hd.xml", 4321, hang="Bàn làm việc", tien=2_000_000)
+    f = InvoiceFolders(db)
+    f.save_settings({"vao": str(root), "tu_them": False})
+    _scan(f, "vao")
+    row = f.files("vao", F_REVIEW)[0]
+    # giả lập số liệu do bản cũ lưu: thiếu mặt hàng, thiếu dòng hàng
+    data = row["Data"]
+    data["values"]["MatHang"] = ""
+    data["dong"] = None
+    db.conn.execute("UPDATE TepDaQuet SET DuLieu = ? WHERE DuongDan = ?", (json.dumps(data), "hd.xml"))
+    v = f.fresh_values("vao", "hd.xml")
+    assert v["MatHang"] == "Bàn làm việc" and v["_Dong"] and v["GiaTriTruocThue"] == 2_000_000
+    assert v["TepTuongDoi"] == "hd.xml"

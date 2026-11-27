@@ -329,6 +329,7 @@ CREATE TABLE IF NOT EXISTS TepDaQuet (      -- file hóa đơn trong thư mục 
 
 # Cột thêm ở các phiên bản sau: tệp dữ liệu cũ được bổ sung khi mở (bảng, cột, kiểu).
 ADDED_COLUMNS = [
+    ("DoiTac", "TenCu", "TEXT"),                       # các tên cũ (đối tác đổi tên, giữ MST), cách nhau "; "
     ("HopDong", "ThoiGianThucHien", "INTEGER"),
     ("HopDong", "DonViThoiGian", "TEXT"),
     ("HopDong", "NhacTruocNgay", "INTEGER"),

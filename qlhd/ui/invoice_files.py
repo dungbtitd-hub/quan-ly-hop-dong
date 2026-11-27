@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QPageSize, QPainter, QPdfWriter, QTextDocument
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
+from PySide6.QtWidgets import (QCheckBox, QSpinBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMenu, QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 from ..core import gemini as gm
@@ -761,8 +761,14 @@ class FolderSettingsDialog(QDialog):
         f.addRow(hint("Phần mềm quét cả các thư mục con (Năm, Quý…). Chỉ xử lý file mới; file đã xử lý không nhập "
                       "lại, không ghi đè số liệu. Hóa đơn mới đọc được rõ ràng, không trùng thì tự thêm; "
                       "nghi trùng, thiếu thông tin, đọc không khớp mới để ở mục Cần xem."))
-        self.on_open = QCheckBox("Tự quét khi mở phần mềm và 3 phút một lần trong lúc mở")
+        self.on_open = QCheckBox("Tự quét khi mở phần mềm và định kỳ trong lúc mở, mỗi")
         self.on_open.setChecked(s["quet_khi_mo"])
+        self.every = QSpinBox()
+        self.every.setRange(1, 1440)
+        self.every.setSuffix(" phút")
+        self.every.setValue(s["phut_quet"])
+        self.every.setEnabled(s["quet_khi_mo"])
+        self.on_open.toggled.connect(self.every.setEnabled)
         self.auto_add = QCheckBox("Tự thêm hóa đơn mới đọc được rõ ràng (nghi trùng, chưa nhận ra hợp đồng… vẫn để "
                                   "Cần xem)")
         self.auto_add.setChecked(s["tu_them"])
@@ -772,7 +778,11 @@ class FolderSettingsDialog(QDialog):
             b.setChecked(s[k])
             types.addWidget(b)
         types.addStretch(1)
-        f.addRow(self.on_open)
+        orow = QHBoxLayout()
+        orow.addWidget(self.on_open)
+        orow.addWidget(self.every)
+        orow.addWidget(hint("(cần ngay thì bấm \"Quét ngay thư mục hóa đơn\")"), 1)
+        f.addRow(orow)
         f.addRow(self.auto_add)
         f.addRow("Loại file", types)
         lay.addWidget(box)
@@ -873,7 +883,7 @@ class FolderSettingsDialog(QDialog):
 
     def save(self):
         v = {k: e.text().strip() for k, e in self.dirs.items()}
-        v.update(quet_khi_mo=self.on_open.isChecked(), tu_them=self.auto_add.isChecked(), xml=self.t_xml.isChecked(),
+        v.update(quet_khi_mo=self.on_open.isChecked(), phut_quet=self.every.value(), tu_them=self.auto_add.isChecked(), xml=self.t_xml.isChecked(),
                  pdf=self.t_pdf.isChecked(), anh=self.t_img.isChecked())
         old = self.folders.settings()
         try:
@@ -1366,8 +1376,10 @@ class InvoiceFolderDialog(QDialog):
         if not self.ctx.can(TABLE[kind], "Them"):
             return error(self, "Tài khoản này không có quyền thêm hóa đơn loại này.")
         items = []
+        lic_row = self.ctx.acc.license()
+        mst = (lic_row["MaCongTy"] if lic_row else "") or ""
         for r in rows:
-            v = fo.load_values(r["Data"])
+            v = self.folders.fresh_values(kind, r["DuongDan"], mst) or fo.load_values(r["Data"])
             if not v:
                 items.append({"path": None, "file": r["Ten"], "values": {}, "status": "loi",
                               "notes": [r["GhiChu"] or "Chưa đọc được số liệu: nhập tay hoặc Đọc bằng Gemini"],

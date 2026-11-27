@@ -14,7 +14,7 @@ from ..core.contracts import (CONTRACT_STATUSES, DURATION_UNITS, INVOICE_FILTERS
 from ..core.reports import fmt_date, fmt_money
 from .filter_box import FilterBox, by_date, by_field
 from ..core.duplicates import CONFIRM_KEY as DUP_OK, duplicate_payments
-from .widgets import (VAT_HINT, DataTable, bulk_edit, confirm_duplicate, review_duplicates, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
+from .widgets import (VAT_HINT, DataTable, confirm, bulk_edit, confirm_duplicate, review_duplicates, FormDialog, button, confirm_changes, confirm_delete, error, hint, info,
                       page_title,
                       rate_field, require, run_safely, toolbar)
 
@@ -104,6 +104,18 @@ def partner_dialog(ctx, parent, values: dict | None = None, ma: str | None = Non
     dlg = FormDialog("Đối tác", fields, values, parent)
     while dlg.exec() == QDialog.Accepted:
         v = dlg.values()
+        same = ctx.cs.partner_by_mst(v.get("MaSoThue"), ma)
+        if same and not ma and (v.get("TenDoiTac") or "").strip().lower() != same["TenDoiTac"].lower():
+            # đối tác đổi tên, giữ MST: đổi tên đối tác đã có (không thêm đối tác thứ hai cùng MST)
+            if confirm(parent, f"Mã số thuế {v['MaSoThue']} đã có ở đối tác \"{same['TenDoiTac']}\".\n\n"
+                               f"Đối tác này đã đổi tên thành \"{v['TenDoiTac'].strip()}\"?\n\n"
+                               "Có: đổi tên đối tác đã có (tên cũ được lưu lại; hợp đồng đã ký giữ tên lúc ký, "
+                               "hợp đồng mới dùng tên mới).\nKhông: quay lại sửa."):
+                try:
+                    return ctx.cs.rename_partner(same["Ma"], v)
+                except ValidationError as e:
+                    error(parent, str(e))
+            continue
         while True:
             try:
                 return ctx.cs.save_partner(v, ma)
@@ -723,6 +735,7 @@ class CatalogPage(QWidget):
         tabs.addTab(w, "Loại hợp đồng")
         # đối tác
         self.partners = DataTable([("TenDoiTac", "Tên đối tác", "text"), ("MaSoThue", "MST", "text"),
+                                   ("TenCu", "Tên cũ", "text"),
                                    ("VaiTroDoiTac", "Vai trò", "text"), ("DiaChi", "Địa chỉ", "text"),
                                    ("NguoiLienHe", "Người liên hệ", "text"), ("DienThoai", "Điện thoại", "text")])
         self.partners.activated_row.connect(lambda _: self.edit_partner())
